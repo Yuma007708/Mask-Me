@@ -39,7 +39,7 @@ Mask-Me/
 │     ├─ Views/                       # Home / Editor / RecentItems / MediaPicker / TrackingBadge
 │     ├─ Model/                       # FaceLandmarking / MediaPipe アダプタ / 司令塔 / 最近の項目
 │     └─ Export/                      # Photos 保存 / 動画モザイクエクスポート
-└─ .github/workflows/ci.yml           # build / test / lint（コア層のみ）
+└─ .github/workflows/ci.yml           # コア build/test/lint + アプリ build（Simulator）
 ```
 
 `MosaicCore` は `FaceLandmarkSet`（正規化座標の値型）だけを入力に取り、MediaPipe の型は
@@ -76,9 +76,16 @@ swift test
 swiftlint lint --strict
 ```
 
-CI（`.github/workflows/ci.yml`, macOS ランナー）でも上記を実行します。Metal の GPU 実行は
-実機 / シミュレータ依存のため、ユニットテストは追従ロジックとマスク生成（`CGPath`）を対象に
-しています。
+CI（`.github/workflows/ci.yml`, macOS ランナー）は次の 3 ジョブを実行します。
+
+- **lint**：`swiftlint --strict`（コア層）
+- **build-test**：`swift build` / `swift test`（`MosaicCore`）
+- **build-app**：`xcodegen generate` → `xcodebuild`（iOS Simulator 向け）。CocoaPods は
+  使わず（MediaPipe コードは `canImport` で保護）、アプリターゲット・SwiftUI・Metal シェーダー
+  のコンパイルを検証します。
+
+Metal の GPU 実行は実機 / シミュレータ依存のため、ユニットテストは追従ロジックとマスク生成
+（`CGPath`）を対象にしています。
 
 ## MediaPipe の解決手順（アプリターゲット）
 

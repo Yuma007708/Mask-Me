@@ -31,3 +31,7 @@ targets:
         GENERATE_INFOPLIST_FILE: NO
     info:
       path: MaskMe/Info.plist
+    # Generates a shared "MaskMe" scheme so `xcodebuild -scheme MaskMe`
+    # (and SwiftPM package resolution) works in CI.
+    scheme:
+      testTargets: []
