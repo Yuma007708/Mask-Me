@@ -10,8 +10,16 @@ public struct FaceMaskBuilder: Sendable {
     /// as the face moves between frames.
     public let dilation: CGFloat
 
-    public init(dilation: CGFloat = 0.015) {
+    /// Which regions to include in the mask. Toggling a region off leaves it
+    /// un-mosaicked. Defaults to every region.
+    public var enabledRegions: Set<FaceRegion>
+
+    public init(
+        dilation: CGFloat = 0.015,
+        enabledRegions: Set<FaceRegion> = Set(FaceRegion.allCases)
+    ) {
         self.dilation = dilation
+        self.enabledRegions = enabledRegions
     }
 
     /// A region's fill path together with the mask intensity it should write.
@@ -26,7 +34,7 @@ public struct FaceMaskBuilder: Sendable {
         let inset = dilation * min(size.width, size.height)
         // Face first so eyes/lips overwrite it with their higher mask values.
         let order: [FaceRegion] = [.faceOval, .leftEye, .rightEye, .lips]
-        return order.compactMap { region in
+        return order.filter(enabledRegions.contains).compactMap { region in
             let points = landmarks.polygon(for: region, in: size)
             guard points.count >= 3 else { return nil }
             guard let path = Self.smoothClosedPath(through: points, expandedBy: inset) else {

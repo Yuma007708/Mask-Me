@@ -11,6 +11,11 @@ DerivedData/
 
 # CocoaPods (MediaPipe is integrated via Pods in the app target)
 Pods/
+Podfile.lock
+
+# XcodeGen output (regenerate with `xcodegen generate`)
+App/MaskMe.xcodeproj/
+App/MaskMe.xcworkspace/
 
 # macOS
 .DS_Store

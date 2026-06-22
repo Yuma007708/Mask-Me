@@ -12,7 +12,7 @@ concurrency:
 jobs:
   lint:
     name: SwiftLint
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
 
@@ -24,12 +24,9 @@ jobs:
 
   build-test:
     name: Build & Test (MosaicCore)
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
-
-      - name: Select Xcode
-        run: sudo xcode-select -switch /Applications/Xcode_15.4.app
 
       - name: Show toolchain
         run: swift --version
@@ -51,3 +48,34 @@ jobs:
         run: |
           set -euo pipefail
           swift test -v
+
+  build-app:
+    name: Build App (iOS Simulator)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show Xcode
+        run: xcodebuild -version
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        working-directory: App
+        run: xcodegen generate
+
+      # Builds without CocoaPods on purpose: the MediaPipe glue is gated on
+      # `canImport(MediaPipeTasksVision)`, so the app compiles pod-free. This
+      # keeps the job fast and network-independent while still verifying the
+      # app target, the SwiftUI views, and the Metal shader compilation.
+      - name: Build app for simulator
+        run: |
+          set -euo pipefail
+          xcodebuild build \
+            -project App/MaskMe.xcodeproj \
+            -scheme MaskMe \
+            -configuration Debug \
+            -destination 'generic/platform=iOS Simulator' \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO
