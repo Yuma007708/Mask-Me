@@ -1,0 +1,257 @@
+import Foundation
+
+#if canImport(Metal) && canImport(MetalKit)
+import Metal
+import MetalKit
+import Combine
+
+/// Parameters handed to `mosaicKernel`. The memory layout mirrors the
+/// `MosaicParams` struct in `MosaicShader.metal` exactly — keep them in sync.
+public struct MosaicParams: Equatable {
+    public var faceBlock: Float
+    public var eyeBlock: Float
+    public var mouthBlock: Float
+    public var edgeSoftness: Float
+    public var width: UInt32
+    public var height: UInt32
+
+    public init(
+        faceBlock: Float = 24,
+        eyeBlock: Float = 10,
+        mouthBlock: Float = 8,
+        edgeSoftness: Float = 0.35,
+        width: UInt32 = 0,
+        height: UInt32 = 0
+    ) {
+        self.faceBlock = faceBlock
+        self.eyeBlock = eyeBlock
+        self.mouthBlock = mouthBlock
+        self.edgeSoftness = edgeSoftness
+        self.width = width
+        self.height = height
+    }
+}
+
+/// Errors thrown while setting up the Metal pipeline. The most common in CI /
+/// headless contexts is ``noDevice`` — there simply is no GPU to bind to.
+public enum MosaicRendererError: Error, Equatable {
+    case noDevice
+    case libraryUnavailable
+    case functionMissing(String)
+    case commandQueueUnavailable
+}
+
+/// Drives the whole effect for a single frame: derive the contour mask from
+/// landmarks, run the from-scratch Metal pixelation kernel, and publish a
+/// smoothed ``TrackingStatus``.
+///
+/// The renderer is deliberately Metal-only and UI-agnostic. SwiftUI observers
+/// subscribe to ``statusPublisher`` (or use ``TrackingStatusStore``); a live
+/// preview can also be driven through ``MTKViewDelegate`` conformance.
+public final class MosaicRenderer: NSObject {
+    public let device: MTLDevice
+    private let commandQueue: MTLCommandQueue
+    private let pipelineState: MTLComputePipelineState
+    private let maskBuilder: FaceMaskBuilder
+
+    /// Block sizes / edge softness. Mutate to retune the look at runtime.
+    public var params: MosaicParams
+
+    private var evaluator: TrackingEvaluator
+    private let statusSubject = CurrentValueSubject<TrackingStatus, Never>(.idle)
+
+    /// The latest published tracking status.
+    public var status: TrackingStatus { statusSubject.value }
+    /// Combine stream of tracking status updates, delivered on the main queue.
+    public var statusPublisher: AnyPublisher<TrackingStatus, Never> {
+        statusSubject.receive(on: DispatchQueue.main).eraseToAnyPublisher()
+    }
+
+    private var maskTexture: MTLTexture?
+
+    /// Creates a renderer.
+    /// - Parameters:
+    ///   - device: GPU to use. Defaults to the system default device; throws
+    ///     ``MosaicRendererError/noDevice`` when none exists (e.g. headless CI).
+    ///   - params: initial mosaic parameters.
+    ///   - maskBuilder: contour-mask builder.
+    ///   - evaluator: tracking-rate state machine.
+    public init(
+        device: MTLDevice? = MTLCreateSystemDefaultDevice(),
+        params: MosaicParams = MosaicParams(),
+        maskBuilder: FaceMaskBuilder = FaceMaskBuilder(),
+        evaluator: TrackingEvaluator = TrackingEvaluator()
+    ) throws {
+        guard let device = device else { throw MosaicRendererError.noDevice }
+        self.device = device
+
+        guard let library = try? device.makeDefaultLibrary(bundle: .module) else {
+            throw MosaicRendererError.libraryUnavailable
+        }
+        guard let function = library.makeFunction(name: "mosaicKernel") else {
+            throw MosaicRendererError.functionMissing("mosaicKernel")
+        }
+        self.pipelineState = try device.makeComputePipelineState(function: function)
+
+        guard let queue = device.makeCommandQueue() else {
+            throw MosaicRendererError.commandQueueUnavailable
+        }
+        self.commandQueue = queue
+        self.params = params
+        self.maskBuilder = maskBuilder
+        self.evaluator = evaluator
+        super.init()
+    }
+
+    // MARK: - Frame processing
+
+    /// Applies the mosaic to `input`, writing into `output` (same dimensions).
+    ///
+    /// Passing `landmarks == nil` is fully supported and never crashes: the
+    /// tracking state moves to `.lost` / `.searching`, the original frame is
+    /// copied through untouched, and the very next confident detection resumes
+    /// the mosaic on that frame with no warm-up delay.
+    @discardableResult
+    public func render(
+        input: MTLTexture,
+        into output: MTLTexture,
+        landmarks: FaceLandmarkSet?
+    ) -> TrackingStatus {
+        let newStatus = evaluator.update(confidence: landmarks?.confidence)
+        statusSubject.send(newStatus)
+
+        let width = input.width
+        let height = input.height
+
+        // No usable face this frame → pass the frame through unchanged.
+        guard let landmarks, newStatus.faceDetected,
+              let mask = updatedMaskTexture(for: landmarks, width: width, height: height) else {
+            copy(from: input, to: output)
+            return newStatus
+        }
+
+        var kernelParams = params
+        kernelParams.width = UInt32(width)
+        kernelParams.height = UInt32(height)
+
+        guard let commandBuffer = commandQueue.makeCommandBuffer(),
+              let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            copy(from: input, to: output)
+            return newStatus
+        }
+
+        encoder.setComputePipelineState(pipelineState)
+        encoder.setTexture(input, index: 0)
+        encoder.setTexture(output, index: 1)
+        encoder.setTexture(mask, index: 2)
+        withUnsafeBytes(of: &kernelParams) { raw in
+            encoder.setBytes(raw.baseAddress!, length: raw.count, index: 0)
+        }
+
+        let threadgroupSize = MTLSize(width: 16, height: 16, depth: 1)
+        let threadgroups = MTLSize(
+            width: (width + threadgroupSize.width - 1) / threadgroupSize.width,
+            height: (height + threadgroupSize.height - 1) / threadgroupSize.height,
+            depth: 1
+        )
+        encoder.dispatchThreadgroups(threadgroups, threadsPerThreadgroup: threadgroupSize)
+        encoder.endEncoding()
+        commandBuffer.commit()
+
+        return newStatus
+    }
+
+    /// Resets tracking back to idle (e.g. when switching media).
+    public func reset() {
+        evaluator.reset()
+        statusSubject.send(.idle)
+    }
+
+    // MARK: - Mask management
+
+    private func updatedMaskTexture(
+        for landmarks: FaceLandmarkSet,
+        width: Int,
+        height: Int
+    ) -> MTLTexture? {
+        guard let rendered = maskBuilder.renderMask(
+            for: landmarks,
+            width: width,
+            height: height
+        ) else {
+            return nil
+        }
+
+        let texture = reuseOrMakeMaskTexture(width: width, height: height)
+        guard let texture else { return nil }
+
+        rendered.bytes.withUnsafeBytes { raw in
+            texture.replace(
+                region: MTLRegionMake2D(0, 0, width, height),
+                mipmapLevel: 0,
+                withBytes: raw.baseAddress!,
+                bytesPerRow: rendered.bytesPerRow
+            )
+        }
+        return texture
+    }
+
+    private func reuseOrMakeMaskTexture(width: Int, height: Int) -> MTLTexture? {
+        if let existing = maskTexture, existing.width == width, existing.height == height {
+            return existing
+        }
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .r8Unorm,
+            width: width,
+            height: height,
+            mipmapped: false
+        )
+        descriptor.usage = [.shaderRead]
+        let texture = device.makeTexture(descriptor: descriptor)
+        maskTexture = texture
+        return texture
+    }
+
+    private func copy(from source: MTLTexture, to destination: MTLTexture) {
+        guard let commandBuffer = commandQueue.makeCommandBuffer(),
+              let blit = commandBuffer.makeBlitCommandEncoder() else { return }
+        let size = MTLSize(
+            width: min(source.width, destination.width),
+            height: min(source.height, destination.height),
+            depth: 1
+        )
+        blit.copy(
+            from: source,
+            sourceSlice: 0,
+            sourceLevel: 0,
+            sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+            sourceSize: size,
+            to: destination,
+            destinationSlice: 0,
+            destinationLevel: 0,
+            destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
+        )
+        blit.endEncoding()
+        commandBuffer.commit()
+    }
+}
+
+/// SwiftUI-friendly observable wrapper around a renderer's status stream.
+///
+/// ```swift
+/// @StateObject private var tracking = TrackingStatusStore(renderer: renderer)
+/// // ...
+/// Text("追従率 \(Int(tracking.status.rate))%")
+/// ```
+@MainActor
+public final class TrackingStatusStore: ObservableObject {
+    @Published public private(set) var status: TrackingStatus = .idle
+    private var cancellable: AnyCancellable?
+
+    public init(renderer: MosaicRenderer) {
+        cancellable = renderer.statusPublisher
+            .sink { [weak self] in self?.status = $0 }
+    }
+}
+
+#endif

@@ -1,0 +1,38 @@
+included:
+  - Sources
+  - Tests
+  - App
+
+excluded:
+  - .build
+
+disabled_rules:
+  - todo
+
+opt_in_rules:
+  - empty_count
+  - closure_spacing
+  - explicit_init
+  - first_where
+  - sorted_first_last
+
+line_length:
+  warning: 140
+  error: 200
+  ignores_comments: true
+
+identifier_name:
+  min_length: 1          # short math names (x, y, z, n, b) are intentional
+  excluded:
+    - id
+
+type_name:
+  min_length: 3
+
+function_body_length:
+  warning: 80
+  error: 150
+
+file_length:
+  warning: 500
+  error: 800
