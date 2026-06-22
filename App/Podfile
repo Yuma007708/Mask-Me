@@ -1,0 +1,9 @@
+# Run `xcodegen generate` first, then `pod install`, then open MaskMe.xcworkspace.
+platform :ios, '16.0'
+
+target 'MaskMe' do
+  use_frameworks!
+  # MediaPipe Face Landmarker (478-point face mesh). No official SwiftPM
+  # distribution, so it is integrated into the app target via CocoaPods.
+  pod 'MediaPipeTasksVision'
+end

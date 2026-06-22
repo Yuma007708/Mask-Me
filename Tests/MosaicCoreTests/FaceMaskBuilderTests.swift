@@ -82,6 +82,18 @@ final class FaceMaskBuilderTests: XCTestCase {
         XCTAssertNil(FaceMaskBuilder.smoothClosedPath(through: two, expandedBy: 0))
     }
 
+    func testDisabledRegionsAreExcluded() {
+        let builder = FaceMaskBuilder(dilation: 0, enabledRegions: [.faceOval])
+        let paths = builder.regionPaths(for: makeLandmarks(), in: imageSize)
+        XCTAssertEqual(paths.count, 1)
+        XCTAssertEqual(paths.first?.value, FaceRegion.faceOval.maskValue)
+    }
+
+    func testNoEnabledRegionsYieldsEmptyMask() {
+        let builder = FaceMaskBuilder(dilation: 0, enabledRegions: [])
+        XCTAssertTrue(builder.regionPaths(for: makeLandmarks(), in: imageSize).isEmpty)
+    }
+
     func testIncompleteMeshYieldsNoPaths() {
         // A partial detection (fewer than the indices reference) is tolerated.
         let sparse = FaceLandmarkSet(

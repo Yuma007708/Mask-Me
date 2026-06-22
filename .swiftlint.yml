@@ -1,10 +1,12 @@
+# CI lints only the SwiftPM core (the unit it builds & tests). The app target
+# (App/) is built in Xcode with CocoaPods, so it is linted there, not in CI.
 included:
   - Sources
   - Tests
-  - App
 
 excluded:
   - .build
+  - App
 
 disabled_rules:
   - todo

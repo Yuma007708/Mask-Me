@@ -52,10 +52,17 @@ public final class MosaicRenderer: NSObject {
     public let device: MTLDevice
     private let commandQueue: MTLCommandQueue
     private let pipelineState: MTLComputePipelineState
-    private let maskBuilder: FaceMaskBuilder
+    private var maskBuilder: FaceMaskBuilder
 
     /// Block sizes / edge softness. Mutate to retune the look at runtime.
     public var params: MosaicParams
+
+    /// Which face regions are mosaicked. Toggle at runtime to enable/disable
+    /// the face, eyes, or mouth independently.
+    public var enabledRegions: Set<FaceRegion> {
+        get { maskBuilder.enabledRegions }
+        set { maskBuilder.enabledRegions = newValue }
+    }
 
     private var evaluator: TrackingEvaluator
     private let statusSubject = CurrentValueSubject<TrackingStatus, Never>(.idle)
@@ -111,11 +118,16 @@ public final class MosaicRenderer: NSObject {
     /// tracking state moves to `.lost` / `.searching`, the original frame is
     /// copied through untouched, and the very next confident detection resumes
     /// the mosaic on that frame with no warm-up delay.
+    ///
+    /// - Parameter waitForCompletion: when `true`, blocks until the GPU work
+    ///   finishes. Offline video export needs this before reading back / writing
+    ///   the output frame; live preview should leave it `false`.
     @discardableResult
     public func render(
         input: MTLTexture,
         into output: MTLTexture,
-        landmarks: FaceLandmarkSet?
+        landmarks: FaceLandmarkSet?,
+        waitForCompletion: Bool = false
     ) -> TrackingStatus {
         let newStatus = evaluator.update(confidence: landmarks?.confidence)
         statusSubject.send(newStatus)
@@ -126,7 +138,7 @@ public final class MosaicRenderer: NSObject {
         // No usable face this frame → pass the frame through unchanged.
         guard let landmarks, newStatus.faceDetected,
               let mask = updatedMaskTexture(for: landmarks, width: width, height: height) else {
-            copy(from: input, to: output)
+            copy(from: input, to: output, waitForCompletion: waitForCompletion)
             return newStatus
         }
 
@@ -136,7 +148,7 @@ public final class MosaicRenderer: NSObject {
 
         guard let commandBuffer = commandQueue.makeCommandBuffer(),
               let encoder = commandBuffer.makeComputeCommandEncoder() else {
-            copy(from: input, to: output)
+            copy(from: input, to: output, waitForCompletion: waitForCompletion)
             return newStatus
         }
 
@@ -157,6 +169,9 @@ public final class MosaicRenderer: NSObject {
         encoder.dispatchThreadgroups(threadgroups, threadsPerThreadgroup: threadgroupSize)
         encoder.endEncoding()
         commandBuffer.commit()
+        if waitForCompletion {
+            commandBuffer.waitUntilCompleted()
+        }
 
         return newStatus
     }
@@ -212,7 +227,11 @@ public final class MosaicRenderer: NSObject {
         return texture
     }
 
-    private func copy(from source: MTLTexture, to destination: MTLTexture) {
+    private func copy(
+        from source: MTLTexture,
+        to destination: MTLTexture,
+        waitForCompletion: Bool = false
+    ) {
         guard let commandBuffer = commandQueue.makeCommandBuffer(),
               let blit = commandBuffer.makeBlitCommandEncoder() else { return }
         let size = MTLSize(
@@ -233,6 +252,9 @@ public final class MosaicRenderer: NSObject {
         )
         blit.endEncoding()
         commandBuffer.commit()
+        if waitForCompletion {
+            commandBuffer.waitUntilCompleted()
+        }
     }
 }
 

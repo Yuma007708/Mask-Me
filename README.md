@@ -26,18 +26,47 @@ Mask-Me/
 ├─ Sources/MosaicCore/
 │  ├─ FaceLandmarks.swift              # ランドマーク抽象（478点）+ 領域インデックス
 │  ├─ TrackingStatus.swift            # 追従率・状態の純粋ロジック
-│  ├─ FaceMaskBuilder.swift           # ランドマーク → CGPath → マスク
+│  ├─ FaceMaskBuilder.swift           # ランドマーク → CGPath → マスク（領域ON/OFF対応）
 │  ├─ MosaicRenderer.swift            # 解析 + Metal 描画クラス
+│  ├─ MetalTextureUtilities.swift     # CGImage/CVPixelBuffer ↔ MTLTexture 変換
 │  └─ Shaders/MosaicShader.metal      # ピクセルシェーダー
 ├─ Tests/MosaicCoreTests/             # 追従ロジック・マスク生成のユニットテスト
-├─ App/                               # アプリターゲット（MediaPipe 結線・SwiftUI）
-│  └─ MediaPipeFaceLandmarkerAdapter.swift
-└─ .github/workflows/ci.yml           # build / test / lint
+├─ App/                               # アプリターゲット（XcodeGen + CocoaPods）
+│  ├─ project.yml                     # XcodeGen 定義
+│  ├─ Podfile                         # MediaPipeTasksVision
+│  └─ MaskMe/
+│     ├─ MaskMeApp.swift              # @main / NavigationStack
+│     ├─ Views/                       # Home / Editor / RecentItems / MediaPicker / TrackingBadge
+│     ├─ Model/                       # FaceLandmarking / MediaPipe アダプタ / 司令塔 / 最近の項目
+│     └─ Export/                      # Photos 保存 / 動画モザイクエクスポート
+└─ .github/workflows/ci.yml           # build / test / lint（コア層のみ）
 ```
 
 `MosaicCore` は `FaceLandmarkSet`（正規化座標の値型）だけを入力に取り、MediaPipe の型は
 一切知りません。アプリ側の `MediaPipeFaceLandmarkerAdapter` が
-`FaceLandmarkerResult → FaceLandmarkSet` を変換してコアへ渡します。
+`FaceLandmarkerResult → FaceLandmarkSet` を変換してコアへ渡します。UI / ViewModel は
+`FaceLandmarking` プロトコル越しに利用するため、pod 未導入でもアプリはコンパイルできます
+（その場合は顔未検出として原画像を表示）。
+
+## アプリのビルド・実行
+
+```bash
+cd App
+xcodegen generate          # MaskMe.xcodeproj を生成
+pod install                # MediaPipe を結線（MaskMe.xcworkspace 生成）
+open MaskMe.xcworkspace
+```
+
+`face_landmarker.task` モデルを
+[MediaPipe Models](https://ai.google.dev/edge/mediapipe/solutions/vision/face_landmarker)
+からダウンロードし、アプリターゲットのバンドルに追加してください。
+
+### 画面構成（王道 UI）
+
+- **ホーム**：上部に「写真編集」「動画編集」の横並びボタン、下部に「最近の項目」（縦スクロール
+  リスト、横スワイプで削除）。
+- **エディタ**：モザイク結果のプレビュー＋追従バッジ（追従率%・状態）、粗さスライダー（顔/目元/
+  口元/ふち）と対象トグル、写真は「保存」／動画は「エクスポート」（進捗表示）。
 
 ## ビルド・テスト（コア層）
 
