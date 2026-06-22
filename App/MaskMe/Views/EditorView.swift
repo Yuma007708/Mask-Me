@@ -4,7 +4,7 @@ import SwiftUI
 /// mosaic controls below, and a save / export action in the toolbar.
 struct EditorView: View {
     let media: PickedMedia
-    @StateObject private var model
+    @StateObject private var model: MosaicEditorModel
 
     init(media: PickedMedia, recents: RecentItemsStore) {
         self.media = media
