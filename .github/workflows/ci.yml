@@ -54,12 +54,14 @@ jobs:
 
   build-app:
     name: Build App (iOS Simulator)
-    runs-on: macos-14
+    # macos-15 ships Xcode 16, which can open the project format XcodeGen emits
+    # (objectVersion 77). Xcode 15.4 on macos-14 cannot.
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
 
-      - name: Select Xcode
-        run: sudo xcode-select -switch /Applications/Xcode_15.4.app
+      - name: Show Xcode
+        run: xcodebuild -version
 
       - name: Install XcodeGen
         run: brew install xcodegen
