@@ -1,0 +1,37 @@
+name: MaskMe
+options:
+  bundleIdPrefix: com.maskme
+  deploymentTarget:
+    iOS: "16.0"
+  createIntermediateGroups: true
+
+packages:
+  MosaicCore:
+    # The MediaPipe-free core lives one directory up as a SwiftPM package.
+    path: ../
+
+targets:
+  MaskMe:
+    type: application
+    platform: iOS
+    sources:
+      - path: MaskMe
+    dependencies:
+      - package: MosaicCore
+        product: MosaicCore
+    settings:
+      base:
+        INFOPLIST_FILE: MaskMe/Info.plist
+        PRODUCT_BUNDLE_IDENTIFIER: com.maskme.app
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SWIFT_VERSION: "5.9"
+        ENABLE_USER_SCRIPT_SANDBOXING: YES
+        GENERATE_INFOPLIST_FILE: NO
+    info:
+      path: MaskMe/Info.plist
+    # Generates a shared "MaskMe" scheme so `xcodebuild -scheme MaskMe`
+    # (and SwiftPM package resolution) works in CI.
+    scheme:
+      testTargets: []
