@@ -22,7 +22,7 @@ public final class MosaicEditorModel: ObservableObject {
     @Published public private(set) var isLoading = false
 
     // Controls (bound to the editor sliders / toggles)
-    @Published public var blockSize: Float = 18
+    @Published public var blockSize: Float = 28
     @Published public var edgeSoftness: Float = 0.35
     @Published public var faceEnabled = true
     @Published public var eyesEnabled = true

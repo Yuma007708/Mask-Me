@@ -16,7 +16,7 @@ public struct MosaicParams: Equatable {
     public var height: UInt32
 
     public init(
-        block: Float = 18,
+        block: Float = 28,
         edgeSoftness: Float = 0.35,
         width: UInt32 = 0,
         height: UInt32 = 0
