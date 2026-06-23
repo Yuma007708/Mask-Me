@@ -119,43 +119,50 @@ public final class VideoMosaicExporter: @unchecked Sendable {
         guard let cache = textureCache else { return }
 
         while let sample = trackOutput.copyNextSampleBuffer() {
-            guard let sourceBuffer = CMSampleBufferGetImageBuffer(sample) else { continue }
-            let pts = CMSampleBufferGetPresentationTimeStamp(sample)
-            let timeSec = CMTimeGetSeconds(pts)
-            let timestampMs = Int(timeSec * 1000)
+            // 各フレームの一時オブジェクト（CIImage/CGImage/テクスチャ等）を都度解放し、
+            // 長尺動画でメモリが膨張してジェットサム(強制終了)される問題を防ぐ。
+            autoreleasepool {
+                guard let sourceBuffer = CMSampleBufferGetImageBuffer(sample) else { return }
+                let pts = CMSampleBufferGetPresentationTimeStamp(sample)
+                let timeSec = CMTimeGetSeconds(pts)
+                let timestampMs = Int(timeSec * 1000)
 
-            if frameIndex % detectionInterval == 0 {
-                if faceEnabled {
-                    // キャッシュから近傍フレームを探す（なければ新規検出）
-                    let fromCache = lookupCache(detectionCache, at: timeSec)
-                    if !fromCache.isEmpty {
-                        cachedLandmarkSets = filterToSelected(fromCache, targets: selectedFaceTargets)
+                if frameIndex % detectionInterval == 0 {
+                    if faceEnabled {
+                        // キャッシュから近傍フレームを探す（なければ新規検出）
+                        let fromCache = lookupCache(detectionCache, at: timeSec)
+                        if !fromCache.isEmpty {
+                            cachedLandmarkSets = filterToSelected(fromCache, targets: selectedFaceTargets)
+                        } else {
+                            let detected = detectAll(in: sourceBuffer, timestampMs: timestampMs)
+                            cachedLandmarkSets = filterToSelected(detected, targets: selectedFaceTargets)
+                        }
                     } else {
-                        let detected = detectAll(in: sourceBuffer, timestampMs: timestampMs)
-                        cachedLandmarkSets = filterToSelected(detected, targets: selectedFaceTargets)
+                        cachedLandmarkSets = []
                     }
-                } else {
-                    cachedLandmarkSets = []
                 }
+
+                let additionalPaths = manualRegions.map { region -> FaceMaskBuilder.RegionPath in
+                    let path = FaceMaskBuilder.rectPath(from: region.normalizedRect, in: videoSize)
+                    return FaceMaskBuilder.RegionPath(path: path, value: 0.4)
+                }
+
+                try? mosaicFrame(
+                    sourceBuffer: sourceBuffer,
+                    pts: pts,
+                    landmarkSets: cachedLandmarkSets,
+                    additionalPaths: additionalPaths,
+                    adaptor: adaptor,
+                    input: writerInput,
+                    cache: cache
+                )
+
+                // Metal テクスチャキャッシュに溜まった参照を解放。
+                CVMetalTextureCacheFlush(cache, 0)
+
+                frameIndex += 1
+                progress(min(timeSec / totalSeconds, 1.0))
             }
-
-            let additionalPaths = manualRegions.map { region -> FaceMaskBuilder.RegionPath in
-                let path = FaceMaskBuilder.rectPath(from: region.normalizedRect, in: videoSize)
-                return FaceMaskBuilder.RegionPath(path: path, value: 0.4)
-            }
-
-            try? mosaicFrame(
-                sourceBuffer: sourceBuffer,
-                pts: pts,
-                landmarkSets: cachedLandmarkSets,
-                additionalPaths: additionalPaths,
-                adaptor: adaptor,
-                input: writerInput,
-                cache: cache
-            )
-
-            frameIndex += 1
-            progress(min(timeSec / totalSeconds, 1.0))
         }
     }
 
