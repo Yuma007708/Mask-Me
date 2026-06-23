@@ -30,6 +30,10 @@ public struct FaceMaskBuilder: Sendable {
     public struct RegionPath: Sendable {
         public let path: CGPath
         public let value: Float
+        public init(path: CGPath, value: Float) {
+            self.path = path
+            self.value = value
+        }
     }
 
     /// Builds one fill path per region present in `landmarks`, in painter order
@@ -102,6 +106,61 @@ public struct FaceMaskBuilder: Sendable {
             return true
         }
         return success ? (bytes, bytesPerRow) : nil
+    }
+
+    /// 複数の顔ランドマークセットを1枚のマスクに合成する。
+    /// 追加パス（矩形など）を組み合わせることもできる。
+    public func renderMask(
+        for landmarkSets: [FaceLandmarkSet],
+        additionalPaths: [RegionPath] = [],
+        width: Int,
+        height: Int
+    ) -> (bytes: [UInt8], bytesPerRow: Int)? {
+        guard width > 0, height > 0 else { return nil }
+        let bytesPerRow = width
+        var bytes = [UInt8](repeating: 0, count: bytesPerRow * height)
+        let size = CGSize(width: width, height: height)
+        let success: Bool = bytes.withUnsafeMutableBytes { raw -> Bool in
+            guard let base = raw.baseAddress,
+                  let context = CGContext(
+                      data: base,
+                      width: width,
+                      height: height,
+                      bitsPerComponent: 8,
+                      bytesPerRow: bytesPerRow,
+                      space: CGColorSpaceCreateDeviceGray(),
+                      bitmapInfo: CGImageAlphaInfo.none.rawValue
+                  ) else {
+                return false
+            }
+            for landmarks in landmarkSets {
+                for region in regionPaths(for: landmarks, in: size) {
+                    context.addPath(region.path)
+                    context.setFillColor(gray: CGFloat(region.value), alpha: 1)
+                    context.fillPath()
+                }
+            }
+            for region in additionalPaths {
+                context.addPath(region.path)
+                context.setFillColor(gray: CGFloat(region.value), alpha: 1)
+                context.fillPath()
+            }
+            return true
+        }
+        return success ? (bytes, bytesPerRow) : nil
+    }
+
+    /// 正規化矩形（0-1）をピクセル座標の CGPath に変換する。
+    public static func rectPath(from normalizedRect: CGRect, in size: CGSize) -> CGPath {
+        let rect = CGRect(
+            x: normalizedRect.origin.x * size.width,
+            y: normalizedRect.origin.y * size.height,
+            width: normalizedRect.width * size.width,
+            height: normalizedRect.height * size.height
+        )
+        let path = CGMutablePath()
+        path.addRect(rect)
+        return path
     }
 
     // MARK: - Path construction

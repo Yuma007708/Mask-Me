@@ -6,9 +6,8 @@ import MosaicCore
 #if canImport(Metal)
 import Metal
 
-/// Reads a video frame-by-frame, applies the face mosaic on the GPU, and writes
-/// a new H.264 file. Reports progress as a `0...1` fraction.
-public final class VideoMosaicExporter {
+/// 動画をフレームごとに処理してモザイクを適用し、新しい .mov ファイルを生成する。
+public final class VideoMosaicExporter: @unchecked Sendable {
     public enum ExportError: Error {
         case noVideoTrack
         case readerSetupFailed
@@ -31,10 +30,19 @@ public final class VideoMosaicExporter {
         )
     }
 
-    /// Exports `asset` to a temporary `.mov` and returns its URL.
+    /// 動画をエクスポートして一時 URL を返す。
+    /// - Parameters:
+    ///   - selectedFaceTargets: モザイク対象として選択された顔。空の場合は全顔に適用。
+    ///   - manualRegions: 手動指定矩形（全フレームに適用）。
+    ///   - detectionCache: 事前スキャンで得た検出キャッシュ（不使用のときは空辞書）。
+    ///   - faceEnabled: 顔モザイク全体の ON/OFF。false なら手動矩形のみ適用。
     public func export(
         asset: AVAsset,
-        progress: @MainActor @escaping (Double) -> Void
+        selectedFaceTargets: [FaceTarget] = [],
+        manualRegions: [ManualRegion] = [],
+        detectionCache: [Double: [FaceLandmarkSet]] = [:],
+        faceEnabled: Bool = true,
+        progress: @Sendable @escaping (Double) -> Void
     ) async throws -> URL {
         guard let track = try await asset.loadTracks(withMediaType: .video).first else {
             throw ExportError.noVideoTrack
@@ -50,7 +58,6 @@ public final class VideoMosaicExporter {
 
         let outputURL = makeOutputURL()
         let writer = try AVAssetWriter(outputURL: outputURL, fileType: .mov)
-        // Render in the sensor's natural orientation; `transform` rotates on play.
         let (writerInput, adaptor) = try makeWriterInput(size: naturalSize, transform: transform)
         guard writer.canAdd(writerInput) else { throw ExportError.writerSetupFailed }
         writer.add(writerInput)
@@ -60,14 +67,25 @@ public final class VideoMosaicExporter {
         writer.startSession(atSourceTime: .zero)
         renderer.reset()
 
-        try await processFrames(
-            reader: reader,
-            trackOutput: trackOutput,
-            writerInput: writerInput,
-            adaptor: adaptor,
-            duration: duration,
-            progress: progress
-        )
+        let targets = selectedFaceTargets
+        let regions = manualRegions
+        let cache = detectionCache
+        let enabled = faceEnabled
+
+        try await Task.detached(priority: .userInitiated) { [self] in
+            self.processFrames(
+                trackOutput: trackOutput,
+                writerInput: writerInput,
+                adaptor: adaptor,
+                duration: duration,
+                selectedFaceTargets: targets,
+                manualRegions: regions,
+                detectionCache: cache,
+                faceEnabled: enabled,
+                videoSize: naturalSize,
+                progress: progress
+            )
+        }.value
 
         writerInput.markAsFinished()
         await writer.finishWriting()
@@ -75,47 +93,84 @@ public final class VideoMosaicExporter {
         guard writer.status == .completed else {
             throw writer.error ?? ExportError.writerSetupFailed
         }
-        await progress(1.0)
+        progress(1.0)
         return outputURL
     }
 
     // MARK: - Frame loop
 
     private func processFrames(
-        reader: AVAssetReader,
         trackOutput: AVAssetReaderOutput,
         writerInput: AVAssetWriterInput,
         adaptor: AVAssetWriterInputPixelBufferAdaptor,
         duration: CMTime,
-        progress: @MainActor @escaping (Double) -> Void
-    ) async throws {
+        selectedFaceTargets: [FaceTarget],
+        manualRegions: [ManualRegion],
+        detectionCache: [Double: [FaceLandmarkSet]],
+        faceEnabled: Bool,
+        videoSize: CGSize,
+        progress: @Sendable (Double) -> Void
+    ) {
         let totalSeconds = max(CMTimeGetSeconds(duration), 0.001)
+        let detectionInterval = 2
+        var frameIndex = 0
+        var cachedLandmarkSets: [FaceLandmarkSet] = []
+
+        guard let cache = textureCache else { return }
 
         while let sample = trackOutput.copyNextSampleBuffer() {
             guard let sourceBuffer = CMSampleBufferGetImageBuffer(sample) else { continue }
             let pts = CMSampleBufferGetPresentationTimeStamp(sample)
+            let timeSec = CMTimeGetSeconds(pts)
+            let timestampMs = Int(timeSec * 1000)
 
-            try mosaicFrame(sourceBuffer: sourceBuffer, pts: pts, adaptor: adaptor, input: writerInput)
+            if frameIndex % detectionInterval == 0 {
+                if faceEnabled {
+                    // キャッシュから近傍フレームを探す（なければ新規検出）
+                    let fromCache = lookupCache(detectionCache, at: timeSec)
+                    if !fromCache.isEmpty {
+                        cachedLandmarkSets = filterToSelected(fromCache, targets: selectedFaceTargets)
+                    } else {
+                        let detected = detectAll(in: sourceBuffer, timestampMs: timestampMs)
+                        cachedLandmarkSets = filterToSelected(detected, targets: selectedFaceTargets)
+                    }
+                } else {
+                    cachedLandmarkSets = []
+                }
+            }
 
-            let fraction = min(CMTimeGetSeconds(pts) / totalSeconds, 1.0)
-            await progress(fraction)
+            let additionalPaths = manualRegions.map { region -> FaceMaskBuilder.RegionPath in
+                let path = FaceMaskBuilder.rectPath(from: region.normalizedRect, in: videoSize)
+                return FaceMaskBuilder.RegionPath(path: path, value: 0.4)
+            }
+
+            try? mosaicFrame(
+                sourceBuffer: sourceBuffer,
+                pts: pts,
+                landmarkSets: cachedLandmarkSets,
+                additionalPaths: additionalPaths,
+                adaptor: adaptor,
+                input: writerInput,
+                cache: cache
+            )
+
+            frameIndex += 1
+            progress(min(timeSec / totalSeconds, 1.0))
         }
     }
 
     private func mosaicFrame(
         sourceBuffer: CVPixelBuffer,
         pts: CMTime,
+        landmarkSets: [FaceLandmarkSet],
+        additionalPaths: [FaceMaskBuilder.RegionPath],
         adaptor: AVAssetWriterInputPixelBufferAdaptor,
-        input: AVAssetWriterInput
+        input: AVAssetWriterInput,
+        cache: CVMetalTextureCache
     ) throws {
-        guard let cache = textureCache,
-              let inputTexture = MetalTextureUtilities.texture(from: sourceBuffer, cache: cache) else {
+        guard let inputTexture = MetalTextureUtilities.texture(from: sourceBuffer, cache: cache) else {
             throw ExportError.textureConversionFailed
         }
-
-        let timestampMs = Int(CMTimeGetSeconds(pts) * 1000)
-        let landmarks = detectLandmarks(in: sourceBuffer, timestampMs: timestampMs)
-
         guard let pool = adaptor.pixelBufferPool,
               let outBuffer = makePixelBuffer(from: pool),
               let outputTexture = MetalTextureUtilities.texture(from: outBuffer, cache: cache) else {
@@ -125,7 +180,8 @@ public final class VideoMosaicExporter {
         renderer.render(
             input: inputTexture,
             into: outputTexture,
-            landmarks: landmarks,
+            landmarkSets: landmarkSets,
+            additionalPaths: additionalPaths,
             waitForCompletion: true
         )
 
@@ -135,12 +191,43 @@ public final class VideoMosaicExporter {
         adaptor.append(outBuffer, withPresentationTime: pts)
     }
 
-    private func detectLandmarks(in buffer: CVPixelBuffer, timestampMs: Int) -> FaceLandmarkSet? {
-        let ciImage = CIImage(cvPixelBuffer: buffer)
-        guard let cgImage = ciContext.createCGImage(ciImage, from: ciImage.extent) else {
-            return nil
+    // MARK: - Detection helpers
+
+    private func detectAll(in buffer: CVPixelBuffer, timestampMs: Int) -> [FaceLandmarkSet] {
+        let ci = CIImage(cvPixelBuffer: buffer)
+        let scale = min(800.0 / ci.extent.width, 1.0)
+        let resized = scale < 1.0 ? ci.transformed(by: CGAffineTransform(scaleX: scale, y: scale)) : ci
+        guard let cg = ciContext.createCGImage(resized, from: resized.extent) else { return [] }
+        return landmarker.allLandmarks(in: UIImage(cgImage: cg), timestampMs: timestampMs)
+    }
+
+    private func lookupCache(_ cache: [Double: [FaceLandmarkSet]], at time: Double) -> [FaceLandmarkSet] {
+        if let exact = cache[time] { return exact }
+        var best: (dist: Double, faces: [FaceLandmarkSet]) = (0.3, [])
+        for (t, faces) in cache {
+            let d = abs(t - time)
+            if d < best.dist { best = (d, faces) }
         }
-        return landmarker.landmarks(in: UIImage(cgImage: cgImage), timestampMs: timestampMs)
+        return best.faces
+    }
+
+    private func filterToSelected(_ faces: [FaceLandmarkSet], targets: [FaceTarget]) -> [FaceLandmarkSet] {
+        if targets.isEmpty { return faces }
+        return faces.filter { face in
+            let fc = normalizedCentroid(of: face)
+            return targets.contains { target in
+                let tc = normalizedCentroid(of: target.landmarks)
+                return hypot(fc.x - tc.x, fc.y - tc.y) < 0.3
+            }
+        }
+    }
+
+    private func normalizedCentroid(of lm: FaceLandmarkSet) -> CGPoint {
+        guard !lm.points.isEmpty else { return CGPoint(x: 0.5, y: 0.5) }
+        var sx: Float = 0; var sy: Float = 0
+        for p in lm.points { sx += p.x; sy += p.y }
+        let n = Float(lm.points.count)
+        return CGPoint(x: CGFloat(sx / n), y: CGFloat(sy / n))
     }
 
     // MARK: - Setup helpers

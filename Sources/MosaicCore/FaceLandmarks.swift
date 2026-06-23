@@ -88,6 +88,21 @@ public struct FaceLandmarkSet: Sendable, Equatable {
     }
 }
 
+extension FaceLandmarkSet {
+    /// 正規化ランドマーク座標を `rect` (0-1正規化) のサブ領域から全体画像座標へ逆マッピングする。
+    /// 矩形クロップで検出したランドマークを元の画像座標系に戻すときに使う。
+    public func remapped(into rect: CGRect) -> FaceLandmarkSet {
+        let remappedPoints = points.map { lm in
+            FaceLandmark(
+                x: Float(rect.origin.x) + lm.x * Float(rect.width),
+                y: Float(rect.origin.y) + lm.y * Float(rect.height),
+                z: lm.z
+            )
+        }
+        return FaceLandmarkSet(points: remappedPoints, confidence: confidence)
+    }
+}
+
 /// Named face regions, each backed by the MediaPipe canonical landmark indices
 /// that trace its outline. The orderings below form closed loops suitable for
 /// building a fill `CGPath`.

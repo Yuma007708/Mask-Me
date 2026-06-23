@@ -1,25 +1,26 @@
 import SwiftUI
 
-/// The editing screen: live mosaic preview with a tracking badge on top,
-/// the mosaic controls below, and a save / export action in the toolbar.
+/// 編集画面：プレビュー + 顔選択 + コントロール + 保存/エクスポート。
 struct EditorView: View {
     let media: PickedMedia
     @StateObject private var model: MosaicEditorModel
+    @State private var isDrawingMode = false
 
     init(media: PickedMedia, recents: RecentItemsStore) {
         self.media = media
-        let mode: MosaicEditorModel.Mode
-        if case .video = media {
-            mode = .video
-        } else {
-            mode = .photo
-        }
+        let mode: MosaicEditorModel.Mode = {
+            if case .video = media { return .video }
+            return .photo
+        }()
         _model = StateObject(wrappedValue: MosaicEditorModel(mode: mode, recents: recents))
     }
 
     var body: some View {
         VStack(spacing: 0) {
-            preview
+            previewArea
+            if model.mode == .video {
+                VideoControlsView(model: model)
+            }
             bottomSheet
         }
         .navigationTitle(model.mode == .photo ? "写真編集" : "動画編集")
@@ -45,17 +46,22 @@ struct EditorView: View {
 
     // MARK: - Preview
 
-    private var preview: some View {
+    private var previewArea: some View {
         ZStack {
             Color.black
+
             if let image = model.previewImage {
                 Image(uiImage: image)
                     .resizable()
                     .scaledToFit()
             } else if model.isLoading {
-                ProgressView()
-                    .tint(.white)
+                ProgressView().tint(.white)
             }
+
+            // 矩形描画オーバーレイ（常時有効）
+            RectangleDrawingOverlay(model: model)
+
+            // 動画: 追従バッジ
             if model.mode == .video {
                 VStack {
                     HStack {
@@ -67,8 +73,7 @@ struct EditorView: View {
                 }
             }
         }
-        .frame(maxWidth: .infinity)
-        .frame(height: 360)
+        .frame(maxWidth: .infinity, minHeight: 200, maxHeight: .infinity)
     }
 
     // MARK: - Bottom sheet
@@ -79,33 +84,42 @@ struct EditorView: View {
                 .fill(Color(uiColor: .systemGray4))
                 .frame(width: 36, height: 4)
                 .padding(.top, 10)
-                .padding(.bottom, 14)
-            faceToggle
-                .padding(.horizontal, 18)
                 .padding(.bottom, 8)
-            Divider()
+
+            // 顔サムネイル選択
+            FaceSelectorView(model: model)
+            Divider().padding(.horizontal, 16)
+
+            // 顔モザイク ON/OFF
+            Toggle("顔をモザイク", isOn: $model.faceEnabled.animation())
+                .font(.subheadline.weight(.medium))
                 .padding(.horizontal, 18)
-            sliders
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .background(Color(uiColor: .systemBackground))
-    }
+                .padding(.vertical, 8)
+            Divider().padding(.horizontal, 18)
 
-    // MARK: - Face toggle
-
-    private var faceToggle: some View {
-        Toggle("顔をモザイク", isOn: $model.faceEnabled.animation(.easeInOut(duration: 0.2)))
-            .font(.subheadline.weight(.medium))
-    }
-
-    // MARK: - Sliders
-
-    private var sliders: some View {
-        VStack(spacing: 0) {
+            // 粗さスライダー
             sliderRow("粗さ", value: $model.blockSize, range: 4...80)
+                .padding(.horizontal, 18)
+
+            // 矩形追加ボタン
+            HStack {
+                Label("画面をドラッグして矩形を追加", systemImage: "rectangle.dashed")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                if !model.manualRegions.isEmpty {
+                    Button("クリア") {
+                        withAnimation { model.manualRegions.removeAll() }
+                    }
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.red)
+                }
+            }
+            .padding(.horizontal, 18)
+            .padding(.vertical, 6)
         }
-        .padding(.horizontal, 18)
-        .padding(.top, 4)
+        .frame(maxWidth: .infinity, alignment: .top)
+        .background(Color(uiColor: .systemBackground))
     }
 
     private func sliderRow(
@@ -121,12 +135,10 @@ struct EditorView: View {
             Slider(value: value, in: range)
         }
         .padding(.vertical, 9)
-        .overlay(alignment: .bottom) {
-            Divider()
-        }
+        .overlay(alignment: .bottom) { Divider() }
     }
 
-    // MARK: - Toolbar / overlay
+    // MARK: - Toolbar
 
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
@@ -144,10 +156,8 @@ struct EditorView: View {
             ZStack {
                 Color.black.opacity(0.4).ignoresSafeArea()
                 VStack(spacing: 12) {
-                    ProgressView(value: progress)
-                        .frame(width: 200)
-                    Text("エクスポート中… \(Int(progress * 100))%")
-                        .font(.callout)
+                    ProgressView(value: progress).frame(width: 200)
+                    Text("エクスポート中… \(Int(progress * 100))%").font(.callout)
                 }
                 .padding(24)
                 .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
@@ -159,19 +169,15 @@ struct EditorView: View {
 
     private func loadMedia() {
         switch media {
-        case .image(let image):
-            model.load(image: image)
-        case .video(let url):
-            model.load(videoURL: url)
+        case .image(let image): model.load(image: image)
+        case .video(let url): model.load(videoURL: url)
         }
     }
 
     private func runAction() async {
         switch model.mode {
-        case .photo:
-            await model.savePhoto()
-        case .video:
-            await model.exportVideo()
+        case .photo: await model.savePhoto()
+        case .video: await model.exportVideo()
         }
     }
 }
