@@ -22,9 +22,7 @@ public final class MosaicEditorModel: ObservableObject {
     @Published public private(set) var isLoading = false
 
     // Controls (bound to the editor sliders / toggles)
-    @Published public var faceBlock: Float = 24
-    @Published public var eyeBlock: Float = 10
-    @Published public var mouthBlock: Float = 8
+    @Published public var blockSize: Float = 18
     @Published public var edgeSoftness: Float = 0.35
     @Published public var faceEnabled = true
     @Published public var eyesEnabled = true
@@ -65,7 +63,7 @@ public final class MosaicEditorModel: ObservableObject {
 
     /// Re-render whenever a control changes (debounced to coalesce slider drags).
     private func bindControls() {
-        let params = Publishers.CombineLatest4($faceBlock, $eyeBlock, $mouthBlock, $edgeSoftness)
+        let params = Publishers.CombineLatest($blockSize, $edgeSoftness)
             .map { _ in () }
         let toggles = Publishers.CombineLatest3($faceEnabled, $eyesEnabled, $mouthEnabled)
             .map { _ in () }
@@ -118,9 +116,7 @@ public final class MosaicEditorModel: ObservableObject {
 
     private func applyControls(to renderer: MosaicRenderer) {
         renderer.params = MosaicParams(
-            faceBlock: faceBlock,
-            eyeBlock: eyeBlock,
-            mouthBlock: mouthBlock,
+            block: blockSize,
             edgeSoftness: edgeSoftness
         )
         var regions: Set<FaceRegion> = []
