@@ -80,8 +80,9 @@ struct EditorView: View {
                 .frame(width: 36, height: 4)
                 .padding(.top, 10)
                 .padding(.bottom, 14)
-            regionChips
-                .padding(.bottom, 4)
+            faceToggle
+                .padding(.horizontal, 18)
+                .padding(.bottom, 8)
             Divider()
                 .padding(.horizontal, 18)
             sliders
@@ -90,36 +91,11 @@ struct EditorView: View {
         .background(Color(uiColor: .systemBackground))
     }
 
-    // MARK: - Region chips
+    // MARK: - Face toggle
 
-    private var regionChips: some View {
-        HStack(spacing: 8) {
-            regionChip("全体", isOn: $model.faceEnabled)
-            regionChip("目元", isOn: $model.eyesEnabled)
-            regionChip("口元", isOn: $model.mouthEnabled)
-        }
-        .padding(.horizontal, 18)
-    }
-
-    private func regionChip(_ title: String, isOn: Binding<Bool>) -> some View {
-        Button {
-            withAnimation(.easeInOut(duration: 0.2)) {
-                isOn.wrappedValue.toggle()
-            }
-        } label: {
-            Text(title)
-                .font(.subheadline.weight(.medium))
-                .frame(maxWidth: .infinity)
-                .frame(height: 30)
-                .foregroundStyle(isOn.wrappedValue ? Color.accentColor : Color(uiColor: .systemGray))
-                .background(
-                    isOn.wrappedValue
-                        ? Color.accentColor.opacity(0.15)
-                        : Color(uiColor: .systemGray5),
-                    in: RoundedRectangle(cornerRadius: 8)
-                )
-        }
-        .buttonStyle(.plain)
+    private var faceToggle: some View {
+        Toggle("顔をモザイク", isOn: $model.faceEnabled.animation(.easeInOut(duration: 0.2)))
+            .font(.subheadline.weight(.medium))
     }
 
     // MARK: - Sliders

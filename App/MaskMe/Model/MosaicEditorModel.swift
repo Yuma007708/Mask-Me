@@ -21,12 +21,10 @@ public final class MosaicEditorModel: ObservableObject {
     @Published public private(set) var status: TrackingStatus = .idle
     @Published public private(set) var isLoading = false
 
-    // Controls (bound to the editor sliders / toggles)
+    // Controls (bound to the editor sliders / toggle)
     @Published public var blockSize: Float = 28
     @Published public var edgeSoftness: Float = 0.35
     @Published public var faceEnabled = true
-    @Published public var eyesEnabled = true
-    @Published public var mouthEnabled = true
 
     // Export / save
     @Published public var exportProgress: Double?
@@ -65,9 +63,8 @@ public final class MosaicEditorModel: ObservableObject {
     private func bindControls() {
         let params = Publishers.CombineLatest($blockSize, $edgeSoftness)
             .map { _ in () }
-        let toggles = Publishers.CombineLatest3($faceEnabled, $eyesEnabled, $mouthEnabled)
-            .map { _ in () }
-        Publishers.Merge(params, toggles)
+        let toggle = $faceEnabled.map { _ in () }
+        Publishers.Merge(params, toggle)
             .debounce(for: .milliseconds(16), scheduler: RunLoop.main)
             .sink { [weak self] in self?.renderPreview() }
             .store(in: &cancellables)
@@ -119,11 +116,9 @@ public final class MosaicEditorModel: ObservableObject {
             block: blockSize,
             edgeSoftness: edgeSoftness
         )
-        var regions: Set<FaceRegion> = []
-        if faceEnabled { regions.insert(.faceOval) }
-        if eyesEnabled { regions.formUnion([.leftEye, .rightEye]) }
-        if mouthEnabled { regions.insert(.lips) }
-        renderer.enabledRegions = regions
+        // Single whole-face mosaic (TikTok-style); finer per-region masking was
+        // dropped along with the unified block size.
+        renderer.enabledRegions = faceEnabled ? [.faceOval] : []
     }
 
     // MARK: - Saving
