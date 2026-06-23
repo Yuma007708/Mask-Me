@@ -12,17 +12,29 @@ public struct MosaicParams: Equatable {
     /// Strength is driven by the single coarseness slider in the editor.
     public var block: Float
     public var edgeSoftness: Float
+    /// Face roll in radians; the block grid rotates by this so the mosaic
+    /// follows a tilted face. Set per frame from the landmarks.
+    public var rotation: Float
+    /// Face center (pixels) the grid is anchored to and rotated about.
+    public var centerX: Float
+    public var centerY: Float
     public var width: UInt32
     public var height: UInt32
 
     public init(
         block: Float = 28,
         edgeSoftness: Float = 0.35,
+        rotation: Float = 0,
+        centerX: Float = 0,
+        centerY: Float = 0,
         width: UInt32 = 0,
         height: UInt32 = 0
     ) {
         self.block = block
         self.edgeSoftness = edgeSoftness
+        self.rotation = rotation
+        self.centerX = centerX
+        self.centerY = centerY
         self.width = width
         self.height = height
     }
@@ -141,6 +153,12 @@ public final class MosaicRenderer: NSObject {
         var kernelParams = params
         kernelParams.width = UInt32(width)
         kernelParams.height = UInt32(height)
+        // Anchor and rotate the block grid to the face so blocks follow a tilt.
+        let size = CGSize(width: width, height: height)
+        kernelParams.rotation = landmarks.rollAngle(in: size)
+        let faceCenter = landmarks.centroid(in: size)
+        kernelParams.centerX = Float(faceCenter.x)
+        kernelParams.centerY = Float(faceCenter.y)
 
         guard let commandBuffer = commandQueue.makeCommandBuffer(),
               let encoder = commandBuffer.makeComputeCommandEncoder() else {

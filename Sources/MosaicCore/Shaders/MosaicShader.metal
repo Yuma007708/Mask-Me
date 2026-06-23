@@ -7,29 +7,46 @@ using namespace metal;
 struct MosaicParams {
     float block;        // uniform mosaic block size for all masked regions
     float edgeSoftness; // mask value over which the mosaic is fully opaque
+    float rotation;     // face roll (radians); block grid rotates to match
+    float centerX;      // face center the grid is anchored to / rotated about
+    float centerY;
     uint  width;
     uint  height;
 };
 
-// Average color of the block that `coord` falls into. Sampling the mean (rather
-// than a single representative texel) keeps the mosaic stable as the face moves
-// sub-block distances between frames.
+// Average color of the block that `coord` falls into, in a frame rotated by
+// `rotation` about the face center. Quantizing in the rotated frame makes the
+// mosaic blocks follow a tilted face (they "stick" to it) while staying crisp.
+// Sampling the mean (rather than one texel) keeps the mosaic stable frame to
+// frame. With rotation 0 this reduces to an axis-aligned grid.
 static inline float4 blockAverage(texture2d<float, access::read> tex,
                                   uint2 coord,
-                                  float block,
                                   constant MosaicParams &params) {
-    float b = max(block, 1.0);
-    uint2 origin = uint2(floor(float2(coord) / b) * b);
-    uint maxX = params.width;
-    uint maxY = params.height;
+    float b = max(params.block, 1.0);
+    float2 center = float2(params.centerX, params.centerY);
+    float ct = cos(params.rotation);
+    float st = sin(params.rotation);
+
+    // Into the face-aligned (upright) frame, then quantize to the block cell.
+    float2 d = float2(coord) - center;
+    float2 u = float2(d.x * ct + d.y * st, -d.x * st + d.y * ct);
+    float2 cellMin = floor(u / b) * b;
+
     uint step = max(uint(b / 4.0), 1u); // sub-sample large blocks for speed
+    int maxX = int(params.width);
+    int maxY = int(params.height);
 
     float4 sum = float4(0.0);
     float n = 0.0;
-    for (uint y = origin.y; y < origin.y + uint(b) && y < maxY; y += step) {
-        for (uint x = origin.x; x < origin.x + uint(b) && x < maxX; x += step) {
-            sum += tex.read(uint2(x, y));
-            n += 1.0;
+    for (float yy = cellMin.y; yy < cellMin.y + b; yy += float(step)) {
+        for (float xx = cellMin.x; xx < cellMin.x + b; xx += float(step)) {
+            // Back to screen space.
+            float2 s = center + float2(xx * ct - yy * st, xx * st + yy * ct);
+            int2 si = int2(round(s));
+            if (si.x >= 0 && si.y >= 0 && si.x < maxX && si.y < maxY) {
+                sum += tex.read(uint2(si));
+                n += 1.0;
+            }
         }
     }
     return n > 0.0 ? sum / n : tex.read(coord);
@@ -61,8 +78,7 @@ kernel void mosaicKernel(texture2d<float, access::read>  inTexture   [[texture(0
         return;
     }
 
-    float block = params.block;
-    float4 mosaic = blockAverage(inTexture, gid, block, params);
+    float4 mosaic = blockAverage(inTexture, gid, params);
 
     // Soft edge: ramp the mosaic in over a thin band so the boundary is not a
     // hard rectangle. `edgeSoftness` is the mask value at which it is fully on.

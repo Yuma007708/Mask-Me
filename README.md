@@ -9,7 +9,8 @@ TikTok 風の「顔ピクセルモザイク」を画像・動画に適用する 
 ## 特徴
 
 - **自作 Metal ピクセルシェーダー** — `CIPixellate` は使用せず、コンピュートカーネルでブロック平均を計算（`Sources/MosaicCore/Shaders/MosaicShader.metal`）。
-- **凸包マスク（斜め顔追従）** — MediaPipe Face Landmarker（478 点）の顔ランドマークの凸包から `CGPath` を生成（`FaceMaskBuilder`）。マスクが顔の傾きに合わせて回転するため、斜め・横向きでも顔だけを覆い背景にはみ出さない。ブロックは画像に対し水平の正方形。顔全体への適用を ON/OFF 切替可能。
+- **凸包マスク（斜め顔追従）** — MediaPipe Face Landmarker（478 点）の顔ランドマークの凸包から `CGPath` を生成（`FaceMaskBuilder`）。マスクが顔の傾きに合わせて回転するため、斜め・横向きでも顔だけを覆い背景にはみ出さない。顔全体への適用を ON/OFF 切替可能。
+- **ブロックが顔の傾きに追従** — モザイクのブロック格子を顔の roll（目尻の傾き）に合わせて回転させ、顔の中心を基準に量子化（`MosaicShader.metal` の `blockAverage`）。傾いた顔でもブロックが顔に沿って“吸い付く”ように見え、クッキリした正方形ブロックは維持。
 - **統一ブロックの粗さ調整** — マスク領域は単一のブロックサイズでモザイク化し、粗さスライダー 1 本で強度を調整（ハードエッジ）。
 - **追従率（0–100%）と自動復帰** — 検出信頼度を EMA で平滑化して追従率を算出。顔をロストしてもクラッシュせず `idle → searching → tracking → lost → searching → tracking` と遷移し、再検出フレームで遅延なく復帰（`TrackingEvaluator` / `TrackingStatus`）。
 - **SwiftUI 連携** — `TrackingStatusStore`（`ObservableObject`）で追従状態を購読。
