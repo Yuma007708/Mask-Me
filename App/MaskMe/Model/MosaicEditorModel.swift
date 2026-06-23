@@ -44,6 +44,8 @@ public final class MosaicEditorModel: ObservableObject {
     private var sourceImage: UIImage?
     private var sourceTexture: MTLTexture?
     private var videoAsset: AVAsset?
+    /// Source video URL (for saving a resumable draft).
+    public private(set) var sourceVideoURL: URL?
     private(set) var detectionCache: [Double: [FaceLandmarkSet]] = [:]
     private(set) var previewController: MosaicPreviewController?
     private var cancellables: Set<AnyCancellable> = []
@@ -99,6 +101,7 @@ public final class MosaicEditorModel: ObservableObject {
 
     public func load(videoURL url: URL) {
         isLoading = true
+        sourceVideoURL = url
         let asset = AVAsset(url: url)
         videoAsset = asset
 
@@ -455,6 +458,23 @@ public final class MosaicEditorModel: ObservableObject {
             }
             self.isScanning = false
         }
+    }
+
+    // MARK: - 下書き（状態保持・再開）
+
+    /// 写真下書き保存用の元画像（向き補正済み）。
+    public var photoSourceImage: UIImage? { sourceImage }
+
+    /// 現在の手動矩形（正規化座標）。
+    public var manualRects: [CGRect] { manualRegions.map(\.normalizedRect) }
+
+    /// 下書きから復元したパラメータを適用してプレビューを更新する。
+    public func applyRestoredParameters(blockSize: Float, faceEnabled: Bool, manualRects: [CGRect]) {
+        self.blockSize = blockSize
+        self.faceEnabled = faceEnabled
+        self.manualRegions = manualRects.map { ManualRegion(id: UUID(), normalizedRect: $0) }
+        renderPreview()
+        previewController?.invalidate()
     }
 
     // MARK: - 保存・エクスポート

@@ -108,11 +108,14 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
     }
 
     /// MediaPipe 結果の全顔を `[FaceLandmarkSet]` に変換する。
+    /// 低いしきい値（暗所・ブレでも検出するため）で拾った誤検出を、幾何学的妥当性
+    /// チェックで棄却する（例: 薄暗い場面で体を顔として検出するケース）。
     static func convertAll(_ result: FaceLandmarkerResult) -> [FaceLandmarkSet] {
-        result.faceLandmarks.map { face in
+        result.faceLandmarks.compactMap { face in
             let points = face.map { FaceLandmark(x: $0.x, y: $0.y, z: $0.z) }
             let confidence: Float = points.count >= FaceLandmarkSet.fullMeshCount ? 1.0 : 0.6
-            return FaceLandmarkSet(points: points, confidence: confidence)
+            let set = FaceLandmarkSet(points: points, confidence: confidence)
+            return set.isPlausibleFace ? set : nil
         }
     }
 }
