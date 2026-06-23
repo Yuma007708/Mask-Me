@@ -7,9 +7,10 @@ import Foundation
 /// landmarks) while the mosaic blocks themselves stay axis-aligned — the
 /// TikTok-style "吸い付く" look from the reference, hard-edged and solid.
 public struct FaceMaskBuilder: Sendable {
-    /// How much each region's outline is inflated, as a fraction of the image's
-    /// smaller dimension. A little dilation keeps hair/edge pixels covered even
-    /// as the face moves between frames.
+    /// How much each region's hull is inflated, as a fraction of that region's
+    /// own size (its larger bounding-box side). Region-relative so coverage
+    /// scales with how large the face appears in frame. The generous default
+    /// pushes the face hull out past the oval to also cover the ears / hairline.
     public let dilation: CGFloat
 
     /// Which regions to include in the mask. Toggling a region off leaves it
@@ -17,7 +18,7 @@ public struct FaceMaskBuilder: Sendable {
     public var enabledRegions: Set<FaceRegion>
 
     public init(
-        dilation: CGFloat = 0.015,
+        dilation: CGFloat = 0.10,
         enabledRegions: Set<FaceRegion> = Set(FaceRegion.allCases)
     ) {
         self.dilation = dilation
@@ -33,17 +34,30 @@ public struct FaceMaskBuilder: Sendable {
     /// Builds one fill path per region present in `landmarks`, in painter order
     /// (broad face first, then the finer eye / mouth regions on top).
     public func regionPaths(for landmarks: FaceLandmarkSet, in size: CGSize) -> [RegionPath] {
-        let inset = dilation * min(size.width, size.height)
         // Face first so eyes/lips overwrite it with their higher mask values.
         let order: [FaceRegion] = [.faceOval, .leftEye, .rightEye, .lips]
         return order.filter(enabledRegions.contains).compactMap { region in
             let points = landmarks.polygon(for: region, in: size)
             guard points.count >= 3 else { return nil }
+            // Dilate relative to the region's own size, so the face hull grows
+            // out past the oval (covering the ears) regardless of face scale.
+            let inset = dilation * Self.span(of: points)
             guard let path = Self.convexHullPath(through: points, expandedBy: inset) else {
                 return nil
             }
             return RegionPath(path: path, value: region.maskValue)
         }
+    }
+
+    /// The larger side of `points`' axis-aligned bounding box.
+    private static func span(of points: [CGPoint]) -> CGFloat {
+        guard let first = points.first else { return 0 }
+        var minX = first.x, maxX = first.x, minY = first.y, maxY = first.y
+        for point in points.dropFirst() {
+            minX = min(minX, point.x); maxX = max(maxX, point.x)
+            minY = min(minY, point.y); maxY = max(maxY, point.y)
+        }
+        return max(maxX - minX, maxY - minY)
     }
 
     /// The union bounding box of every region path. Useful for tests and for
