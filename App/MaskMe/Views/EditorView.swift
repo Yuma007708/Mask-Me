@@ -126,18 +126,7 @@ struct EditorView: View {
 
     private var sliders: some View {
         VStack(spacing: 0) {
-            if model.faceEnabled {
-                sliderRow("全体", value: $model.faceBlock, range: 4...60)
-                    .transition(.opacity.combined(with: .move(edge: .top)))
-            }
-            if model.eyesEnabled {
-                sliderRow("目元", value: $model.eyeBlock, range: 2...30)
-                    .transition(.opacity.combined(with: .move(edge: .top)))
-            }
-            if model.mouthEnabled {
-                sliderRow("口元", value: $model.mouthBlock, range: 2...30)
-                    .transition(.opacity.combined(with: .move(edge: .top)))
-            }
+            sliderRow("粗さ", value: $model.blockSize, range: 4...60)
             sliderRow("ふち", value: $model.edgeSoftness, range: 0.05...1)
         }
         .padding(.horizontal, 18)

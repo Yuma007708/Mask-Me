@@ -8,24 +8,20 @@ import Combine
 /// Parameters handed to `mosaicKernel`. The memory layout mirrors the
 /// `MosaicParams` struct in `MosaicShader.metal` exactly — keep them in sync.
 public struct MosaicParams: Equatable {
-    public var faceBlock: Float
-    public var eyeBlock: Float
-    public var mouthBlock: Float
+    /// Uniform mosaic block size (in pixels) applied to every masked region.
+    /// Strength is driven by the single coarseness slider in the editor.
+    public var block: Float
     public var edgeSoftness: Float
     public var width: UInt32
     public var height: UInt32
 
     public init(
-        faceBlock: Float = 24,
-        eyeBlock: Float = 10,
-        mouthBlock: Float = 8,
+        block: Float = 18,
         edgeSoftness: Float = 0.35,
         width: UInt32 = 0,
         height: UInt32 = 0
     ) {
-        self.faceBlock = faceBlock
-        self.eyeBlock = eyeBlock
-        self.mouthBlock = mouthBlock
+        self.block = block
         self.edgeSoftness = edgeSoftness
         self.width = width
         self.height = height
@@ -54,7 +50,7 @@ public final class MosaicRenderer: NSObject {
     private let pipelineState: MTLComputePipelineState
     private var maskBuilder: FaceMaskBuilder
 
-    /// Block sizes / edge softness. Mutate to retune the look at runtime.
+    /// Block size / edge softness. Mutate to retune the look at runtime.
     public var params: MosaicParams
 
     /// Which face regions are mosaicked. Toggle at runtime to enable/disable
