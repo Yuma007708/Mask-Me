@@ -19,3 +19,13 @@ App/MaskMe.xcworkspace/
 
 # macOS
 .DS_Store
+
+# Test fixtures: real face images / model / clips are provided locally and must
+# not be committed (privacy / licensing). Keep the folder structure + README.
+App/MaskMeTests/Fixtures/**
+!App/MaskMeTests/Fixtures/
+!App/MaskMeTests/Fixtures/README.md
+!App/MaskMeTests/Fixtures/faces/
+!App/MaskMeTests/Fixtures/faces/.gitkeep
+!App/MaskMeTests/Fixtures/nonfaces/
+!App/MaskMeTests/Fixtures/nonfaces/.gitkeep

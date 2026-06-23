@@ -1,7 +1,7 @@
 import SwiftUI
 
-/// The editing screen: live mosaic preview with a tracking badge on top, the
-/// mosaic controls below, and a save / export action in the toolbar.
+/// The editing screen: live mosaic preview with a tracking badge on top,
+/// the mosaic controls below, and a save / export action in the toolbar.
 struct EditorView: View {
     let media: PickedMedia
     @StateObject private var model: MosaicEditorModel
@@ -20,7 +20,7 @@ struct EditorView: View {
     var body: some View {
         VStack(spacing: 0) {
             preview
-            controls
+            bottomSheet
         }
         .navigationTitle(model.mode == .photo ? "写真編集" : "動画編集")
         .navigationBarTitleDisplayMode(.inline)
@@ -56,46 +56,73 @@ struct EditorView: View {
                 ProgressView()
                     .tint(.white)
             }
-            VStack {
-                HStack {
+            if model.mode == .video {
+                VStack {
+                    HStack {
+                        Spacer()
+                        TrackingBadge(status: model.status)
+                            .padding(12)
+                    }
                     Spacer()
-                    TrackingBadge(status: model.status)
-                        .padding(12)
                 }
-                Spacer()
             }
         }
         .frame(maxWidth: .infinity)
         .frame(height: 360)
     }
 
-    // MARK: - Controls
+    // MARK: - Bottom sheet
 
-    private var controls: some View {
-        Form {
-            Section("モザイクの粗さ") {
-                slider("顔", value: $model.faceBlock, range: 4...60)
-                slider("目元", value: $model.eyeBlock, range: 2...30)
-                slider("口元", value: $model.mouthBlock, range: 2...30)
-                slider("ふち", value: $model.edgeSoftness, range: 0.05...1)
-            }
-            Section("対象") {
-                Toggle("顔全体", isOn: $model.faceEnabled)
-                Toggle("目元", isOn: $model.eyesEnabled)
-                Toggle("口元", isOn: $model.mouthEnabled)
-            }
+    private var bottomSheet: some View {
+        VStack(spacing: 0) {
+            Capsule()
+                .fill(Color(uiColor: .systemGray4))
+                .frame(width: 36, height: 4)
+                .padding(.top, 10)
+                .padding(.bottom, 14)
+            faceToggle
+                .padding(.horizontal, 18)
+                .padding(.bottom, 8)
+            Divider()
+                .padding(.horizontal, 18)
+            sliders
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .background(Color(uiColor: .systemBackground))
     }
 
-    private func slider(
+    // MARK: - Face toggle
+
+    private var faceToggle: some View {
+        Toggle("顔をモザイク", isOn: $model.faceEnabled.animation(.easeInOut(duration: 0.2)))
+            .font(.subheadline.weight(.medium))
+    }
+
+    // MARK: - Sliders
+
+    private var sliders: some View {
+        VStack(spacing: 0) {
+            sliderRow("粗さ", value: $model.blockSize, range: 4...80)
+        }
+        .padding(.horizontal, 18)
+        .padding(.top, 4)
+    }
+
+    private func sliderRow(
         _ title: String,
         value: Binding<Float>,
         range: ClosedRange<Float>
     ) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
+        HStack(spacing: 12) {
             Text(title)
-                .font(.subheadline)
+                .font(.footnote)
+                .foregroundStyle(Color(uiColor: .secondaryLabel))
+                .frame(width: 36, alignment: .leading)
             Slider(value: value, in: range)
+        }
+        .padding(.vertical, 9)
+        .overlay(alignment: .bottom) {
+            Divider()
         }
     }
 

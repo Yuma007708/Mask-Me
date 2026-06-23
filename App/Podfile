@@ -6,4 +6,11 @@ target 'MaskMe' do
   # MediaPipe Face Landmarker (478-point face mesh). No official SwiftPM
   # distribution, so it is integrated into the app target via CocoaPods.
   pod 'MediaPipeTasksVision'
+
+  # The detection-accuracy tests drive the real MediaPipe landmarker, so the
+  # test bundle needs the pod too.
+  target 'MaskMeTests' do
+    inherit! :search_paths
+    pod 'MediaPipeTasksVision'
+  end
 end

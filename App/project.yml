@@ -32,6 +32,35 @@ targets:
     info:
       path: MaskMe/Info.plist
     # Generates a shared "MaskMe" scheme so `xcodebuild -scheme MaskMe`
-    # (and SwiftPM package resolution) works in CI.
+    # (and SwiftPM package resolution) works in CI. The detection-accuracy
+    # tests run under this scheme (`xcodebuild test` / Cmd+U).
     scheme:
-      testTargets: []
+      testTargets:
+        - MaskMeTests
+
+  # Unit-test target for real-image face-detection accuracy. Requires the
+  # MediaPipe pod + face_landmarker.task model + fixture images, so it runs on a
+  # Simulator / device — not in the pod-free CI build. See App/MaskMeTests/Fixtures.
+  MaskMeTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: MaskMeTests
+        excludes:
+          - "Fixtures/**"
+      # Bundle Fixtures as a folder reference so the faces/ and nonfaces/
+      # subdirectories survive into the test bundle (FixtureLoader looks them up
+      # with `subdirectory:`).
+      - path: MaskMeTests/Fixtures
+        type: folder
+    dependencies:
+      - target: MaskMe
+      - package: MosaicCore
+        product: MosaicCore
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.maskme.app.tests
+        SWIFT_VERSION: "5.9"
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/MaskMe.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/MaskMe"
+        BUNDLE_LOADER: "$(TEST_HOST)"

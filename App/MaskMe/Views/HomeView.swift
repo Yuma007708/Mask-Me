@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Landing screen: two side-by-side entry buttons (写真編集 / 動画編集) on top,
+/// Landing screen: two side-by-side entry buttons (写真 / 動画) on top,
 /// the recent-items list below.
 struct HomeView: View {
     @EnvironmentObject private var recents: RecentItemsStore
@@ -11,18 +11,13 @@ struct HomeView: View {
 
     var body: some View {
         VStack(spacing: 20) {
-            HStack(spacing: 16) {
-                entryCard(
-                    title: "写真編集",
-                    systemImage: "photo",
-                    tint: .blue
-                ) { pickerFilter = .images }
-
-                entryCard(
-                    title: "動画編集",
-                    systemImage: "video",
-                    tint: .purple
-                ) { pickerFilter = .videos }
+            HStack(spacing: 12) {
+                mediaButton(title: "写真", systemImage: "photo", isPrimary: false) {
+                    pickerFilter = .images
+                }
+                mediaButton(title: "動画", systemImage: "video", isPrimary: true) {
+                    pickerFilter = .videos
+                }
             }
             .padding(.horizontal)
             .padding(.top, 8)
@@ -45,23 +40,22 @@ struct HomeView: View {
         }
     }
 
-    private func entryCard(
+    private func mediaButton(
         title: String,
         systemImage: String,
-        tint: Color,
+        isPrimary: Bool,
         action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
-            VStack(spacing: 12) {
-                Image(systemName: systemImage)
-                    .font(.system(size: 40, weight: .semibold))
-                Text(title)
-                    .font(.headline)
-            }
-            .frame(maxWidth: .infinity)
-            .frame(height: 140)
-            .foregroundStyle(.white)
-            .background(tint.gradient, in: RoundedRectangle(cornerRadius: 20))
+            Label(title, systemImage: systemImage)
+                .font(.system(size: 15, weight: .semibold))
+                .frame(maxWidth: .infinity)
+                .frame(height: 52)
+                .foregroundStyle(.white)
+                .background(
+                    isPrimary ? Color.accentColor : Color(uiColor: .systemGray5),
+                    in: RoundedRectangle(cornerRadius: 13)
+                )
         }
         .buttonStyle(.plain)
     }

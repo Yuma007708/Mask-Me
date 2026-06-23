@@ -1,4 +1,5 @@
 import CoreGraphics
+import Foundation
 
 /// A single normalized 3D face landmark.
 ///
@@ -54,6 +55,36 @@ public struct FaceLandmarkSet: Sendable, Equatable {
             guard index >= 0, index < points.count else { return nil }
             return points[index].point(in: size)
         }
+    }
+
+    /// Outer eye-corner landmark indices (MediaPipe canonical), used to derive
+    /// the in-plane roll so the mosaic blocks can follow a tilted face.
+    public static let rightEyeOuterIndex = 33
+    public static let leftEyeOuterIndex = 263
+
+    /// Centroid of all landmarks in pixel space (the mosaic block grid is
+    /// anchored here so it rotates about the face center).
+    public func centroid(in size: CGSize) -> CGPoint {
+        guard !points.isEmpty else {
+            return CGPoint(x: size.width / 2, y: size.height / 2)
+        }
+        var sumX: CGFloat = 0
+        var sumY: CGFloat = 0
+        for point in points {
+            sumX += CGFloat(point.x)
+            sumY += CGFloat(point.y)
+        }
+        let count = CGFloat(points.count)
+        return CGPoint(x: sumX / count * size.width, y: sumY / count * size.height)
+    }
+
+    /// In-plane roll angle in radians, derived from the eye-corner line. Returns
+    /// `0` when the eye landmarks are unavailable (partial mesh).
+    public func rollAngle(in size: CGSize) -> Float {
+        guard points.count > Self.leftEyeOuterIndex else { return 0 }
+        let right = points[Self.rightEyeOuterIndex].point(in: size)
+        let left = points[Self.leftEyeOuterIndex].point(in: size)
+        return Float(atan2(left.y - right.y, left.x - right.x))
     }
 }
 
