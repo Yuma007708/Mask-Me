@@ -7,29 +7,46 @@ using namespace metal;
 struct MosaicParams {
     float block;        // uniform mosaic block size for all masked regions
     float edgeSoftness; // mask value over which the mosaic is fully opaque
+    float rotation;     // face roll (radians); block grid rotates to match
+    float centerX;      // face center the grid is anchored to / rotated about
+    float centerY;
     uint  width;
     uint  height;
 };
 
-// Average color of the block that `coord` falls into. Sampling the mean (rather
-// than a single representative texel) keeps the mosaic stable as the face moves
-// sub-block distances between frames.
+// Average color of the block that `coord` falls into, in a frame rotated by
+// `rotation` about the face center. Quantizing in the rotated frame makes the
+// mosaic blocks follow a tilted face (they "stick" to it) while staying crisp.
+// Sampling the mean (rather than one texel) keeps the mosaic stable frame to
+// frame. With rotation 0 this reduces to an axis-aligned grid.
 static inline float4 blockAverage(texture2d<float, access::read> tex,
                                   uint2 coord,
-                                  float block,
                                   constant MosaicParams &params) {
-    float b = max(block, 1.0);
-    uint2 origin = uint2(floor(float2(coord) / b) * b);
-    uint maxX = params.width;
-    uint maxY = params.height;
+    float b = max(params.block, 1.0);
+    float2 center = float2(params.centerX, params.centerY);
+    float ct = cos(params.rotation);
+    float st = sin(params.rotation);
+
+    // Into the face-aligned (upright) frame, then quantize to the block cell.
+    float2 d = float2(coord) - center;
+    float2 u = float2(d.x * ct + d.y * st, -d.x * st + d.y * ct);
+    float2 cellMin = floor(u / b) * b;
+
     uint step = max(uint(b / 4.0), 1u); // sub-sample large blocks for speed
+    int maxX = int(params.width);
+    int maxY = int(params.height);
 
     float4 sum = float4(0.0);
     float n = 0.0;
-    for (uint y = origin.y; y < origin.y + uint(b) && y < maxY; y += step) {
-        for (uint x = origin.x; x < origin.x + uint(b) && x < maxX; x += step) {
-            sum += tex.read(uint2(x, y));
-            n += 1.0;
+    for (float yy = cellMin.y; yy < cellMin.y + b; yy += float(step)) {
+        for (float xx = cellMin.x; xx < cellMin.x + b; xx += float(step)) {
+            // Back to screen space.
+            float2 s = center + float2(xx * ct - yy * st, xx * st + yy * ct);
+            int2 si = int2(round(s));
+            if (si.x >= 0 && si.y >= 0 && si.x < maxX && si.y < maxY) {
+                sum += tex.read(uint2(si));
+                n += 1.0;
+            }
         }
     }
     return n > 0.0 ? sum / n : tex.read(coord);
@@ -61,8 +78,7 @@ kernel void mosaicKernel(texture2d<float, access::read>  inTexture   [[texture(0
         return;
     }
 
-    float block = params.block;
-    float4 mosaic = blockAverage(inTexture, gid, block, params);
+    float4 mosaic = blockAverage(inTexture, gid, params);
 
     // Soft edge: ramp the mosaic in over a thin band so the boundary is not a
     // hard rectangle. `edgeSoftness` is the mask value at which it is fully on.
@@ -70,4 +86,87 @@ kernel void mosaicKernel(texture2d<float, access::read>  inTexture   [[texture(0
     float4 result = mix(original, mosaic, blend);
     result.a = original.a;
     outTexture.write(result, gid);
+}
+
+// ===========================================================================
+// Mesh-mapped mosaic (TikTok-style 3D look)
+//
+// Two render passes warp the face through a frontal canonical layout:
+//   1) frontalize: draw the posed face mesh into a frontal canvas
+//      (vertex position = frontal UV, sampling the input at the posed UV)
+//   2) (compute) block-average the frontal canvas into crisp squares
+//   3) rewarp: draw the mesh back at the posed positions, sampling the
+//      pixelated frontal canvas (nearest, so blocks stay crisp). Because the
+//      blocks are square in frontal space, they foreshorten on the posed face
+//      and appear to wrap the 3D surface.
+// Each vertex buffer entry is a float4: xy = frontal UV [0,1], zw = posed UV [0,1].
+// ===========================================================================
+
+struct MeshVaryings {
+    float4 position [[position]];
+    float2 tex;
+};
+
+static inline float4 uvToClip(float2 uv) {
+    return float4(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, 0.0, 1.0);
+}
+
+vertex MeshVaryings meshFrontalizeVertex(uint vid [[vertex_id]],
+                                         constant float4 *verts [[buffer(0)]]) {
+    float4 v = verts[vid];
+    MeshVaryings out;
+    out.position = uvToClip(v.xy);   // frontal layout
+    out.tex = v.zw;                  // sample input at posed position
+    return out;
+}
+
+vertex MeshVaryings meshRewarpVertex(uint vid [[vertex_id]],
+                                     constant float4 *verts [[buffer(0)]]) {
+    float4 v = verts[vid];
+    MeshVaryings out;
+    out.position = uvToClip(v.zw);   // posed layout (screen)
+    out.tex = v.xy;                  // sample frontal pixelated canvas
+    return out;
+}
+
+fragment float4 meshSampleLinear(MeshVaryings in [[stage_in]],
+                                 texture2d<float> tex [[texture(0)]]) {
+    constexpr sampler smp(coord::normalized, address::clamp_to_edge, filter::linear);
+    return tex.sample(smp, in.tex);
+}
+
+fragment float4 meshSampleNearest(MeshVaryings in [[stage_in]],
+                                  texture2d<float> tex [[texture(0)]]) {
+    constexpr sampler smp(coord::normalized, address::clamp_to_edge, filter::nearest);
+    return tex.sample(smp, in.tex);
+}
+
+// Block-average the frontal canvas into crisp axis-aligned squares.
+kernel void meshPixelateKernel(texture2d<float, access::read>  inTexture  [[texture(0)]],
+                               texture2d<float, access::write> outTexture [[texture(1)]],
+                               constant float                  &block      [[buffer(0)]],
+                               uint2                            gid        [[thread_position_in_grid]]) {
+    uint w = inTexture.get_width();
+    uint h = inTexture.get_height();
+    if (gid.x >= w || gid.y >= h) {
+        return;
+    }
+    float b = max(block, 1.0);
+    uint2 origin = uint2(floor(float2(gid) / b) * b);
+    uint step = max(uint(b / 6.0), 1u);
+    float4 sum = float4(0.0);
+    float n = 0.0;
+    for (uint y = origin.y; y < origin.y + uint(b) && y < h; y += step) {
+        for (uint x = origin.x; x < origin.x + uint(b) && x < w; x += step) {
+            float4 c = inTexture.read(uint2(x, y));
+            // Skip un-covered (transparent/black) canvas texels so the average
+            // reflects only the warped face, not the empty background.
+            if (c.a > 0.01) {
+                sum += c;
+                n += 1.0;
+            }
+        }
+    }
+    float4 avg = n > 0.0 ? sum / n : inTexture.read(gid);
+    outTexture.write(avg, gid);
 }

@@ -1,13 +1,17 @@
 import CoreGraphics
 import Foundation
 
-/// Builds the alpha mask that tells the Metal kernel *where* (and *how finely*)
-/// to mosaic. The mask is rendered from landmark-derived `CGPath`s so the
-/// pixelation hugs the face contour — the "吸い付く" look from the reference.
+/// Builds the alpha mask that tells the Metal kernel *where* to mosaic. Each
+/// enabled region is filled as the **convex hull** of its landmarks, so the
+/// masked area follows the face as it rotates / tilts (the hull turns with the
+/// landmarks) while the mosaic blocks themselves stay axis-aligned — the
+/// TikTok-style "吸い付く" look from the reference, hard-edged and solid.
 public struct FaceMaskBuilder: Sendable {
-    /// How much each region's outline is inflated, as a fraction of the image's
-    /// smaller dimension. A little dilation keeps hair/edge pixels covered even
-    /// as the face moves between frames.
+    /// How much each region's hull is inflated, as a fraction of that region's
+    /// own size (its larger bounding-box side). Region-relative so coverage
+    /// scales with how large the face appears in frame. A modest margin keeps
+    /// the mosaic hugging the face (TikTok-style) without spilling onto the
+    /// background when the head is turned.
     public let dilation: CGFloat
 
     /// Which regions to include in the mask. Toggling a region off leaves it
@@ -15,7 +19,7 @@ public struct FaceMaskBuilder: Sendable {
     public var enabledRegions: Set<FaceRegion>
 
     public init(
-        dilation: CGFloat = 0.015,
+        dilation: CGFloat = 0.04,
         enabledRegions: Set<FaceRegion> = Set(FaceRegion.allCases)
     ) {
         self.dilation = dilation
@@ -31,17 +35,30 @@ public struct FaceMaskBuilder: Sendable {
     /// Builds one fill path per region present in `landmarks`, in painter order
     /// (broad face first, then the finer eye / mouth regions on top).
     public func regionPaths(for landmarks: FaceLandmarkSet, in size: CGSize) -> [RegionPath] {
-        let inset = dilation * min(size.width, size.height)
         // Face first so eyes/lips overwrite it with their higher mask values.
         let order: [FaceRegion] = [.faceOval, .leftEye, .rightEye, .lips]
         return order.filter(enabledRegions.contains).compactMap { region in
             let points = landmarks.polygon(for: region, in: size)
             guard points.count >= 3 else { return nil }
-            guard let path = Self.smoothClosedPath(through: points, expandedBy: inset) else {
+            // Dilate relative to the region's own size so the margin scales with
+            // how large the face appears, hugging it without spilling background.
+            let inset = dilation * Self.span(of: points)
+            guard let path = Self.convexHullPath(through: points, expandedBy: inset) else {
                 return nil
             }
             return RegionPath(path: path, value: region.maskValue)
         }
+    }
+
+    /// The larger side of `points`' axis-aligned bounding box.
+    private static func span(of points: [CGPoint]) -> CGFloat {
+        guard let first = points.first else { return 0 }
+        var minX = first.x, maxX = first.x, minY = first.y, maxY = first.y
+        for point in points.dropFirst() {
+            minX = min(minX, point.x); maxX = max(maxX, point.x)
+            minY = min(minY, point.y); maxY = max(maxY, point.y)
+        }
+        return max(maxX - minX, maxY - minY)
     }
 
     /// The union bounding box of every region path. Useful for tests and for
@@ -88,6 +105,49 @@ public struct FaceMaskBuilder: Sendable {
     }
 
     // MARK: - Path construction
+
+    /// Builds a closed convex-hull path around `points`, dilated outward from the
+    /// centroid by `inset`. The hull is a solid polygon that rotates with the
+    /// landmarks, so a tilted / turned face stays covered with hard edges (vs. an
+    /// axis-aligned box, which would spill onto the background for an angled face).
+    static func convexHullPath(through points: [CGPoint], expandedBy inset: CGFloat) -> CGPath? {
+        guard points.count >= 3 else { return nil }
+        let hull = convexHull(of: points)
+        guard hull.count >= 3 else { return nil }
+        let expanded = inset > 0 ? expand(hull, by: inset) : hull
+        let path = CGMutablePath()
+        path.addLines(between: expanded)
+        path.closeSubpath()
+        return path
+    }
+
+    /// Andrew's monotone-chain convex hull. Returns the hull vertices in order.
+    static func convexHull(of points: [CGPoint]) -> [CGPoint] {
+        let sorted = points.sorted { $0.x == $1.x ? $0.y < $1.y : $0.x < $1.x }
+        guard sorted.count >= 3 else { return sorted }
+
+        func cross(_ origin: CGPoint, _ lhs: CGPoint, _ rhs: CGPoint) -> CGFloat {
+            (lhs.x - origin.x) * (rhs.y - origin.y) - (lhs.y - origin.y) * (rhs.x - origin.x)
+        }
+
+        var lower: [CGPoint] = []
+        for point in sorted {
+            while lower.count >= 2, cross(lower[lower.count - 2], lower[lower.count - 1], point) <= 0 {
+                lower.removeLast()
+            }
+            lower.append(point)
+        }
+        var upper: [CGPoint] = []
+        for point in sorted.reversed() {
+            while upper.count >= 2, cross(upper[upper.count - 2], upper[upper.count - 1], point) <= 0 {
+                upper.removeLast()
+            }
+            upper.append(point)
+        }
+        lower.removeLast()
+        upper.removeLast()
+        return lower + upper
+    }
 
     /// Builds a closed, smoothed path through `points`, optionally dilated
     /// outward from the centroid by `inset` points. Smoothing uses a

@@ -21,12 +21,13 @@ public final class MosaicEditorModel: ObservableObject {
     @Published public private(set) var status: TrackingStatus = .idle
     @Published public private(set) var isLoading = false
 
-    // Controls (bound to the editor sliders / toggles)
-    @Published public var blockSize: Float = 18
-    @Published public var edgeSoftness: Float = 0.35
+    // Controls (bound to the editor slider / toggle)
+    @Published public var blockSize: Float = 28
     @Published public var faceEnabled = true
-    @Published public var eyesEnabled = true
-    @Published public var mouthEnabled = true
+
+    // Fixed: with the solid hard-edged hull mask, edge softness no longer
+    // feathers the boundary, so it is not user-exposed.
+    private let edgeSoftness: Float = 0.35
 
     // Export / save
     @Published public var exportProgress: Double?
@@ -63,11 +64,7 @@ public final class MosaicEditorModel: ObservableObject {
 
     /// Re-render whenever a control changes (debounced to coalesce slider drags).
     private func bindControls() {
-        let params = Publishers.CombineLatest($blockSize, $edgeSoftness)
-            .map { _ in () }
-        let toggles = Publishers.CombineLatest3($faceEnabled, $eyesEnabled, $mouthEnabled)
-            .map { _ in () }
-        Publishers.Merge(params, toggles)
+        Publishers.Merge($blockSize.map { _ in () }, $faceEnabled.map { _ in () })
             .debounce(for: .milliseconds(16), scheduler: RunLoop.main)
             .sink { [weak self] in self?.renderPreview() }
             .store(in: &cancellables)
@@ -119,11 +116,9 @@ public final class MosaicEditorModel: ObservableObject {
             block: blockSize,
             edgeSoftness: edgeSoftness
         )
-        var regions: Set<FaceRegion> = []
-        if faceEnabled { regions.insert(.faceOval) }
-        if eyesEnabled { regions.formUnion([.leftEye, .rightEye]) }
-        if mouthEnabled { regions.insert(.lips) }
-        renderer.enabledRegions = regions
+        // Single whole-face mosaic (TikTok-style); finer per-region masking was
+        // dropped along with the unified block size.
+        renderer.enabledRegions = faceEnabled ? [.faceOval] : []
     }
 
     // MARK: - Saving

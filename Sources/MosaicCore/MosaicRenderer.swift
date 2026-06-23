@@ -12,17 +12,29 @@ public struct MosaicParams: Equatable {
     /// Strength is driven by the single coarseness slider in the editor.
     public var block: Float
     public var edgeSoftness: Float
+    /// Face roll in radians; the block grid rotates by this so the mosaic
+    /// follows a tilted face. Set per frame from the landmarks.
+    public var rotation: Float
+    /// Face center (pixels) the grid is anchored to and rotated about.
+    public var centerX: Float
+    public var centerY: Float
     public var width: UInt32
     public var height: UInt32
 
     public init(
-        block: Float = 18,
+        block: Float = 28,
         edgeSoftness: Float = 0.35,
+        rotation: Float = 0,
+        centerX: Float = 0,
+        centerY: Float = 0,
         width: UInt32 = 0,
         height: UInt32 = 0
     ) {
         self.block = block
         self.edgeSoftness = edgeSoftness
+        self.rotation = rotation
+        self.centerX = centerX
+        self.centerY = centerY
         self.width = width
         self.height = height
     }
@@ -49,6 +61,9 @@ public final class MosaicRenderer: NSObject {
     private let commandQueue: MTLCommandQueue
     private let pipelineState: MTLComputePipelineState
     private var maskBuilder: FaceMaskBuilder
+    /// Mesh-mapped 3D mosaic renderer; used when a full face mesh is available,
+    /// otherwise the contour-mask compute path is the fallback.
+    private let meshRenderer: FaceMeshMosaicRenderer?
 
     /// Block size / edge softness. Mutate to retune the look at runtime.
     public var params: MosaicParams
@@ -103,6 +118,10 @@ public final class MosaicRenderer: NSObject {
         self.params = params
         self.maskBuilder = maskBuilder
         self.evaluator = evaluator
+        // Optional: the mesh-mapped 3D mosaic. If its pipelines fail to build we
+        // silently fall back to the contour-mask compute mosaic.
+        self.meshRenderer = try? FaceMeshMosaicRenderer(
+            device: device, library: library, commandQueue: queue)
         super.init()
     }
 
@@ -132,8 +151,26 @@ public final class MosaicRenderer: NSObject {
         let height = input.height
 
         // No usable face this frame → pass the frame through unchanged.
-        guard let landmarks, newStatus.faceDetected,
-              let mask = updatedMaskTexture(for: landmarks, width: width, height: height) else {
+        guard let landmarks, newStatus.faceDetected else {
+            copy(from: input, to: output, waitForCompletion: waitForCompletion)
+            return newStatus
+        }
+
+        // Preferred path: mesh-mapped 3D mosaic (needs a full 478-point mesh).
+        if landmarks.isFullMesh,
+           let meshRenderer,
+           meshRenderer.render(
+               input: input,
+               output: output,
+               landmarks: landmarks,
+               block: params.block,
+               waitForCompletion: waitForCompletion
+           ) {
+            return newStatus
+        }
+
+        // Fallback: contour-mask compute mosaic.
+        guard let mask = updatedMaskTexture(for: landmarks, width: width, height: height) else {
             copy(from: input, to: output, waitForCompletion: waitForCompletion)
             return newStatus
         }
@@ -141,6 +178,12 @@ public final class MosaicRenderer: NSObject {
         var kernelParams = params
         kernelParams.width = UInt32(width)
         kernelParams.height = UInt32(height)
+        // Anchor and rotate the block grid to the face so blocks follow a tilt.
+        let size = CGSize(width: width, height: height)
+        kernelParams.rotation = landmarks.rollAngle(in: size)
+        let faceCenter = landmarks.centroid(in: size)
+        kernelParams.centerX = Float(faceCenter.x)
+        kernelParams.centerY = Float(faceCenter.y)
 
         guard let commandBuffer = commandQueue.makeCommandBuffer(),
               let encoder = commandBuffer.makeComputeCommandEncoder() else {

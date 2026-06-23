@@ -1,15 +1,17 @@
 # Mask-Me
 
 TikTok 風の「顔ピクセルモザイク」を画像・動画に適用する iOS アプリのコア実装です。
-顔輪郭に吸い付くようにモザイクが追従し、粗さはスライダーで調整できます。
+顔ランドマークの凸包でマスクを作るため、顔が斜めを向いても背景にはみ出さず顔に吸い付き、
+ブロックは画像水平の粗い正方形（ハードエッジ）で覆います。粗さはスライダーで調整できます。
 
 ![参考: 顔に追従するブロックモザイク]()
 
 ## 特徴
 
 - **自作 Metal ピクセルシェーダー** — `CIPixellate` は使用せず、コンピュートカーネルでブロック平均を計算（`Sources/MosaicCore/Shaders/MosaicShader.metal`）。
-- **輪郭追従マスク** — MediaPipe Face Landmarker（478 点）のランドマークから `CGPath` を生成し、顔オーバル / 左右の目 / 口のマスクテクスチャを作成（`FaceMaskBuilder`）。領域は ON/OFF で個別に切替可能。
-- **統一ブロックの粗さ調整** — マスク領域は単一のブロックサイズでモザイク化し、粗さスライダー 1 本で強度を調整。
+- **顔メッシュ貼付の立体モザイク（TikTok 風）** — MediaPipe の 478 点を使い、顔を正面（キャノニカル）形状へ三角形ごとに warp → そこでクッキリ正方形ブロックにモザイク → 現在の姿勢へニアレストで貼り戻す（`FaceMeshMosaicRenderer` + `FaceMeshTopology`）。ブロックが顔の 3D 面に沿って foreshorten し、斜め・横向きでも立体的に“吸い付く”。顔メッシュ自体が適用範囲になる。
+- **フォールバック（凸包マスク + 傾き追従）** — フルメッシュが得られない場合は、顔ランドマークの凸包マスク（`FaceMaskBuilder`）＋ roll に追従して回転するブロック格子（`MosaicShader.metal` の `blockAverage`）で処理。
+- **粗さ調整** — 粗さスライダー 1 本でブロックサイズを調整（ハードエッジ）。顔全体への適用を ON/OFF 切替可能。
 - **追従率（0–100%）と自動復帰** — 検出信頼度を EMA で平滑化して追従率を算出。顔をロストしてもクラッシュせず `idle → searching → tracking → lost → searching → tracking` と遷移し、再検出フレームで遅延なく復帰（`TrackingEvaluator` / `TrackingStatus`）。
 - **SwiftUI 連携** — `TrackingStatusStore`（`ObservableObject`）で追従状態を購読。
 
@@ -27,8 +29,10 @@ Mask-Me/
 │  ├─ FaceLandmarks.swift              # ランドマーク抽象（478点）+ 領域インデックス
 │  ├─ TrackingStatus.swift            # 追従率・状態の純粋ロジック
 │  ├─ DetectionRateMeter.swift        # 検出率（N件中M件検出）の集計（MediaPipe非依存）
-│  ├─ FaceMaskBuilder.swift           # ランドマーク → CGPath → マスク（領域ON/OFF対応）
-│  ├─ MosaicRenderer.swift            # 解析 + Metal 描画クラス
+│  ├─ FaceMaskBuilder.swift           # ランドマーク → CGPath → マスク（フォールバック用）
+│  ├─ FaceMeshTopology.swift          # 正面顔メッシュ（468頂点UV + 898三角形）自動生成
+│  ├─ FaceMeshMosaicRenderer.swift    # 顔メッシュ貼付の立体モザイク（2パス描画）
+│  ├─ MosaicRenderer.swift            # 解析 + Metal 描画クラス（メッシュ/フォールバック）
 │  ├─ MetalTextureUtilities.swift     # CGImage/CVPixelBuffer ↔ MTLTexture 変換
 │  └─ Shaders/MosaicShader.metal      # ピクセルシェーダー
 ├─ Tests/MosaicCoreTests/             # 追従ロジック・検出率・マスク生成のユニットテスト
@@ -68,8 +72,8 @@ open MaskMe.xcworkspace
 - **ホーム**：上部に「写真」「動画」の横並びボタン、下部に「最近の項目」（縦スクロール
   リスト、横スワイプで削除）。
 - **エディタ**：モザイク結果のプレビューを上部に、下部はボトムシート風のコントロール。
-  - **領域チップ**（全体 / 目元 / 口元）で、どこにモザイクを掛けるかを ON/OFF 切替。
-  - **スライダー**：粗さ（モザイクの強さ＝ブロックサイズ）＋ ふち（輪郭のなめらかさ）の 2 本。
+  - **「顔をモザイク」トグル**で顔全体への適用を ON/OFF（TikTok 風に顔を 1 枚で覆う）。
+  - **粗さスライダー**1 本（モザイクの強さ＝ブロックサイズ）。エッジは常にハード。
   - **追従バッジ**（追従率% ・状態）は**動画モードのみ**表示（写真は静止画のため非表示）。
   - 写真は「保存」、動画は「エクスポート」（進捗表示）。
 
