@@ -103,7 +103,6 @@ struct EditorView: View {
     private var sliders: some View {
         VStack(spacing: 0) {
             sliderRow("粗さ", value: $model.blockSize, range: 4...80)
-            sliderRow("ふち", value: $model.edgeSoftness, range: 0.05...1)
         }
         .padding(.horizontal, 18)
         .padding(.top, 4)

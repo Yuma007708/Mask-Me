@@ -21,10 +21,13 @@ public final class MosaicEditorModel: ObservableObject {
     @Published public private(set) var status: TrackingStatus = .idle
     @Published public private(set) var isLoading = false
 
-    // Controls (bound to the editor sliders / toggle)
+    // Controls (bound to the editor slider / toggle)
     @Published public var blockSize: Float = 28
-    @Published public var edgeSoftness: Float = 0.35
     @Published public var faceEnabled = true
+
+    // Fixed: with the solid hard-edged hull mask, edge softness no longer
+    // feathers the boundary, so it is not user-exposed.
+    private let edgeSoftness: Float = 0.35
 
     // Export / save
     @Published public var exportProgress: Double?
@@ -61,10 +64,7 @@ public final class MosaicEditorModel: ObservableObject {
 
     /// Re-render whenever a control changes (debounced to coalesce slider drags).
     private func bindControls() {
-        let params = Publishers.CombineLatest($blockSize, $edgeSoftness)
-            .map { _ in () }
-        let toggle = $faceEnabled.map { _ in () }
-        Publishers.Merge(params, toggle)
+        Publishers.Merge($blockSize.map { _ in () }, $faceEnabled.map { _ in () })
             .debounce(for: .milliseconds(16), scheduler: RunLoop.main)
             .sink { [weak self] in self?.renderPreview() }
             .store(in: &cancellables)
