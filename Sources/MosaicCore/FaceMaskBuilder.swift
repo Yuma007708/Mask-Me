@@ -9,8 +9,9 @@ import Foundation
 public struct FaceMaskBuilder: Sendable {
     /// How much each region's hull is inflated, as a fraction of that region's
     /// own size (its larger bounding-box side). Region-relative so coverage
-    /// scales with how large the face appears in frame. The generous default
-    /// pushes the face hull out past the oval to also cover the ears / hairline.
+    /// scales with how large the face appears in frame. A modest margin keeps
+    /// the mosaic hugging the face (TikTok-style) without spilling onto the
+    /// background when the head is turned.
     public let dilation: CGFloat
 
     /// Which regions to include in the mask. Toggling a region off leaves it
@@ -18,7 +19,7 @@ public struct FaceMaskBuilder: Sendable {
     public var enabledRegions: Set<FaceRegion>
 
     public init(
-        dilation: CGFloat = 0.10,
+        dilation: CGFloat = 0.04,
         enabledRegions: Set<FaceRegion> = Set(FaceRegion.allCases)
     ) {
         self.dilation = dilation
@@ -39,8 +40,8 @@ public struct FaceMaskBuilder: Sendable {
         return order.filter(enabledRegions.contains).compactMap { region in
             let points = landmarks.polygon(for: region, in: size)
             guard points.count >= 3 else { return nil }
-            // Dilate relative to the region's own size, so the face hull grows
-            // out past the oval (covering the ears) regardless of face scale.
+            // Dilate relative to the region's own size so the margin scales with
+            // how large the face appears, hugging it without spilling background.
             let inset = dilation * Self.span(of: points)
             guard let path = Self.convexHullPath(through: points, expandedBy: inset) else {
                 return nil
