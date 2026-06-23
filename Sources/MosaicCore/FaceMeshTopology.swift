@@ -5,7 +5,7 @@
 import Foundation
 
 // Auto-generated data tables; the trailing commas and length are inherent.
-// swiftlint:disable trailing_comma type_body_length
+// swiftlint:disable trailing_comma
 
 public enum FaceMeshTopology {
     /// Number of mesh vertices (subset of the 478 landmarks used for the mesh).
@@ -286,4 +286,4 @@ public enum FaceMeshTopology {
     ]
 }
 
-// swiftlint:enable trailing_comma type_body_length
+// swiftlint:enable trailing_comma

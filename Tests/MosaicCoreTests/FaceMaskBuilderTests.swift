@@ -169,10 +169,10 @@ final class FaceMaskBuilderTests: XCTestCase {
         let norm = CGRect(x: 0.1, y: 0.2, width: 0.5, height: 0.3)
         let bbox = FaceMaskBuilder.rectPath(from: norm, in: size).boundingBox
 
-        XCTAssertEqual(bbox.origin.x, 10, accuracy: 0.001)   // 0.1 × 100
-        XCTAssertEqual(bbox.origin.y, 40, accuracy: 0.001)   // 0.2 × 200
-        XCTAssertEqual(bbox.width,    50, accuracy: 0.001)   // 0.5 × 100
-        XCTAssertEqual(bbox.height,   60, accuracy: 0.001)   // 0.3 × 200
+        XCTAssertEqual(bbox.origin.x, 10, accuracy: 0.001) // 0.1 × 100
+        XCTAssertEqual(bbox.origin.y, 40, accuracy: 0.001) // 0.2 × 200
+        XCTAssertEqual(bbox.width, 50, accuracy: 0.001)    // 0.5 × 100
+        XCTAssertEqual(bbox.height, 60, accuracy: 0.001)   // 0.3 × 200
     }
 
     func testRectPathFullImageCoversEntireCanvas() {
