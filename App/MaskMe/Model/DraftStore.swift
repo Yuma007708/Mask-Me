@@ -39,18 +39,18 @@ struct EditingDraft: Codable, Identifiable, Equatable {
 
 /// Stores editing drafts (source media + parameters) under Documents/Drafts.
 @MainActor
-public final class DraftStore: ObservableObject {
+final class DraftStore: ObservableObject {
     /// Resumable video drafts, newest first.
-    @Published public private(set) var videoDrafts: [EditingDraft] = []
+    @Published private(set) var videoDrafts: [EditingDraft] = []
     /// The single in-progress photo draft, if any.
-    @Published public private(set) var photoDraft: EditingDraft?
+    @Published private(set) var photoDraft: EditingDraft?
 
     private let fileManager: FileManager
     private let directory: URL
     private let videoIndexURL: URL
     private let photoIndexURL: URL
 
-    public init(fileManager: FileManager = .default) {
+    init(fileManager: FileManager = .default) {
         self.fileManager = fileManager
         let documents = fileManager.urls(for: .documentDirectory, in: .userDomainMask)[0]
         self.directory = documents.appendingPathComponent("Drafts", isDirectory: true)
