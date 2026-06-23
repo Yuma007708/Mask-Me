@@ -87,3 +87,86 @@ kernel void mosaicKernel(texture2d<float, access::read>  inTexture   [[texture(0
     result.a = original.a;
     outTexture.write(result, gid);
 }
+
+// ===========================================================================
+// Mesh-mapped mosaic (TikTok-style 3D look)
+//
+// Two render passes warp the face through a frontal canonical layout:
+//   1) frontalize: draw the posed face mesh into a frontal canvas
+//      (vertex position = frontal UV, sampling the input at the posed UV)
+//   2) (compute) block-average the frontal canvas into crisp squares
+//   3) rewarp: draw the mesh back at the posed positions, sampling the
+//      pixelated frontal canvas (nearest, so blocks stay crisp). Because the
+//      blocks are square in frontal space, they foreshorten on the posed face
+//      and appear to wrap the 3D surface.
+// Each vertex buffer entry is a float4: xy = frontal UV [0,1], zw = posed UV [0,1].
+// ===========================================================================
+
+struct MeshVaryings {
+    float4 position [[position]];
+    float2 tex;
+};
+
+static inline float4 uvToClip(float2 uv) {
+    return float4(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, 0.0, 1.0);
+}
+
+vertex MeshVaryings meshFrontalizeVertex(uint vid [[vertex_id]],
+                                         constant float4 *verts [[buffer(0)]]) {
+    float4 v = verts[vid];
+    MeshVaryings out;
+    out.position = uvToClip(v.xy);   // frontal layout
+    out.tex = v.zw;                  // sample input at posed position
+    return out;
+}
+
+vertex MeshVaryings meshRewarpVertex(uint vid [[vertex_id]],
+                                     constant float4 *verts [[buffer(0)]]) {
+    float4 v = verts[vid];
+    MeshVaryings out;
+    out.position = uvToClip(v.zw);   // posed layout (screen)
+    out.tex = v.xy;                  // sample frontal pixelated canvas
+    return out;
+}
+
+fragment float4 meshSampleLinear(MeshVaryings in [[stage_in]],
+                                 texture2d<float> tex [[texture(0)]]) {
+    constexpr sampler smp(coord::normalized, address::clamp_to_edge, filter::linear);
+    return tex.sample(smp, in.tex);
+}
+
+fragment float4 meshSampleNearest(MeshVaryings in [[stage_in]],
+                                  texture2d<float> tex [[texture(0)]]) {
+    constexpr sampler smp(coord::normalized, address::clamp_to_edge, filter::nearest);
+    return tex.sample(smp, in.tex);
+}
+
+// Block-average the frontal canvas into crisp axis-aligned squares.
+kernel void meshPixelateKernel(texture2d<float, access::read>  inTexture  [[texture(0)]],
+                               texture2d<float, access::write> outTexture [[texture(1)]],
+                               constant float                  &block      [[buffer(0)]],
+                               uint2                            gid        [[thread_position_in_grid]]) {
+    uint w = inTexture.get_width();
+    uint h = inTexture.get_height();
+    if (gid.x >= w || gid.y >= h) {
+        return;
+    }
+    float b = max(block, 1.0);
+    uint2 origin = uint2(floor(float2(gid) / b) * b);
+    uint step = max(uint(b / 6.0), 1u);
+    float4 sum = float4(0.0);
+    float n = 0.0;
+    for (uint y = origin.y; y < origin.y + uint(b) && y < h; y += step) {
+        for (uint x = origin.x; x < origin.x + uint(b) && x < w; x += step) {
+            float4 c = inTexture.read(uint2(x, y));
+            // Skip un-covered (transparent/black) canvas texels so the average
+            // reflects only the warped face, not the empty background.
+            if (c.a > 0.01) {
+                sum += c;
+                n += 1.0;
+            }
+        }
+    }
+    float4 avg = n > 0.0 ? sum / n : inTexture.read(gid);
+    outTexture.write(avg, gid);
+}
