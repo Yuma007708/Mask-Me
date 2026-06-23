@@ -120,7 +120,8 @@ public final class MosaicRenderer: NSObject {
         self.evaluator = evaluator
         // Optional: the mesh-mapped 3D mosaic. If its pipelines fail to build we
         // silently fall back to the contour-mask compute mosaic.
-        self.meshRenderer = try? FaceMeshMosaicRenderer(device: device, library: library)
+        self.meshRenderer = try? FaceMeshMosaicRenderer(
+            device: device, library: library, commandQueue: queue)
         super.init()
     }
 
@@ -163,7 +164,6 @@ public final class MosaicRenderer: NSObject {
                output: output,
                landmarks: landmarks,
                block: params.block,
-               commandQueue: commandQueue,
                waitForCompletion: waitForCompletion
            ) {
             return newStatus

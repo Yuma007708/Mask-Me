@@ -14,6 +14,7 @@ import simd
 /// GPU-only; behaviour can only be verified on a device / simulator.
 final class FaceMeshMosaicRenderer {
     private let device: MTLDevice
+    private let commandQueue: MTLCommandQueue
     private let frontalizePipeline: MTLRenderPipelineState
     private let rewarpPipeline: MTLRenderPipelineState
     private let pixelatePipeline: MTLComputePipelineState
@@ -32,8 +33,9 @@ final class FaceMeshMosaicRenderer {
     /// the screen-space block size maps to a sensible canvas block size.
     private let referenceFaceWidth: Float = 380
 
-    init(device: MTLDevice, library: MTLLibrary, canvasSize: Int = 256) throws {
+    init(device: MTLDevice, library: MTLLibrary, commandQueue: MTLCommandQueue, canvasSize: Int = 256) throws {
         self.device = device
+        self.commandQueue = commandQueue
         self.canvasSize = canvasSize
         let format = MTLPixelFormat.bgra8Unorm
 
@@ -79,7 +81,6 @@ final class FaceMeshMosaicRenderer {
         output: MTLTexture,
         landmarks: FaceLandmarkSet,
         block: Float,
-        commandQueue: MTLCommandQueue,
         waitForCompletion: Bool
     ) -> Bool {
         let vertexCount = FaceMeshTopology.vertexCount

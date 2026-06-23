@@ -4,6 +4,9 @@
 // a posed face to a frontal canvas and back for mesh-mapped mosaic.
 import Foundation
 
+// Auto-generated data tables; the trailing commas and length are inherent.
+// swiftlint:disable trailing_comma type_body_length
+
 public enum FaceMeshTopology {
     /// Number of mesh vertices (subset of the 478 landmarks used for the mesh).
     public static let vertexCount = 468
@@ -282,3 +285,5 @@ public enum FaceMeshTopology {
         318, 324, 310, 88, 80, 95, 415, 310, 324, 191, 95, 80,
     ]
 }
+
+// swiftlint:enable trailing_comma type_body_length
