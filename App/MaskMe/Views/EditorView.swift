@@ -54,7 +54,7 @@ struct EditorView: View {
             // 写真は「強制終了で破棄／復帰では保持」を判別するための在席トークン。
             if model.mode == .photo { photoEditingActive = true }
         }
-        .onChange(of: scenePhase) { _, phase in
+        .onChange(of: scenePhase) { phase in
             // アプリを離れた時は写真・動画とも編集中の状態を保持（下書き保存）。
             if phase == .background { persistDraft() }
         }
