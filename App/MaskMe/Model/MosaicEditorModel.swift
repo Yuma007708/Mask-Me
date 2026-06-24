@@ -408,17 +408,31 @@ public final class MosaicEditorModel: ObservableObject {
 
     // MARK: - 検出キャッシュ参照
 
-    /// 指定時刻に最も近い、非空のキャッシュエントリを返す（最大1秒以内）。
-    /// 空エントリは検出失敗を意味するためスキップし、直前の有効検出を再利用する。
+    /// 指定時刻の顔ランドマークを返す。前後 `bridgeWindow` 秒以内の両側に検出がある
+    /// 「一時的な検出抜け」のみ直近フレームで補間する。片側にしか検出が無い場合
+    /// （顔がフレームアウト／インする境界）は空を返す。
+    ///
+    /// 直近の非空エントリを無条件に外挿すると、顔がフレーム外へ出てもしばらく
+    /// 「出た瞬間の位置」にモザイクが固定され、戻ってきても追従しない。両側補間に
+    /// することで、検出が途切れた瞬間にモザイクを消し、再入場フレームから追従する。
     func lookupFaces(at time: Double) -> [FaceLandmarkSet] {
         if let exact = detectionCache[time], !exact.isEmpty { return exact }
-        var best: (dist: Double, faces: [FaceLandmarkSet]) = (1.0, [])
-        for (t, faces) in detectionCache {
-            guard !faces.isEmpty else { continue }
+        // 10fps プリスキャン基準で 5 フレームまでの検出抜けをブリッジする。
+        // これより長い抜けは「顔自体が画面外にいる」可能性が高いので外挿しない。
+        let bridgeWindow = 0.5
+        var before: (dist: Double, faces: [FaceLandmarkSet])?
+        var hasAfter = false
+        for (t, faces) in detectionCache where !faces.isEmpty {
             let d = abs(t - time)
-            if d < best.dist { best = (d, faces) }
+            guard d <= bridgeWindow else { continue }
+            if t <= time {
+                if before == nil || d < before!.dist { before = (d, faces) }
+            } else {
+                hasAfter = true
+            }
         }
-        return best.faces
+        guard let before, hasAfter else { return [] }
+        return before.faces
     }
 
     /// 選択中の顔に対応する、指定時刻のランドマークセットを返す。
@@ -533,7 +547,9 @@ public final class MosaicEditorModel: ObservableObject {
                         }
                     }
                     var counts = matchCountsCopy
-                    for (i, target) in self.detectedFaces.prefix(expectedFaceCount).enumerated() {
+                    // detectedFaces がプリスキャン中に安全網で追加された場合に備えて配列を拡張する
+                    while counts.count < self.detectedFaces.count { counts.append(0) }
+                    for (i, target) in self.detectedFaces.enumerated() {
                         let tc = self.normalizedCentroid(of: target.landmarks)
                         if facesForCache.contains(where: { face in
                             let fc = self.normalizedCentroid(of: face)
