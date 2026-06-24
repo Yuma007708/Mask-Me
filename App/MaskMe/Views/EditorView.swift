@@ -1,6 +1,7 @@
 import SwiftUI
 
-/// 編集画面：プレビュー + 顔選択 + コントロール + 保存/エクスポート。
+/// 編集画面：プレビュー（上）/ 調整バー（中・タブ選択でスライド表示）/
+/// カスタムタブバー（下）の3段構成。
 struct EditorView: View {
     let media: PickedMedia
     /// 再開する下書きのパラメータ（新規編集なら nil）。
@@ -20,8 +21,10 @@ struct EditorView: View {
 
     struct ResumeContext {
         let draftID: UUID
-        let blockSize: Float
-        let faceEnabled: Bool
+        let faceMosaicOn: Bool
+        let backgroundMosaicOn: Bool
+        let faceBlockSize: Float
+        let backgroundBlockSize: Float
         let manualRects: [CGRect]
     }
 
@@ -42,7 +45,7 @@ struct EditorView: View {
             if model.mode == .video {
                 VideoControlsView(model: model)
             }
-            bottomSheet
+            dock
         }
         .navigationTitle(model.mode == .photo ? "写真編集" : "動画編集")
         .navigationBarTitleDisplayMode(.inline)
@@ -51,11 +54,9 @@ struct EditorView: View {
         .task { loadMedia() }
         .overlay { exportOverlay }
         .onAppear {
-            // 写真は「強制終了で破棄／復帰では保持」を判別するための在席トークン。
             if model.mode == .photo { photoEditingActive = true }
         }
         .onChange(of: scenePhase) { phase in
-            // アプリを離れた時は写真・動画とも編集中の状態を保持（下書き保存）。
             if phase == .background { persistDraft() }
         }
         .confirmationDialog(
@@ -100,10 +101,8 @@ struct EditorView: View {
                 ProgressView().tint(.white)
             }
 
-            // 矩形描画オーバーレイ（常時有効）
             RectangleDrawingOverlay(model: model)
 
-            // 動画: 追従バッジ
             if model.mode == .video {
                 VStack {
                     HStack {
@@ -118,66 +117,72 @@ struct EditorView: View {
         .frame(maxWidth: .infinity, minHeight: 200, maxHeight: .infinity)
     }
 
-    // MARK: - Bottom sheet
+    // MARK: - Dock（下段：顔サムネ / 調整バー / タブバー）
 
-    private var bottomSheet: some View {
+    private var dock: some View {
         VStack(spacing: 0) {
-            Capsule()
-                .fill(Color(uiColor: .systemGray4))
-                .frame(width: 36, height: 4)
-                .padding(.top, 10)
-                .padding(.bottom, 8)
-
-            // 顔サムネイル選択
-            FaceSelectorView(model: model)
-            Divider().padding(.horizontal, 16)
-
-            // 顔モザイク ON/OFF
-            Toggle("顔をモザイク", isOn: $model.faceEnabled.animation())
-                .font(.subheadline.weight(.medium))
-                .padding(.horizontal, 18)
-                .padding(.vertical, 8)
-            Divider().padding(.horizontal, 18)
-
-            // 粗さスライダー
-            sliderRow("粗さ", value: $model.blockSize, range: 4...80)
-                .padding(.horizontal, 18)
-
-            // 矩形追加ボタン
-            HStack {
-                Label("画面をドラッグして矩形を追加", systemImage: "rectangle.dashed")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Spacer()
-                if !model.manualRegions.isEmpty {
-                    Button("クリア") {
-                        withAnimation { model.manualRegions.removeAll() }
-                    }
-                    .font(.caption.weight(.medium))
-                    .foregroundStyle(.red)
-                }
+            // 顔タブ選択時のみ、対象の顔サムネイル列を表示。
+            if model.activeTab == .face {
+                FaceSelectorView(model: model)
+                    .transition(.opacity)
             }
-            .padding(.horizontal, 18)
-            .padding(.vertical, 6)
+
+            // 調整バー：タブ選択中だけ下からスライドして表示。
+            if model.activeTab != nil {
+                adjustmentBar
+                    .transition(.move(edge: .bottom))
+            }
+
+            EffectTabBar(model: model)
         }
-        .frame(maxWidth: .infinity, alignment: .top)
+        .frame(maxWidth: .infinity)
         .background(Color(uiColor: .systemBackground))
+        .clipped()
+        .animation(.easeOut(duration: 0.25), value: model.activeTab)
     }
 
-    private func sliderRow(
-        _ title: String,
-        value: Binding<Float>,
-        range: ClosedRange<Float>
-    ) -> some View {
-        HStack(spacing: 12) {
-            Text(title)
+    private var adjustmentBar: some View {
+        HStack(spacing: 10) {
+            Button { model.undo() } label: {
+                Image(systemName: "arrow.uturn.backward")
+                    .font(.system(size: 16, weight: .medium))
+                    .frame(width: 34, height: 34)
+                    .background(Circle().fill(Color(uiColor: .secondarySystemBackground)))
+            }
+            .buttonStyle(.plain)
+            .disabled(!model.canUndo)
+            .opacity(model.canUndo ? 1 : 0.35)
+
+            Button { model.redo() } label: {
+                Image(systemName: "arrow.uturn.forward")
+                    .font(.system(size: 16, weight: .medium))
+                    .frame(width: 34, height: 34)
+                    .background(Circle().fill(Color(uiColor: .secondarySystemBackground)))
+            }
+            .buttonStyle(.plain)
+            .disabled(!model.canRedo)
+            .opacity(model.canRedo ? 1 : 0.35)
+
+            Text("粗さ")
                 .font(.footnote)
                 .foregroundStyle(Color(uiColor: .secondaryLabel))
-                .frame(width: 36, alignment: .leading)
-            Slider(value: value, in: range)
+
+            Slider(
+                value: Binding(get: { model.activeBlockSize }, set: { model.activeBlockSize = $0 }),
+                in: 4...80
+            )
+
+            Button { model.confirmAdjustment() } label: {
+                Image(systemName: "checkmark")
+                    .font(.system(size: 16, weight: .bold))
+                    .foregroundStyle(.white)
+                    .frame(width: 38, height: 38)
+                    .background(Circle().fill(Color.accentColor))
+            }
+            .buttonStyle(.plain)
         }
-        .padding(.vertical, 9)
-        .overlay(alignment: .bottom) { Divider() }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
     }
 
     // MARK: - Toolbar
@@ -222,11 +227,12 @@ struct EditorView: View {
         case .image(let image): model.load(image: image)
         case .video(let url): model.load(videoURL: url)
         }
-        // 下書きから再開した場合はパラメータ（粗さ・顔ON/OFF・手動矩形）を復元。
         if let resume {
             model.applyRestoredParameters(
-                blockSize: resume.blockSize,
-                faceEnabled: resume.faceEnabled,
+                faceMosaicOn: resume.faceMosaicOn,
+                backgroundMosaicOn: resume.backgroundMosaicOn,
+                faceBlockSize: resume.faceBlockSize,
+                backgroundBlockSize: resume.backgroundBlockSize,
                 manualRects: resume.manualRects
             )
         }
@@ -243,7 +249,6 @@ struct EditorView: View {
         case .video:
             await model.exportVideo()
             if model.didSave, let id = videoDraftID {
-                // エクスポート完了で下書きは不要に。
                 if let draft = draftStore.videoDrafts.first(where: { $0.id == id }) {
                     draftStore.removeVideoDraft(draft)
                 }
@@ -254,7 +259,6 @@ struct EditorView: View {
 
     // MARK: - 戻る・状態保持
 
-    /// 戻るボタン：写真は破棄確認、動画は下書き保存して戻る。
     private func handleBack() {
         switch model.mode {
         case .photo:
@@ -265,7 +269,6 @@ struct EditorView: View {
         }
     }
 
-    /// 編集中の状態を下書きとして保存する（離脱時・動画の戻る時に共通利用）。
     private func persistDraft() {
         switch model.mode {
         case .photo:
@@ -273,8 +276,10 @@ struct EditorView: View {
             draftStore.savePhotoDraft(
                 existing: nil,
                 image: image,
-                blockSize: model.blockSize,
-                faceEnabled: model.faceEnabled,
+                faceMosaicOn: model.faceMosaicOn,
+                backgroundMosaicOn: model.backgroundMosaicOn,
+                faceBlockSize: model.faceBlockSize,
+                backgroundBlockSize: model.backgroundBlockSize,
                 manualRects: model.manualRects
             )
             photoEditingActive = true
@@ -283,8 +288,10 @@ struct EditorView: View {
             let draft = draftStore.saveVideoDraft(
                 existing: videoDraftID,
                 sourceURL: sourceURL,
-                blockSize: model.blockSize,
-                faceEnabled: model.faceEnabled,
+                faceMosaicOn: model.faceMosaicOn,
+                backgroundMosaicOn: model.backgroundMosaicOn,
+                faceBlockSize: model.faceBlockSize,
+                backgroundBlockSize: model.backgroundBlockSize,
                 manualRects: model.manualRects,
                 thumbnail: model.previewImage
             )

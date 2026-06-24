@@ -11,6 +11,29 @@ import Metal
 public final class MosaicEditorModel: ObservableObject {
     public enum Mode { case photo, video }
 
+    /// エディタ下部のカスタムタブ（今後拡張）。
+    public enum EffectTab: String, CaseIterable, Identifiable {
+        case face
+        case background
+        public var id: String { rawValue }
+        public var title: String {
+            switch self {
+            case .face: return "顔"
+            case .background: return "背景"
+            }
+        }
+    }
+
+    /// Undo/Redo 用の編集スナップショット。
+    struct EditSnapshot: Equatable {
+        var faceMosaicOn: Bool
+        var backgroundMosaicOn: Bool
+        var faceBlockSize: Float
+        var backgroundBlockSize: Float
+        var selectedFaceIDs: Set<UUID>
+        var manualRects: [CGRect]
+    }
+
     // プレビュー
     @Published public var previewImage: UIImage?
     @Published public private(set) var status: TrackingStatus = .idle
@@ -26,9 +49,17 @@ public final class MosaicEditorModel: ObservableObject {
     @Published public private(set) var videoDuration: Double = 0
     @Published public var isPlaying = false
 
-    // コントロール
-    @Published public var blockSize: Float = 28
-    @Published public var faceEnabled = true
+    // コントロール（効果ごと）
+    @Published public var faceMosaicOn = true
+    @Published public var backgroundMosaicOn = false
+    @Published public var faceBlockSize: Float = 28
+    @Published public var backgroundBlockSize: Float = 28
+    /// 選択中タブ（nil＝未選択：調整バーは非表示）。
+    @Published public var activeTab: EffectTab?
+
+    // Undo / Redo
+    @Published public private(set) var canUndo = false
+    @Published public private(set) var canRedo = false
 
     // エクスポート・保存
     @Published public var exportProgress: Double?
@@ -53,6 +84,18 @@ public final class MosaicEditorModel: ObservableObject {
 
     private let edgeSoftness: Float = 0.35
 
+    // 背景セグメンテーション
+    #if canImport(Vision)
+    private let segmenter = PersonSegmenter(quality: .balanced)
+    #endif
+    /// 現在の静止プレビューフレームに対する背景マスク（人物前景を反転）。
+    private var backgroundMask: MaskBuffer?
+
+    // Undo / Redo
+    private var undoStack: [EditSnapshot] = []
+    private var redoStack: [EditSnapshot] = []
+    private var lastCommitted: EditSnapshot?
+
     public init(
         mode: Mode,
         recents: RecentItemsStore,
@@ -71,7 +114,13 @@ public final class MosaicEditorModel: ObservableObject {
     }
 
     private func bindControls() {
-        Publishers.Merge($blockSize.map { _ in () }, $faceEnabled.map { _ in () })
+        let changes: [AnyPublisher<Void, Never>] = [
+            $faceMosaicOn.map { _ in () }.eraseToAnyPublisher(),
+            $backgroundMosaicOn.map { _ in () }.eraseToAnyPublisher(),
+            $faceBlockSize.map { _ in () }.eraseToAnyPublisher(),
+            $backgroundBlockSize.map { _ in () }.eraseToAnyPublisher()
+        ]
+        Publishers.MergeMany(changes)
             .debounce(for: .milliseconds(16), scheduler: RunLoop.main)
             .sink { [weak self] in
                 self?.renderPreview()
@@ -94,8 +143,10 @@ public final class MosaicEditorModel: ObservableObject {
         }
         manualRegions = []
         sourceTexture = makeTexture(from: normalized)
+        updateBackgroundMask(from: normalized)
         renderer?.reset()
         renderPreview()
+        resetHistory()
         isLoading = false
     }
 
@@ -114,6 +165,7 @@ public final class MosaicEditorModel: ObservableObject {
                            isSelected: true)
             }
             sourceTexture = makeTexture(from: frame)
+            updateBackgroundMask(from: frame)
         }
         manualRegions = []
 
@@ -123,6 +175,7 @@ public final class MosaicEditorModel: ObservableObject {
 
         renderer?.reset()
         renderPreview()
+        resetHistory()
         isLoading = false
 
         if let r = renderer {
@@ -139,6 +192,7 @@ public final class MosaicEditorModel: ObservableObject {
         detectedFaces[idx].isSelected.toggle()
         renderPreview()
         previewController?.invalidate()
+        commitEdit()
     }
 
     // MARK: - 矩形内クロップ検出（失敗時は動画フレームをサーチし、それでも失敗なら固定矩形）
@@ -243,12 +297,14 @@ public final class MosaicEditorModel: ObservableObject {
 
     private func appendManualRect(_ normalizedRect: CGRect) {
         manualRegions.append(ManualRegion(id: UUID(), normalizedRect: normalizedRect))
+        commitEdit()
     }
 
     public func removeManualRegion(_ id: UUID) {
         manualRegions.removeAll { $0.id == id }
         renderPreview()
         previewController?.invalidate()
+        commitEdit()
     }
 
     // MARK: - 動画再生制御
@@ -272,6 +328,7 @@ public final class MosaicEditorModel: ObservableObject {
                 let t = position * videoDuration
                 if let frame = Self.frame(of: asset, at: t) {
                     sourceTexture = makeTexture(from: frame)
+                    updateBackgroundMask(from: frame)
                 }
             }
         }
@@ -296,6 +353,7 @@ public final class MosaicEditorModel: ObservableObject {
             }
             sourceImage = frame
             sourceTexture = makeTexture(from: frame)
+            updateBackgroundMask(from: frame)
             renderPreview()
             previewController?.invalidate()
         }
@@ -307,14 +365,31 @@ public final class MosaicEditorModel: ObservableObject {
         guard let renderer, let tex = sourceTexture else { return }
         applyControls(to: renderer)
 
-        let landmarks = faceEnabled ? detectedFaces.filter(\.isSelected).map(\.landmarks) : []
-        let extra = manualRegionPaths(for: CGSize(width: tex.width, height: tex.height))
+        var current = tex
 
-        guard let result = renderer.renderToNewTexture(
-            input: tex, landmarkSets: landmarks, additionalPaths: extra
-        ) else { return }
+        // 顔モザイク（立体メッシュ）
+        if faceMosaicOn {
+            let landmarks = detectedFaces.filter(\.isSelected).map(\.landmarks)
+            let extra = manualRegionPaths(for: CGSize(width: tex.width, height: tex.height))
+            if let result = renderer.renderToNewTexture(
+                input: current, landmarkSets: landmarks, additionalPaths: extra
+            ) {
+                current = result.texture
+            }
+        }
 
-        if let cg = MetalTextureUtilities.cgImage(from: result.texture) {
+        // 背景モザイク（平面）。人物前景を反転したマスクで背景だけを処理。
+        if backgroundMosaicOn, let mask = backgroundMask {
+            if let out = renderer.renderBackgroundToNewTexture(
+                input: current,
+                mask: mask,
+                block: backgroundBlockSize
+            ) {
+                current = out
+            }
+        }
+
+        if let cg = MetalTextureUtilities.cgImage(from: current) {
             previewImage = UIImage(cgImage: cg)
         }
     }
@@ -336,7 +411,7 @@ public final class MosaicEditorModel: ObservableObject {
 
     /// 選択中の顔に対応する、指定時刻のランドマークセットを返す。
     func selectedLandmarks(at time: Double) -> [FaceLandmarkSet] {
-        guard faceEnabled else { return [] }
+        guard faceMosaicOn else { return [] }
         let cached = lookupFaces(at: time)
         let selected = detectedFaces.filter(\.isSelected)
         if selected.isEmpty { return [] }
@@ -469,12 +544,128 @@ public final class MosaicEditorModel: ObservableObject {
     public var manualRects: [CGRect] { manualRegions.map(\.normalizedRect) }
 
     /// 下書きから復元したパラメータを適用してプレビューを更新する。
-    public func applyRestoredParameters(blockSize: Float, faceEnabled: Bool, manualRects: [CGRect]) {
-        self.blockSize = blockSize
-        self.faceEnabled = faceEnabled
+    public func applyRestoredParameters(
+        faceMosaicOn: Bool,
+        backgroundMosaicOn: Bool,
+        faceBlockSize: Float,
+        backgroundBlockSize: Float,
+        manualRects: [CGRect]
+    ) {
+        self.faceMosaicOn = faceMosaicOn
+        self.backgroundMosaicOn = backgroundMosaicOn
+        self.faceBlockSize = faceBlockSize
+        self.backgroundBlockSize = backgroundBlockSize
         self.manualRegions = manualRects.map { ManualRegion(id: UUID(), normalizedRect: $0) }
         renderPreview()
         previewController?.invalidate()
+        resetHistory()
+    }
+
+    // MARK: - タブ操作・確定（UI から呼ぶ）
+
+    /// タブをタップ：未選択なら選択（効果ON＋調整バー表示）、選択中の同じタブなら効果OFF＋閉じる。
+    public func tapTab(_ tab: EffectTab) {
+        if activeTab == tab {
+            setEffect(tab, on: false)
+            activeTab = nil
+        } else {
+            activeTab = tab
+            setEffect(tab, on: true)
+        }
+    }
+
+    private func setEffect(_ tab: EffectTab, on: Bool) {
+        switch tab {
+        case .face: faceMosaicOn = on
+        case .background: backgroundMosaicOn = on
+        }
+        commitEdit()
+    }
+
+    /// 調整バーの粗さ（選択中タブ）への双方向バインディング。
+    public var activeBlockSize: Float {
+        get {
+            switch activeTab {
+            case .background: return backgroundBlockSize
+            default: return faceBlockSize
+            }
+        }
+        set {
+            switch activeTab {
+            case .background: backgroundBlockSize = newValue
+            default: faceBlockSize = newValue
+            }
+        }
+    }
+
+    /// 調整バーの確定チェック：現在の状態を編集履歴に確定する。
+    public func confirmAdjustment() {
+        commitEdit()
+        activeTab = nil
+    }
+
+    // MARK: - Undo / Redo
+
+    private func snapshot() -> EditSnapshot {
+        EditSnapshot(
+            faceMosaicOn: faceMosaicOn,
+            backgroundMosaicOn: backgroundMosaicOn,
+            faceBlockSize: faceBlockSize,
+            backgroundBlockSize: backgroundBlockSize,
+            selectedFaceIDs: Set(detectedFaces.filter(\.isSelected).map(\.id)),
+            manualRects: manualRegions.map(\.normalizedRect)
+        )
+    }
+
+    private func apply(_ snap: EditSnapshot) {
+        faceMosaicOn = snap.faceMosaicOn
+        backgroundMosaicOn = snap.backgroundMosaicOn
+        faceBlockSize = snap.faceBlockSize
+        backgroundBlockSize = snap.backgroundBlockSize
+        for index in detectedFaces.indices {
+            detectedFaces[index].isSelected = snap.selectedFaceIDs.contains(detectedFaces[index].id)
+        }
+        manualRegions = snap.manualRects.map { ManualRegion(id: UUID(), normalizedRect: $0) }
+        renderPreview()
+        previewController?.invalidate()
+    }
+
+    /// 編集履歴の基準を現在状態にリセット（メディア読み込み・復元時）。
+    private func resetHistory() {
+        undoStack.removeAll()
+        redoStack.removeAll()
+        lastCommitted = snapshot()
+        canUndo = false
+        canRedo = false
+    }
+
+    /// 直前確定からの変化があれば履歴に積む。
+    func commitEdit() {
+        let now = snapshot()
+        guard now != lastCommitted else { return }
+        if let last = lastCommitted { undoStack.append(last) }
+        redoStack.removeAll()
+        lastCommitted = now
+        canUndo = !undoStack.isEmpty
+        canRedo = false
+    }
+
+    public func undo() {
+        guard let previous = undoStack.popLast() else { return }
+        redoStack.append(lastCommitted ?? snapshot())
+        lastCommitted = previous
+        apply(previous)
+        canUndo = !undoStack.isEmpty
+        canRedo = !redoStack.isEmpty
+    }
+
+    public func redo() {
+        guard let next = redoStack.popLast() else { return }
+        if let last = lastCommitted { undoStack.append(last) }
+        lastCommitted = next
+        apply(next)
+        canUndo = !undoStack.isEmpty
+        canRedo = !redoStack.isEmpty
     }
 
     // MARK: - 保存・エクスポート
@@ -501,7 +692,9 @@ public final class MosaicEditorModel: ObservableObject {
                 selectedFaceTargets: detectedFaces.filter { selectedIDs.contains($0.id) },
                 manualRegions: manualRegions,
                 detectionCache: detectionCache,
-                faceEnabled: faceEnabled
+                faceEnabled: faceMosaicOn,
+                backgroundEnabled: backgroundMosaicOn,
+                backgroundBlock: backgroundBlockSize
             ) { fraction in
                 Task { @MainActor [weak self] in self?.exportProgress = fraction }
             }
@@ -519,8 +712,18 @@ public final class MosaicEditorModel: ObservableObject {
     // MARK: - Private helpers
 
     private func applyControls(to renderer: MosaicRenderer) {
-        renderer.params = MosaicParams(block: blockSize, edgeSoftness: edgeSoftness)
+        renderer.params = MosaicParams(block: faceBlockSize, edgeSoftness: edgeSoftness)
         renderer.enabledRegions = [.faceOval]
+    }
+
+    /// 静止プレビュー用フレームの背景マスクを更新する（人物前景を反転）。
+    private func updateBackgroundMask(from image: UIImage) {
+        #if canImport(Vision)
+        guard let cg = image.cgImage else { backgroundMask = nil; return }
+        backgroundMask = segmenter.backgroundMask(cgImage: cg)
+        #else
+        backgroundMask = nil
+        #endif
     }
 
     private func makeTexture(from image: UIImage) -> MTLTexture? {

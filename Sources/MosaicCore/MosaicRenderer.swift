@@ -58,8 +58,8 @@ public enum MosaicRendererError: Error, Equatable {
 /// preview can also be driven through ``MTKViewDelegate`` conformance.
 public final class MosaicRenderer: NSObject {
     public let device: MTLDevice
-    private let commandQueue: MTLCommandQueue
-    private let pipelineState: MTLComputePipelineState
+    let commandQueue: MTLCommandQueue
+    let pipelineState: MTLComputePipelineState
     private var maskBuilder: FaceMaskBuilder
     /// Mesh-mapped 3D mosaic renderer; used when a full face mesh is available,
     /// otherwise the contour-mask compute path is the fallback.
@@ -86,6 +86,9 @@ public final class MosaicRenderer: NSObject {
     }
 
     private var maskTexture: MTLTexture?
+    /// Cached mask texture for the flat background mosaic (see
+    /// ``renderBackground(input:into:mask:block:waitForCompletion:)``).
+    var backgroundMaskTexture: MTLTexture?
 
     /// Creates a renderer.
     /// - Parameters:
@@ -396,7 +399,7 @@ public final class MosaicRenderer: NSObject {
         return texture
     }
 
-    private func copy(
+    func copy(
         from source: MTLTexture,
         to destination: MTLTexture,
         waitForCompletion: Bool = false

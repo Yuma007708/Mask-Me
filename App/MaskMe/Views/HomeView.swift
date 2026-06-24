@@ -48,8 +48,10 @@ struct HomeView: View {
         pickedMedia = .video(draftStore.sourceURL(for: draft))
         resumeContext = EditorView.ResumeContext(
             draftID: draft.id,
-            blockSize: draft.blockSize,
-            faceEnabled: draft.faceEnabled,
+            faceMosaicOn: draft.faceMosaicOn,
+            backgroundMosaicOn: draft.backgroundMosaicOn,
+            faceBlockSize: draft.faceBlockSize,
+            backgroundBlockSize: draft.backgroundBlockSize,
             manualRects: draft.manualRects
         )
         showEditor = true

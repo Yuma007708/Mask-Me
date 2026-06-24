@@ -23,6 +23,9 @@ final class MosaicPreviewController {
     private var videoURL: URL?
     /// 直前フレームで有効だったランドマーク。キャッシュ欠落時のフリーズ用。
     private var lastKnownLandmarks: [FaceLandmarkSet] = []
+    #if canImport(Vision)
+    private let segmenter = PersonSegmenter(quality: .balanced)
+    #endif
 
     private(set) var duration: Double = 0
 
@@ -172,7 +175,22 @@ final class MosaicPreviewController {
             additionalPaths: additionalPaths
         ) else { return }
 
-        guard let cgImage = MetalTextureUtilities.cgImage(from: result.texture) else { return }
+        // 背景モザイク（平面）。人物前景を反転したマスクで背景だけを処理。
+        var finalTexture = result.texture
+        if model.backgroundMosaicOn {
+            #if canImport(Vision)
+            if let mask = segmenter.backgroundMask(pixelBuffer: pixelBuffer),
+               let out = renderer.renderBackgroundToNewTexture(
+                   input: finalTexture,
+                   mask: mask,
+                   block: model.backgroundBlockSize
+               ) {
+                finalTexture = out
+            }
+            #endif
+        }
+
+        guard let cgImage = MetalTextureUtilities.cgImage(from: finalTexture) else { return }
         let uiImage = UIImage(cgImage: cgImage)
 
         model.previewImage = uiImage
