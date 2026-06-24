@@ -164,12 +164,21 @@ final class MosaicPreviewController {
         guard let tex = inputTex else { return }
 
         let timeSec = currentTime.seconds
-        var landmarks = model.selectedLandmarks(at: timeSec)
-        // キャッシュにヒットしなければ直前の有効ランドマークで freeze する
-        if landmarks.isEmpty {
-            landmarks = lastKnownLandmarks
+        // 顔タブが OFF のときは顔ランドマークを使わない。
+        // selectedLandmarks は顔 OFF でも [] を返すが、その [] を「キャッシュ欠落」と
+        // 取り違えて直前ランドマークに freeze すると、顔 OFF にしても顔モザイクが
+        // 残り続けてしまう（かつエクスポートと食い違う）。OFF時は freeze 用の保持も解除する。
+        var landmarks: [FaceLandmarkSet] = []
+        if model.faceMosaicOn {
+            landmarks = model.selectedLandmarks(at: timeSec)
+            // キャッシュにヒットしなければ直前の有効ランドマークで freeze する
+            if landmarks.isEmpty {
+                landmarks = lastKnownLandmarks
+            } else {
+                lastKnownLandmarks = landmarks
+            }
         } else {
-            lastKnownLandmarks = landmarks
+            lastKnownLandmarks = []
         }
         // 手動矩形は顔検出の補助なので顔タブ（faceMosaicOn）の状態に従う。
         // 解像度は（縮小後の）実テクスチャに合わせる（フルサイズだと 720px 縮小時に位置がずれる）。
