@@ -444,14 +444,18 @@ public final class MosaicEditorModel: ObservableObject {
     private func startPreScan(asset: AVAsset) {
         scanTask?.cancel()
         isScanning = true
-        let scanner = makeFaceLandmarker(forVideo: false)
+        // video モードスキャナー: temporal tracking で連続フレームの検出精度を上げる
+        let scanner = makeFaceLandmarker(forVideo: true)
+        // クロップ検出は独立した image モードスキャナーで行う
+        // （video モードスキャナーの timestamp 系列を乱さないため）
+        let cropScanner = makeFaceLandmarker(forVideo: false)
         let initialFaceCount = detectedFaces.count
         // ManualRegion の矩形をバックグラウンドスレッドに渡す（値型なので安全）
         let cropRects = manualRegions.map(\.normalizedRect)
 
-        scanTask = Task.detached(priority: .background) { [weak self, scanner, asset, initialFaceCount, cropRects] in
+        scanTask = Task.detached(priority: .background) { [weak self, scanner, cropScanner, asset, initialFaceCount, cropRects] in
             await self?.runPreScan(
-                asset: asset, scanner: scanner,
+                asset: asset, scanner: scanner, cropScanner: cropScanner,
                 expectedFaceCount: initialFaceCount, cropRects: cropRects
             )
         }
@@ -460,6 +464,7 @@ public final class MosaicEditorModel: ObservableObject {
     nonisolated private func runPreScan(
         asset: AVAsset,
         scanner: FaceLandmarking,
+        cropScanner: FaceLandmarking,
         expectedFaceCount: Int,
         cropRects: [CGRect] = []
     ) async {
@@ -482,9 +487,11 @@ public final class MosaicEditorModel: ObservableObject {
             let cmTime = CMTime(seconds: t, preferredTimescale: 600)
             if let cg = try? generator.copyCGImage(at: cmTime, actualTime: nil) {
                 let img = UIImage(cgImage: cg)
-                var faces = scanner.allLandmarks(in: img)
+                // video モードで temporal tracking を活用しながら検出
+                var faces = scanner.allLandmarks(in: img, timestampMs: Int(t * 1000))
 
                 // ManualRegion の矩形クロップでも検出を試みる（小さい顔や検出しにくい顔への対応）
+                // クロップは image モードスキャナーを使用（video モードの timestamp 系列を保護）
                 for rect in cropRects {
                     let pixelRect = CGRect(
                         x: rect.origin.x * CGFloat(cg.width),
@@ -493,7 +500,7 @@ public final class MosaicEditorModel: ObservableObject {
                         height: rect.height * CGFloat(cg.height)
                     )
                     if let crop = cg.cropping(to: pixelRect) {
-                        let cropFaces = scanner.allLandmarks(in: UIImage(cgImage: crop))
+                        let cropFaces = cropScanner.allLandmarks(in: UIImage(cgImage: crop))
                         faces += cropFaces.map { $0.remapped(into: rect) }
                     }
                 }

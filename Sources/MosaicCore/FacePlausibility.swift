@@ -9,13 +9,13 @@ extension FaceLandmarkSet {
     /// Tunable bounds for what counts as a plausible human face.
     public enum Plausibility {
         /// Face bounding box (normalized) must be at least this on its larger side.
-        public static let minSpan: CGFloat = 0.04
+        public static let minSpan: CGFloat = 0.02          // 遠距離・広角ショットの小さい顔を拾えるよう緩和
         /// …and no larger than this (a real face never exceeds the frame much).
         public static let maxSpan: CGFloat = 1.6
         /// Face height / width must fall in this range.
         public static let aspectRange: ClosedRange<CGFloat> = 0.7...2.6
         /// Inter-ocular distance / face width must fall in this range.
-        public static let eyeWidthRatioRange: ClosedRange<CGFloat> = 0.15...0.85
+        public static let eyeWidthRatioRange: ClosedRange<CGFloat> = 0.10...0.95  // 斜め向きの顔を許容するよう緩和
     }
 
     /// `true` when the landmarks form a geometrically plausible face.

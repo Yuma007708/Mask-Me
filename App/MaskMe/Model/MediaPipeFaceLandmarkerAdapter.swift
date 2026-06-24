@@ -68,7 +68,8 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
 
     public func allLandmarks(in image: UIImage, timestampMs: Int) -> [FaceLandmarkSet] {
         if let result = detectAllVideoFrame(image, timestampMs: timestampMs) { return result }
-        if let enhanced = enhance(image), let result = detectAllVideoFrame(enhanced, timestampMs: timestampMs) { return result }
+        // enhance の2回目は +1ms でタイムスタンプを進める（video モードは単調増加が必須）
+        if let enhanced = enhance(image), let result = detectAllVideoFrame(enhanced, timestampMs: timestampMs + 1) { return result }
         return []
     }
 
