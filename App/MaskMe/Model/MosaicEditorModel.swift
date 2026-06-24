@@ -89,7 +89,7 @@ public final class MosaicEditorModel: ObservableObject {
     private let segmenter = PersonSegmenter(quality: .balanced)
     #endif
     /// 現在の静止プレビューフレームに対する背景マスク（人物前景を反転）。
-    private var backgroundMask: PersonMask?
+    private var backgroundMask: MaskBuffer?
 
     // Undo / Redo
     private var undoStack: [EditSnapshot] = []
@@ -382,7 +382,7 @@ public final class MosaicEditorModel: ObservableObject {
         if backgroundMosaicOn, let mask = backgroundMask {
             if let out = renderer.renderBackgroundToNewTexture(
                 input: current,
-                maskBytes: mask.bytes, maskWidth: mask.width, maskHeight: mask.height,
+                mask: mask,
                 block: backgroundBlockSize
             ) {
                 current = out

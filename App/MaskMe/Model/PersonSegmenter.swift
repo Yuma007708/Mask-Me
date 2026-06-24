@@ -11,15 +11,7 @@
 
 import CoreVideo
 import CoreGraphics
-
-/// A single-channel background mask (`0` = subject, `255` = background), packed
-/// tightly (`bytesPerRow == width`). Declared outside the Vision gate so callers
-/// can hold it regardless of whether Vision is available.
-public struct PersonMask {
-    public let bytes: [UInt8]
-    public let width: Int
-    public let height: Int
-}
+import MosaicCore
 
 #if canImport(Vision)
 import Vision
@@ -36,18 +28,18 @@ public final class PersonSegmenter: @unchecked Sendable {
     }
 
     /// Background mask for a still image.
-    public func backgroundMask(cgImage: CGImage) -> PersonMask? {
+    public func backgroundMask(cgImage: CGImage) -> MaskBuffer? {
         let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
         return run(handler)
     }
 
     /// Background mask for a video frame / camera buffer.
-    public func backgroundMask(pixelBuffer: CVPixelBuffer) -> PersonMask? {
+    public func backgroundMask(pixelBuffer: CVPixelBuffer) -> MaskBuffer? {
         let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, options: [:])
         return run(handler)
     }
 
-    private func run(_ handler: VNImageRequestHandler) -> PersonMask? {
+    private func run(_ handler: VNImageRequestHandler) -> MaskBuffer? {
         let request = VNGeneratePersonSegmentationRequest()
         request.qualityLevel = quality
         request.outputPixelFormat = kCVPixelFormatType_OneComponent8
@@ -62,7 +54,7 @@ public final class PersonSegmenter: @unchecked Sendable {
 
     /// Copies the foreground mask out of `buffer`, inverting it so the background
     /// becomes the high (mosaicked) value, and packs it into tightly-rowed bytes.
-    private func invertedMask(from buffer: CVPixelBuffer) -> PersonMask? {
+    private func invertedMask(from buffer: CVPixelBuffer) -> MaskBuffer? {
         CVPixelBufferLockBaseAddress(buffer, .readOnly)
         defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
 
@@ -83,7 +75,7 @@ public final class PersonSegmenter: @unchecked Sendable {
                 }
             }
         }
-        return PersonMask(bytes: bytes, width: width, height: height)
+        return MaskBuffer(bytes: bytes, width: width, height: height)
     }
 }
 #endif

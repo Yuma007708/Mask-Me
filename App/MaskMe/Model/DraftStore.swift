@@ -42,10 +42,14 @@ struct EditingDraft: Codable, Identifiable, Equatable {
         self.updatedAt = updatedAt
     }
 
+    // 現行スキーマのキー（Encodable はこれで自動合成される）。
     private enum CodingKeys: String, CodingKey {
         case id, kind, sourceFileName, manualRects, thumbnailFileName, updatedAt
         case faceMosaicOn, backgroundMosaicOn, faceBlockSize, backgroundBlockSize
-        // 旧スキーマ（後方互換）
+    }
+
+    // 旧スキーマ（後方互換デコード専用）。
+    private enum LegacyKeys: String, CodingKey {
         case blockSize, faceEnabled
     }
 
@@ -57,12 +61,18 @@ struct EditingDraft: Codable, Identifiable, Equatable {
         manualRects = try c.decodeIfPresent([CGRect].self, forKey: .manualRects) ?? []
         thumbnailFileName = try c.decodeIfPresent(String.self, forKey: .thumbnailFileName)
         updatedAt = try c.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date()
-        // 新フィールド優先、無ければ旧フィールド、さらに無ければ既定値。
+
+        // 旧フィールド（存在すれば）。
+        let legacy = try? decoder.container(keyedBy: LegacyKeys.self)
+        let legacyFaceEnabled = (try? legacy?.decodeIfPresent(Bool.self, forKey: .faceEnabled)).flatMap { $0 }
+        let legacyBlock = (try? legacy?.decodeIfPresent(Float.self, forKey: .blockSize)).flatMap { $0 }
+
+        // 新フィールド優先 → 旧フィールド → 既定値。
         faceMosaicOn = try c.decodeIfPresent(Bool.self, forKey: .faceMosaicOn)
-            ?? c.decodeIfPresent(Bool.self, forKey: .faceEnabled) ?? true
+            ?? legacyFaceEnabled ?? true
         backgroundMosaicOn = try c.decodeIfPresent(Bool.self, forKey: .backgroundMosaicOn) ?? false
         faceBlockSize = try c.decodeIfPresent(Float.self, forKey: .faceBlockSize)
-            ?? c.decodeIfPresent(Float.self, forKey: .blockSize) ?? 28
+            ?? legacyBlock ?? 28
         backgroundBlockSize = try c.decodeIfPresent(Float.self, forKey: .backgroundBlockSize) ?? 28
     }
 }

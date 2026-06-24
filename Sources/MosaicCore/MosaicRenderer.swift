@@ -58,8 +58,8 @@ public enum MosaicRendererError: Error, Equatable {
 /// preview can also be driven through ``MTKViewDelegate`` conformance.
 public final class MosaicRenderer: NSObject {
     public let device: MTLDevice
-    private let commandQueue: MTLCommandQueue
-    private let pipelineState: MTLComputePipelineState
+    let commandQueue: MTLCommandQueue
+    let pipelineState: MTLComputePipelineState
     private var maskBuilder: FaceMaskBuilder
     /// Mesh-mapped 3D mosaic renderer; used when a full face mesh is available,
     /// otherwise the contour-mask compute path is the fallback.
@@ -86,6 +86,9 @@ public final class MosaicRenderer: NSObject {
     }
 
     private var maskTexture: MTLTexture?
+    /// Cached mask texture for the flat background mosaic (see
+    /// ``renderBackground(input:into:mask:block:waitForCompletion:)``).
+    var backgroundMaskTexture: MTLTexture?
 
     /// Creates a renderer.
     /// - Parameters:
@@ -345,94 +348,6 @@ public final class MosaicRenderer: NSObject {
         if waitForCompletion { commandBuffer.waitUntilCompleted() }
     }
 
-    // MARK: - Background mosaic (flat)
-
-    private var backgroundMaskTexture: MTLTexture?
-
-    /// Applies a flat (axis-aligned) mosaic to the regions marked by an external
-    /// mask. The mask is single-channel (`0` = keep original, `1` = mosaic) and is
-    /// sampled in normalized UV, so it need not match the input resolution — a
-    /// lower-res person/background mask from Vision works directly.
-    ///
-    /// Used for the "background only" effect: pass the inverted person mask so the
-    /// background is pixelated while the subject stays sharp. Independent of the
-    /// face block size (`block` is passed explicitly).
-    @discardableResult
-    public func renderBackground(
-        input: MTLTexture,
-        into output: MTLTexture,
-        maskBytes: [UInt8],
-        maskWidth: Int,
-        maskHeight: Int,
-        block: Float,
-        waitForCompletion: Bool = false
-    ) -> Bool {
-        guard maskWidth > 0, maskHeight > 0,
-              maskBytes.count >= maskWidth * maskHeight,
-              let mask = reuseOrMakeBackgroundMaskTexture(width: maskWidth, height: maskHeight) else {
-            copy(from: input, to: output, waitForCompletion: waitForCompletion)
-            return false
-        }
-        maskBytes.withUnsafeBytes { raw in
-            guard let base = raw.baseAddress else { return }
-            mask.replace(
-                region: MTLRegionMake2D(0, 0, maskWidth, maskHeight),
-                mipmapLevel: 0,
-                withBytes: base,
-                bytesPerRow: maskWidth
-            )
-        }
-
-        var kernelParams = params
-        kernelParams.block = block
-        kernelParams.edgeSoftness = 0.5
-        kernelParams.rotation = 0
-        kernelParams.centerX = Float(input.width) / 2
-        kernelParams.centerY = Float(input.height) / 2
-        kernelParams.width = UInt32(input.width)
-        kernelParams.height = UInt32(input.height)
-
-        guard let commandBuffer = commandQueue.makeCommandBuffer(),
-              let encoder = commandBuffer.makeComputeCommandEncoder() else {
-            copy(from: input, to: output, waitForCompletion: waitForCompletion)
-            return false
-        }
-        encoder.setComputePipelineState(pipelineState)
-        encoder.setTexture(input, index: 0)
-        encoder.setTexture(output, index: 1)
-        encoder.setTexture(mask, index: 2)
-        withUnsafeBytes(of: &kernelParams) { raw in
-            encoder.setBytes(raw.baseAddress!, length: raw.count, index: 0)
-        }
-        let tg = MTLSize(width: 16, height: 16, depth: 1)
-        let groups = MTLSize(
-            width: (input.width + 15) / 16,
-            height: (input.height + 15) / 16,
-            depth: 1
-        )
-        encoder.dispatchThreadgroups(groups, threadsPerThreadgroup: tg)
-        encoder.endEncoding()
-        commandBuffer.commit()
-        if waitForCompletion { commandBuffer.waitUntilCompleted() }
-        return true
-    }
-
-    private func reuseOrMakeBackgroundMaskTexture(width: Int, height: Int) -> MTLTexture? {
-        if let existing = backgroundMaskTexture, existing.width == width, existing.height == height {
-            return existing
-        }
-        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .r8Unorm,
-            width: width,
-            height: height,
-            mipmapped: false
-        )
-        descriptor.usage = [.shaderRead]
-        let texture = device.makeTexture(descriptor: descriptor)
-        backgroundMaskTexture = texture
-        return texture
-    }
-
     /// Resets tracking back to idle (e.g. when switching media).
     public func reset() {
         evaluator.reset()
@@ -484,7 +399,7 @@ public final class MosaicRenderer: NSObject {
         return texture
     }
 
-    private func copy(
+    func copy(
         from source: MTLTexture,
         to destination: MTLTexture,
         waitForCompletion: Bool = false

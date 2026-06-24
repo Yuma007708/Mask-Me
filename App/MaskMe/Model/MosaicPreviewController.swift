@@ -182,7 +182,7 @@ final class MosaicPreviewController {
             if let mask = segmenter.backgroundMask(pixelBuffer: pixelBuffer),
                let out = renderer.renderBackgroundToNewTexture(
                    input: finalTexture,
-                   maskBytes: mask.bytes, maskWidth: mask.width, maskHeight: mask.height,
+                   mask: mask,
                    block: model.backgroundBlockSize
                ) {
                 finalTexture = out

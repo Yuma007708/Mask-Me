@@ -167,7 +167,7 @@ public final class VideoMosaicExporter: @unchecked Sendable {
             // 映像：必要になったタイミングでだけコールバックが呼ばれる（Thread.sleep 不要）。
             var frameIndex = 0
             var cachedLandmarkSets: [FaceLandmarkSet] = []
-            var cachedBackgroundMask: PersonMask?
+            var cachedBackgroundMask: MaskBuffer?
             let videoQueue = DispatchQueue(label: "mask-me.export.video")
             group.enter()
             videoInput.requestMediaDataWhenReady(on: videoQueue) { [self] in
@@ -244,7 +244,7 @@ public final class VideoMosaicExporter: @unchecked Sendable {
         _ sample: CMSampleBuffer,
         frameIndex: inout Int,
         cachedLandmarkSets: inout [FaceLandmarkSet],
-        cachedBackgroundMask: inout PersonMask?,
+        cachedBackgroundMask: inout MaskBuffer?,
         detectionInterval: Int,
         selectedFaceTargets: [FaceTarget],
         manualRegions: [ManualRegion],
@@ -314,7 +314,7 @@ public final class VideoMosaicExporter: @unchecked Sendable {
         pts: CMTime,
         landmarkSets: [FaceLandmarkSet],
         additionalPaths: [FaceMaskBuilder.RegionPath],
-        backgroundMask: PersonMask?,
+        backgroundMask: MaskBuffer?,
         backgroundBlock: Float,
         adaptor: AVAssetWriterInputPixelBufferAdaptor,
         input: AVAssetWriterInput,
@@ -339,8 +339,7 @@ public final class VideoMosaicExporter: @unchecked Sendable {
             )
             renderer.renderBackground(
                 input: intermediate, into: outputTexture,
-                maskBytes: backgroundMask.bytes,
-                maskWidth: backgroundMask.width, maskHeight: backgroundMask.height,
+                mask: backgroundMask,
                 block: backgroundBlock, waitForCompletion: true
             )
         } else {
@@ -356,7 +355,7 @@ public final class VideoMosaicExporter: @unchecked Sendable {
     }
 
     /// 動画フレームの背景マスク（人物前景を反転）。Vision 非対応環境では nil。
-    private func segmentBackground(_ buffer: CVPixelBuffer) -> PersonMask? {
+    private func segmentBackground(_ buffer: CVPixelBuffer) -> MaskBuffer? {
         #if canImport(Vision)
         return backgroundSegmenter.backgroundMask(pixelBuffer: buffer)
         #else

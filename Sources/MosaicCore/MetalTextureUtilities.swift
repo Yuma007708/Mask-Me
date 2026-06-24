@@ -184,9 +184,7 @@ extension MosaicRenderer {
     @discardableResult
     public func renderBackgroundToNewTexture(
         input: MTLTexture,
-        maskBytes: [UInt8],
-        maskWidth: Int,
-        maskHeight: Int,
+        mask: MaskBuffer,
         block: Float
     ) -> MTLTexture? {
         guard let output = MetalTextureUtilities.makeOutputTexture(like: input, device: device) else {
@@ -195,9 +193,7 @@ extension MosaicRenderer {
         let ok = renderBackground(
             input: input,
             into: output,
-            maskBytes: maskBytes,
-            maskWidth: maskWidth,
-            maskHeight: maskHeight,
+            mask: mask,
             block: block,
             waitForCompletion: true
         )
