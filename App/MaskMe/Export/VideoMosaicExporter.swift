@@ -6,7 +6,7 @@ import MosaicCore
 #if canImport(Metal)
 import Metal
 
-/// 動画をフレームごとに処理してモザイクを適用し、新しい .mov ファイルを生成する。
+/// 動画をフレームごとに処理してモザイクを適用し、新しい .mp4 ファイルを生成する。
 /// 元動画の音声トラックはそのまま（再エンコードせず）保持する。
 public final class VideoMosaicExporter: @unchecked Sendable {
     public enum ExportError: Error {
@@ -77,7 +77,7 @@ public final class VideoMosaicExporter: @unchecked Sendable {
 
         // --- Writer: 映像（HEVC優先）＋ 音声（パススルー） ---
         let outputURL = makeOutputURL()
-        let writer = try AVAssetWriter(outputURL: outputURL, fileType: .mov)
+        let writer = try AVAssetWriter(outputURL: outputURL, fileType: .mp4)
         let (videoInput, adaptor) = try makeVideoWriterInput(
             size: naturalSize,
             transform: transform,
@@ -421,7 +421,7 @@ public final class VideoMosaicExporter: @unchecked Sendable {
 
     private func makeOutputURL() -> URL {
         FileManager.default.temporaryDirectory
-            .appendingPathComponent("mosaic-\(UUID().uuidString).mov")
+            .appendingPathComponent("mosaic-\(UUID().uuidString).mp4")
     }
 }
 #endif
