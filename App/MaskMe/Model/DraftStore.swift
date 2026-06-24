@@ -9,8 +9,10 @@ struct EditingDraft: Codable, Identifiable, Equatable {
     let kind: MediaKind
     /// File name (in Documents/Drafts) of the copied source media.
     let sourceFileName: String
-    let blockSize: Float
-    let faceEnabled: Bool
+    let faceMosaicOn: Bool
+    let backgroundMosaicOn: Bool
+    let faceBlockSize: Float
+    let backgroundBlockSize: Float
     /// Manual mosaic rectangles, in normalized [0,1] coordinates.
     let manualRects: [CGRect]
     let thumbnailFileName: String?
@@ -20,8 +22,10 @@ struct EditingDraft: Codable, Identifiable, Equatable {
         id: UUID = UUID(),
         kind: MediaKind,
         sourceFileName: String,
-        blockSize: Float,
-        faceEnabled: Bool,
+        faceMosaicOn: Bool,
+        backgroundMosaicOn: Bool,
+        faceBlockSize: Float,
+        backgroundBlockSize: Float,
         manualRects: [CGRect],
         thumbnailFileName: String?,
         updatedAt: Date = Date()
@@ -29,11 +33,37 @@ struct EditingDraft: Codable, Identifiable, Equatable {
         self.id = id
         self.kind = kind
         self.sourceFileName = sourceFileName
-        self.blockSize = blockSize
-        self.faceEnabled = faceEnabled
+        self.faceMosaicOn = faceMosaicOn
+        self.backgroundMosaicOn = backgroundMosaicOn
+        self.faceBlockSize = faceBlockSize
+        self.backgroundBlockSize = backgroundBlockSize
         self.manualRects = manualRects
         self.thumbnailFileName = thumbnailFileName
         self.updatedAt = updatedAt
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, kind, sourceFileName, manualRects, thumbnailFileName, updatedAt
+        case faceMosaicOn, backgroundMosaicOn, faceBlockSize, backgroundBlockSize
+        // 旧スキーマ（後方互換）
+        case blockSize, faceEnabled
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        kind = try c.decode(MediaKind.self, forKey: .kind)
+        sourceFileName = try c.decode(String.self, forKey: .sourceFileName)
+        manualRects = try c.decodeIfPresent([CGRect].self, forKey: .manualRects) ?? []
+        thumbnailFileName = try c.decodeIfPresent(String.self, forKey: .thumbnailFileName)
+        updatedAt = try c.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date()
+        // 新フィールド優先、無ければ旧フィールド、さらに無ければ既定値。
+        faceMosaicOn = try c.decodeIfPresent(Bool.self, forKey: .faceMosaicOn)
+            ?? c.decodeIfPresent(Bool.self, forKey: .faceEnabled) ?? true
+        backgroundMosaicOn = try c.decodeIfPresent(Bool.self, forKey: .backgroundMosaicOn) ?? false
+        faceBlockSize = try c.decodeIfPresent(Float.self, forKey: .faceBlockSize)
+            ?? c.decodeIfPresent(Float.self, forKey: .blockSize) ?? 28
+        backgroundBlockSize = try c.decodeIfPresent(Float.self, forKey: .backgroundBlockSize) ?? 28
     }
 }
 
@@ -80,8 +110,10 @@ final class DraftStore: ObservableObject {
     func saveVideoDraft(
         existing: UUID?,
         sourceURL: URL,
-        blockSize: Float,
-        faceEnabled: Bool,
+        faceMosaicOn: Bool,
+        backgroundMosaicOn: Bool,
+        faceBlockSize: Float,
+        backgroundBlockSize: Float,
         manualRects: [CGRect],
         thumbnail: UIImage?
     ) -> EditingDraft? {
@@ -91,8 +123,10 @@ final class DraftStore: ObservableObject {
             id: existing ?? UUID(),
             kind: .video,
             sourceFileName: sourceFileName,
-            blockSize: blockSize,
-            faceEnabled: faceEnabled,
+            faceMosaicOn: faceMosaicOn,
+            backgroundMosaicOn: backgroundMosaicOn,
+            faceBlockSize: faceBlockSize,
+            backgroundBlockSize: backgroundBlockSize,
             manualRects: manualRects,
             thumbnailFileName: thumbName
         )
@@ -109,8 +143,10 @@ final class DraftStore: ObservableObject {
     func savePhotoDraft(
         existing: UUID?,
         image: UIImage,
-        blockSize: Float,
-        faceEnabled: Bool,
+        faceMosaicOn: Bool,
+        backgroundMosaicOn: Bool,
+        faceBlockSize: Float,
+        backgroundBlockSize: Float,
         manualRects: [CGRect]
     ) {
         let id = existing ?? photoDraft?.id ?? UUID()
@@ -122,8 +158,10 @@ final class DraftStore: ObservableObject {
             id: id,
             kind: .photo,
             sourceFileName: fileName,
-            blockSize: blockSize,
-            faceEnabled: faceEnabled,
+            faceMosaicOn: faceMosaicOn,
+            backgroundMosaicOn: backgroundMosaicOn,
+            faceBlockSize: faceBlockSize,
+            backgroundBlockSize: backgroundBlockSize,
             manualRects: manualRects,
             thumbnailFileName: nil
         )
