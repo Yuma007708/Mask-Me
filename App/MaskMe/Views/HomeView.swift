@@ -5,6 +5,7 @@ import SwiftUI
 struct HomeView: View {
     @EnvironmentObject private var recents: RecentItemsStore
     @EnvironmentObject private var draftStore: DraftStore
+    @EnvironmentObject private var settingsStore: DetectionSettingsStore
 
     @State private var pickerFilter: MediaPicker.Filter?
     @State private var pickedMedia: PickedMedia?
@@ -38,7 +39,8 @@ struct HomeView: View {
         }
         .navigationDestination(isPresented: $showEditor) {
             if let pickedMedia {
-                EditorView(media: pickedMedia, recents: recents, resume: resumeContext)
+                EditorView(media: pickedMedia, recents: recents, resume: resumeContext,
+                           settings: settingsStore.settings)
             }
         }
     }
@@ -48,8 +50,10 @@ struct HomeView: View {
         pickedMedia = .video(draftStore.sourceURL(for: draft))
         resumeContext = EditorView.ResumeContext(
             draftID: draft.id,
-            blockSize: draft.blockSize,
-            faceEnabled: draft.faceEnabled,
+            faceMosaicOn: draft.faceMosaicOn,
+            backgroundMosaicOn: draft.backgroundMosaicOn,
+            faceBlockSize: draft.faceBlockSize,
+            backgroundBlockSize: draft.backgroundBlockSize,
             manualRects: draft.manualRects
         )
         showEditor = true

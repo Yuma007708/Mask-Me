@@ -21,6 +21,9 @@ public final class VideoMosaicExporter: @unchecked Sendable {
     private let landmarker: FaceLandmarking
     private let ciContext: CIContext
     private var textureCache: CVMetalTextureCache?
+    #if canImport(Vision)
+    private let backgroundSegmenter = PersonSegmenter(quality: .balanced)
+    #endif
 
     public init(renderer: MosaicRenderer, landmarker: FaceLandmarking) {
         self.renderer = renderer
@@ -36,13 +39,16 @@ public final class VideoMosaicExporter: @unchecked Sendable {
     ///   - selectedFaceTargets: モザイク対象として選択された顔。空の場合は全顔に適用。
     ///   - manualRegions: 手動指定矩形（全フレームに適用）。
     ///   - detectionCache: 事前スキャンで得た検出キャッシュ（不使用のときは空辞書）。
-    ///   - faceEnabled: 顔モザイク全体の ON/OFF。false なら手動矩形のみ適用。
+    ///   - faceEnabled: 顔モザイク全体の ON/OFF。手動矩形も顔検出の補助なので
+    ///     これに従う（false なら顔・手動矩形ともに適用しない）。
     public func export(
         asset: AVAsset,
         selectedFaceTargets: [FaceTarget] = [],
         manualRegions: [ManualRegion] = [],
         detectionCache: [Double: [FaceLandmarkSet]] = [:],
         faceEnabled: Bool = true,
+        backgroundEnabled: Bool = false,
+        backgroundBlock: Float = 28,
         progress: @Sendable @escaping (Double) -> Void
     ) async throws -> URL {
         guard let videoTrack = try await asset.loadTracks(withMediaType: .video).first else {
@@ -123,6 +129,8 @@ public final class VideoMosaicExporter: @unchecked Sendable {
             manualRegions: manualRegions,
             detectionCache: detectionCache,
             faceEnabled: faceEnabled,
+            backgroundEnabled: backgroundEnabled,
+            backgroundBlock: backgroundBlock,
             cache: cache,
             progress: progress
         )
@@ -146,6 +154,8 @@ public final class VideoMosaicExporter: @unchecked Sendable {
         manualRegions: [ManualRegion],
         detectionCache: [Double: [FaceLandmarkSet]],
         faceEnabled: Bool,
+        backgroundEnabled: Bool,
+        backgroundBlock: Float,
         cache: CVMetalTextureCache,
         progress: @Sendable @escaping (Double) -> Void
     ) async throws -> URL {
@@ -158,6 +168,7 @@ public final class VideoMosaicExporter: @unchecked Sendable {
             // 映像：必要になったタイミングでだけコールバックが呼ばれる（Thread.sleep 不要）。
             var frameIndex = 0
             var cachedLandmarkSets: [FaceLandmarkSet] = []
+            var cachedBackgroundMask: MaskBuffer?
             let videoQueue = DispatchQueue(label: "mask-me.export.video")
             group.enter()
             videoInput.requestMediaDataWhenReady(on: videoQueue) { [self] in
@@ -174,11 +185,14 @@ public final class VideoMosaicExporter: @unchecked Sendable {
                             sample,
                             frameIndex: &frameIndex,
                             cachedLandmarkSets: &cachedLandmarkSets,
+                            cachedBackgroundMask: &cachedBackgroundMask,
                             detectionInterval: detectionInterval,
                             selectedFaceTargets: selectedFaceTargets,
                             manualRegions: manualRegions,
                             detectionCache: detectionCache,
                             faceEnabled: faceEnabled,
+                            backgroundEnabled: backgroundEnabled,
+                            backgroundBlock: backgroundBlock,
                             videoSize: videoSize,
                             totalSeconds: totalSeconds,
                             adaptor: adaptor,
@@ -231,11 +245,14 @@ public final class VideoMosaicExporter: @unchecked Sendable {
         _ sample: CMSampleBuffer,
         frameIndex: inout Int,
         cachedLandmarkSets: inout [FaceLandmarkSet],
+        cachedBackgroundMask: inout MaskBuffer?,
         detectionInterval: Int,
         selectedFaceTargets: [FaceTarget],
         manualRegions: [ManualRegion],
         detectionCache: [Double: [FaceLandmarkSet]],
         faceEnabled: Bool,
+        backgroundEnabled: Bool,
+        backgroundBlock: Float,
         videoSize: CGSize,
         totalSeconds: Double,
         adaptor: AVAssetWriterInputPixelBufferAdaptor,
@@ -261,18 +278,33 @@ public final class VideoMosaicExporter: @unchecked Sendable {
             } else {
                 cachedLandmarkSets = []
             }
+            // 背景マスクも同じ間隔で更新（毎フレームは重いため）。
+            // セグメンテーションが一時的に失敗（nil）したら直前のマスクを維持する。
+            // nil で上書きすると、その間のフレームで背景が無加工のまま書き出されてしまう。
+            if backgroundEnabled {
+                if let mask = segmentBackground(sourceBuffer) {
+                    cachedBackgroundMask = mask
+                }
+            } else {
+                cachedBackgroundMask = nil
+            }
         }
 
-        let additionalPaths = manualRegions.map { region -> FaceMaskBuilder.RegionPath in
-            let path = FaceMaskBuilder.rectPath(from: region.normalizedRect, in: videoSize)
-            return FaceMaskBuilder.RegionPath(path: path, value: 0.4)
-        }
+        // 手動矩形は顔検出の補助なので顔モザイク（faceEnabled）の状態に従う。
+        let additionalPaths = faceEnabled
+            ? manualRegions.map { region -> FaceMaskBuilder.RegionPath in
+                let path = FaceMaskBuilder.rectPath(from: region.normalizedRect, in: videoSize)
+                return FaceMaskBuilder.RegionPath(path: path, value: 0.4)
+            }
+            : []
 
         try? mosaicFrame(
             sourceBuffer: sourceBuffer,
             pts: pts,
             landmarkSets: cachedLandmarkSets,
             additionalPaths: additionalPaths,
+            backgroundMask: cachedBackgroundMask,
+            backgroundBlock: backgroundBlock,
             adaptor: adaptor,
             input: input,
             cache: cache
@@ -290,6 +322,8 @@ public final class VideoMosaicExporter: @unchecked Sendable {
         pts: CMTime,
         landmarkSets: [FaceLandmarkSet],
         additionalPaths: [FaceMaskBuilder.RegionPath],
+        backgroundMask: MaskBuffer?,
+        backgroundBlock: Float,
         adaptor: AVAssetWriterInputPixelBufferAdaptor,
         input: AVAssetWriterInput,
         cache: CVMetalTextureCache
@@ -303,16 +337,38 @@ public final class VideoMosaicExporter: @unchecked Sendable {
             throw ExportError.pixelBufferPoolUnavailable
         }
 
-        renderer.render(
-            input: inputTexture,
-            into: outputTexture,
-            landmarkSets: landmarkSets,
-            additionalPaths: additionalPaths,
-            waitForCompletion: true
-        )
+        // 背景パスがある場合は、顔モザイクを中間テクスチャに描いてから背景を出力に重ねる。
+        if let backgroundMask,
+           let intermediate = MetalTextureUtilities.makeOutputTexture(like: inputTexture, device: renderer.device) {
+            renderer.render(
+                input: inputTexture, into: intermediate,
+                landmarkSets: landmarkSets, additionalPaths: additionalPaths,
+                waitForCompletion: true
+            )
+            renderer.renderBackground(
+                input: intermediate, into: outputTexture,
+                mask: backgroundMask,
+                block: backgroundBlock, waitForCompletion: true
+            )
+        } else {
+            renderer.render(
+                input: inputTexture, into: outputTexture,
+                landmarkSets: landmarkSets, additionalPaths: additionalPaths,
+                waitForCompletion: true
+            )
+        }
 
         // 呼び出し側が isReadyForMoreMediaData を確認済みなのでビジーウェイト不要。
         adaptor.append(outBuffer, withPresentationTime: pts)
+    }
+
+    /// 動画フレームの背景マスク（人物前景を反転）。Vision 非対応環境では nil。
+    private func segmentBackground(_ buffer: CVPixelBuffer) -> MaskBuffer? {
+        #if canImport(Vision)
+        return backgroundSegmenter.backgroundMask(pixelBuffer: buffer)
+        #else
+        return nil
+        #endif
     }
 
     // MARK: - Detection helpers

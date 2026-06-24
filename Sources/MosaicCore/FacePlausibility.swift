@@ -9,17 +9,29 @@ extension FaceLandmarkSet {
     /// Tunable bounds for what counts as a plausible human face.
     public enum Plausibility {
         /// Face bounding box (normalized) must be at least this on its larger side.
-        public static let minSpan: CGFloat = 0.04
+        public static let minSpan: CGFloat = 0.02          // 遠距離・広角ショットの小さい顔を拾えるよう緩和
         /// …and no larger than this (a real face never exceeds the frame much).
         public static let maxSpan: CGFloat = 1.6
         /// Face height / width must fall in this range.
         public static let aspectRange: ClosedRange<CGFloat> = 0.7...2.6
         /// Inter-ocular distance / face width must fall in this range.
-        public static let eyeWidthRatioRange: ClosedRange<CGFloat> = 0.15...0.85
+        public static let eyeWidthRatioRange: ClosedRange<CGFloat> = 0.10...0.95  // 斜め向きの顔を許容するよう緩和
     }
 
     /// `true` when the landmarks form a geometrically plausible face.
+    /// Uses the static `Plausibility` defaults — call `isPlausibleFace(minSpan:eyeRatioRange:)`
+    /// to override them with user-defined settings.
     public var isPlausibleFace: Bool {
+        isPlausibleFace(minSpan: Plausibility.minSpan,
+                        eyeRatioRange: Plausibility.eyeWidthRatioRange)
+    }
+
+    /// Parameterized variant — used by `MediaPipeFaceLandmarkerAdapter` to apply
+    /// user-configured `DetectionSettings` without coupling MosaicCore to the app layer.
+    public func isPlausibleFace(
+        minSpan: CGFloat,
+        eyeRatioRange: ClosedRange<CGFloat>
+    ) -> Bool {
         let unit = CGSize(width: 1, height: 1)
         let oval = polygon(for: .faceOval, in: unit)
         guard oval.count >= 3 else { return false }
@@ -36,7 +48,7 @@ extension FaceLandmarkSet {
         guard width > 0, height > 0 else { return false }
 
         let span = max(width, height)
-        guard span >= Plausibility.minSpan, span <= Plausibility.maxSpan else { return false }
+        guard span >= minSpan, span <= Plausibility.maxSpan else { return false }
 
         let aspect = height / width
         guard Plausibility.aspectRange.contains(aspect) else { return false }
@@ -45,7 +57,7 @@ extension FaceLandmarkSet {
         let leftEye = points[Self.leftEyeOuterIndex].point(in: unit)
         let eyeDistance = hypot(leftEye.x - rightEye.x, leftEye.y - rightEye.y)
         let eyeRatio = eyeDistance / width
-        guard Plausibility.eyeWidthRatioRange.contains(eyeRatio) else { return false }
+        guard eyeRatioRange.contains(eyeRatio) else { return false }
 
         // Eyes must sit above the mouth (image y grows downward).
         let mouth = polygon(for: .lips, in: unit)

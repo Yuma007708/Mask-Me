@@ -178,5 +178,26 @@ extension MosaicRenderer {
         )
         return (output, status)
     }
+
+    /// 背景マスク（人物前景を反転したもの）で平面モザイクをかけ、新規テクスチャを返す。
+    /// マスクは正規化UVでサンプリングするので入力解像度と一致しなくてよい。
+    @discardableResult
+    public func renderBackgroundToNewTexture(
+        input: MTLTexture,
+        mask: MaskBuffer,
+        block: Float
+    ) -> MTLTexture? {
+        guard let output = MetalTextureUtilities.makeOutputTexture(like: input, device: device) else {
+            return nil
+        }
+        let ok = renderBackground(
+            input: input,
+            into: output,
+            mask: mask,
+            block: block,
+            waitForCompletion: true
+        )
+        return ok ? output : nil
+    }
 }
 #endif
