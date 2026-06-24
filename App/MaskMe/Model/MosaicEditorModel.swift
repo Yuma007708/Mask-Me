@@ -57,9 +57,10 @@ public final class MosaicEditorModel: ObservableObject {
     /// 選択中タブ（nil＝未選択：調整バーは非表示）。
     @Published public var activeTab: EffectTab?
 
-    // Undo / Redo
-    @Published public private(set) var canUndo = false
-    @Published public private(set) var canRedo = false
+    // Undo / Redo（スタックの空判定から導出。スタックは @Published なので
+    // 変化時に objectWillChange が発火し、UI は最新の値を読み直す）
+    public var canUndo: Bool { !undoStack.isEmpty }
+    public var canRedo: Bool { !redoStack.isEmpty }
 
     // エクスポート・保存
     @Published public var exportProgress: Double?
@@ -90,10 +91,12 @@ public final class MosaicEditorModel: ObservableObject {
     #endif
     /// 現在の静止プレビューフレームに対する背景マスク（人物前景を反転）。
     private var backgroundMask: MaskBuffer?
+    /// 背景マスクを計算する元フレーム。背景タブを後から ON にしたときに再計算できるよう保持する。
+    private var backgroundMaskSource: UIImage?
 
     // Undo / Redo
-    private var undoStack: [EditSnapshot] = []
-    private var redoStack: [EditSnapshot] = []
+    @Published private var undoStack: [EditSnapshot] = []
+    @Published private var redoStack: [EditSnapshot] = []
     private var lastCommitted: EditSnapshot?
 
     public init(
@@ -367,7 +370,8 @@ public final class MosaicEditorModel: ObservableObject {
 
         var current = tex
 
-        // 顔モザイク（立体メッシュ）
+        // 顔モザイク（立体メッシュ）＋手動矩形。
+        // 手動矩形は顔検出を補助するものなので、顔タブ（faceMosaicOn）の状態に従う。
         if faceMosaicOn {
             let landmarks = detectedFaces.filter(\.isSelected).map(\.landmarks)
             let extra = manualRegionPaths(for: CGSize(width: tex.width, height: tex.height))
@@ -556,6 +560,7 @@ public final class MosaicEditorModel: ObservableObject {
         self.faceBlockSize = faceBlockSize
         self.backgroundBlockSize = backgroundBlockSize
         self.manualRegions = manualRects.map { ManualRegion(id: UUID(), normalizedRect: $0) }
+        recomputeBackgroundMask()
         renderPreview()
         previewController?.invalidate()
         resetHistory()
@@ -577,7 +582,10 @@ public final class MosaicEditorModel: ObservableObject {
     private func setEffect(_ tab: EffectTab, on: Bool) {
         switch tab {
         case .face: faceMosaicOn = on
-        case .background: backgroundMosaicOn = on
+        case .background:
+            backgroundMosaicOn = on
+            // 背景を ON にした時点で（保持中フレームから）マスクを用意する。
+            recomputeBackgroundMask()
         }
         commitEdit()
     }
@@ -626,6 +634,7 @@ public final class MosaicEditorModel: ObservableObject {
             detectedFaces[index].isSelected = snap.selectedFaceIDs.contains(detectedFaces[index].id)
         }
         manualRegions = snap.manualRects.map { ManualRegion(id: UUID(), normalizedRect: $0) }
+        recomputeBackgroundMask()
         renderPreview()
         previewController?.invalidate()
     }
@@ -635,8 +644,6 @@ public final class MosaicEditorModel: ObservableObject {
         undoStack.removeAll()
         redoStack.removeAll()
         lastCommitted = snapshot()
-        canUndo = false
-        canRedo = false
     }
 
     /// 直前確定からの変化があれば履歴に積む。
@@ -646,8 +653,6 @@ public final class MosaicEditorModel: ObservableObject {
         if let last = lastCommitted { undoStack.append(last) }
         redoStack.removeAll()
         lastCommitted = now
-        canUndo = !undoStack.isEmpty
-        canRedo = false
     }
 
     public func undo() {
@@ -655,8 +660,6 @@ public final class MosaicEditorModel: ObservableObject {
         redoStack.append(lastCommitted ?? snapshot())
         lastCommitted = previous
         apply(previous)
-        canUndo = !undoStack.isEmpty
-        canRedo = !redoStack.isEmpty
     }
 
     public func redo() {
@@ -664,8 +667,6 @@ public final class MosaicEditorModel: ObservableObject {
         if let last = lastCommitted { undoStack.append(last) }
         lastCommitted = next
         apply(next)
-        canUndo = !undoStack.isEmpty
-        canRedo = !redoStack.isEmpty
     }
 
     // MARK: - 保存・エクスポート
@@ -716,10 +717,20 @@ public final class MosaicEditorModel: ObservableObject {
         renderer.enabledRegions = [.faceOval]
     }
 
-    /// 静止プレビュー用フレームの背景マスクを更新する（人物前景を反転）。
+    /// 静止プレビュー用フレームを保持し、背景マスクを更新する（人物前景を反転）。
     private func updateBackgroundMask(from image: UIImage) {
+        backgroundMaskSource = image
+        recomputeBackgroundMask()
+    }
+
+    /// 保持中のフレームから背景マスクを計算する。
+    /// 背景モザイクが OFF のときは Vision を実行しない（読み込み・シーク毎の重い無駄処理を避ける）。
+    private func recomputeBackgroundMask() {
         #if canImport(Vision)
-        guard let cg = image.cgImage else { backgroundMask = nil; return }
+        guard backgroundMosaicOn, let cg = backgroundMaskSource?.cgImage else {
+            backgroundMask = nil
+            return
+        }
         backgroundMask = segmenter.backgroundMask(cgImage: cg)
         #else
         backgroundMask = nil

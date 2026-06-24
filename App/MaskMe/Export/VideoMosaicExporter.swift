@@ -39,7 +39,8 @@ public final class VideoMosaicExporter: @unchecked Sendable {
     ///   - selectedFaceTargets: モザイク対象として選択された顔。空の場合は全顔に適用。
     ///   - manualRegions: 手動指定矩形（全フレームに適用）。
     ///   - detectionCache: 事前スキャンで得た検出キャッシュ（不使用のときは空辞書）。
-    ///   - faceEnabled: 顔モザイク全体の ON/OFF。false なら手動矩形のみ適用。
+    ///   - faceEnabled: 顔モザイク全体の ON/OFF。手動矩形も顔検出の補助なので
+    ///     これに従う（false なら顔・手動矩形ともに適用しない）。
     public func export(
         asset: AVAsset,
         selectedFaceTargets: [FaceTarget] = [],
@@ -277,18 +278,25 @@ public final class VideoMosaicExporter: @unchecked Sendable {
             } else {
                 cachedLandmarkSets = []
             }
-            // 背景マスクも同じ間隔で更新（毎フレームは重いため）
+            // 背景マスクも同じ間隔で更新（毎フレームは重いため）。
+            // セグメンテーションが一時的に失敗（nil）したら直前のマスクを維持する。
+            // nil で上書きすると、その間のフレームで背景が無加工のまま書き出されてしまう。
             if backgroundEnabled {
-                cachedBackgroundMask = segmentBackground(sourceBuffer)
+                if let mask = segmentBackground(sourceBuffer) {
+                    cachedBackgroundMask = mask
+                }
             } else {
                 cachedBackgroundMask = nil
             }
         }
 
-        let additionalPaths = manualRegions.map { region -> FaceMaskBuilder.RegionPath in
-            let path = FaceMaskBuilder.rectPath(from: region.normalizedRect, in: videoSize)
-            return FaceMaskBuilder.RegionPath(path: path, value: 0.4)
-        }
+        // 手動矩形は顔検出の補助なので顔モザイク（faceEnabled）の状態に従う。
+        let additionalPaths = faceEnabled
+            ? manualRegions.map { region -> FaceMaskBuilder.RegionPath in
+                let path = FaceMaskBuilder.rectPath(from: region.normalizedRect, in: videoSize)
+                return FaceMaskBuilder.RegionPath(path: path, value: 0.4)
+            }
+            : []
 
         try? mosaicFrame(
             sourceBuffer: sourceBuffer,
