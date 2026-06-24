@@ -180,7 +180,6 @@ private struct TipButton: View {
                 .font(.footnote)
                 .padding(12)
                 .frame(maxWidth: 260)
-                .presentationCompactAdaptation(.popover)
         }
     }
 }

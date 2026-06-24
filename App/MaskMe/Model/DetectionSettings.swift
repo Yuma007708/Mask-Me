@@ -2,48 +2,72 @@ import Foundation
 
 /// 顔検出に関わる全パラメーターを1つにまとめた値型。
 /// UserDefaults に JSON でシリアライズして永続化する。
-struct DetectionSettings: Equatable, Codable {
-    var minFaceDetectionConfidence: Float = 0.2
-    var minFacePresenceConfidence: Float  = 0.2
-    var minTrackingConfidence: Float      = 0.2
-    var numFaces: Int                     = 5
-    var minSpan: Double                   = 0.02
-    var eyeWidthRatioMin: Double          = 0.10
-    var eyeWidthRatioMax: Double          = 0.95
+public struct DetectionSettings: Equatable, Codable {
+    public var minFaceDetectionConfidence: Float = 0.2
+    public var minFacePresenceConfidence: Float = 0.2
+    public var minTrackingConfidence: Float = 0.2
+    public var numFaces: Int = 5
+    public var minSpan: Double = 0.02
+    public var eyeWidthRatioMin: Double = 0.10
+    public var eyeWidthRatioMax: Double = 0.95
 
-    static let presets: [(id: String, name: String, settings: DetectionSettings)] = [
-        ("outdoor", "屋外", DetectionSettings(
+    public init(
+        minFaceDetectionConfidence: Float = 0.2,
+        minFacePresenceConfidence: Float = 0.2,
+        minTrackingConfidence: Float = 0.2,
+        numFaces: Int = 5,
+        minSpan: Double = 0.02,
+        eyeWidthRatioMin: Double = 0.10,
+        eyeWidthRatioMax: Double = 0.95
+    ) {
+        self.minFaceDetectionConfidence = minFaceDetectionConfidence
+        self.minFacePresenceConfidence = minFacePresenceConfidence
+        self.minTrackingConfidence = minTrackingConfidence
+        self.numFaces = numFaces
+        self.minSpan = minSpan
+        self.eyeWidthRatioMin = eyeWidthRatioMin
+        self.eyeWidthRatioMax = eyeWidthRatioMax
+    }
+
+    public struct Preset {
+        public let id: String
+        public let name: String
+        public let settings: DetectionSettings
+    }
+
+    public static let presets: [Preset] = [
+        Preset(id: "outdoor", name: "屋外", settings: DetectionSettings(
             minFaceDetectionConfidence: 0.4,
-            minFacePresenceConfidence:  0.4,
-            minTrackingConfidence:      0.4,
+            minFacePresenceConfidence: 0.4,
+            minTrackingConfidence: 0.4,
             numFaces: 5,
             minSpan: 0.03,
             eyeWidthRatioMin: 0.12,
             eyeWidthRatioMax: 0.92
         )),
-        ("standard", "標準", DetectionSettings(
+        Preset(id: "standard", name: "標準", settings: DetectionSettings(
             minFaceDetectionConfidence: 0.3,
-            minFacePresenceConfidence:  0.3,
-            minTrackingConfidence:      0.3,
+            minFacePresenceConfidence: 0.3,
+            minTrackingConfidence: 0.3,
             numFaces: 5,
             minSpan: 0.025,
             eyeWidthRatioMin: 0.10,
             eyeWidthRatioMax: 0.95
         )),
-        ("indoor", "室内", DetectionSettings()),   // デフォルト値 = 室内向け
-        ("dark", "暗所", DetectionSettings(
+        Preset(id: "indoor", name: "室内", settings: DetectionSettings()),
+        Preset(id: "dark", name: "暗所", settings: DetectionSettings(
             minFaceDetectionConfidence: 0.1,
-            minFacePresenceConfidence:  0.1,
-            minTrackingConfidence:      0.1,
+            minFacePresenceConfidence: 0.1,
+            minTrackingConfidence: 0.1,
             numFaces: 5,
             minSpan: 0.01,
             eyeWidthRatioMin: 0.08,
             eyeWidthRatioMax: 0.97
-        )),
+        ))
     ]
 
     /// 現在の値がいずれかのプリセットと一致するプリセット ID。
-    var matchingPresetID: String? {
+    public var matchingPresetID: String? {
         Self.presets.first(where: { $0.settings == self })?.id
     }
 }
