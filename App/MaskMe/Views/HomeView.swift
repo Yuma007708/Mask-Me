@@ -4,9 +4,11 @@ import SwiftUI
 /// the recent-items list below.
 struct HomeView: View {
     @EnvironmentObject private var recents: RecentItemsStore
+    @EnvironmentObject private var draftStore: DraftStore
 
     @State private var pickerFilter: MediaPicker.Filter?
     @State private var pickedMedia: PickedMedia?
+    @State private var resumeContext: EditorView.ResumeContext?
     @State private var showEditor = false
 
     var body: some View {
@@ -22,22 +24,35 @@ struct HomeView: View {
             .padding(.horizontal)
             .padding(.top, 8)
 
-            RecentItemsView()
+            RecentItemsView(onResumeDraft: resume(_:))
         }
         .navigationTitle("Mask Me")
         .sheet(item: $pickerFilter) { filter in
             MediaPicker(filter: filter) { media in
                 pickerFilter = nil
                 pickedMedia = media
+                resumeContext = nil
                 showEditor = true
             }
             .ignoresSafeArea()
         }
         .navigationDestination(isPresented: $showEditor) {
             if let pickedMedia {
-                EditorView(media: pickedMedia, recents: recents)
+                EditorView(media: pickedMedia, recents: recents, resume: resumeContext)
             }
         }
+    }
+
+    /// 動画の「編集中」下書きをタップしたら、元動画＋保存パラメータで再開する。
+    private func resume(_ draft: EditingDraft) {
+        pickedMedia = .video(draftStore.sourceURL(for: draft))
+        resumeContext = EditorView.ResumeContext(
+            draftID: draft.id,
+            blockSize: draft.blockSize,
+            faceEnabled: draft.faceEnabled,
+            manualRects: draft.manualRects
+        )
+        showEditor = true
     }
 
     private func mediaButton(

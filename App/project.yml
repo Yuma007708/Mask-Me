@@ -23,6 +23,7 @@ targets:
       base:
         INFOPLIST_FILE: MaskMe/Info.plist
         PRODUCT_BUNDLE_IDENTIFIER: com.maskme.app
+        DEVELOPMENT_TEAM: 8694X8U5SQ
         MARKETING_VERSION: "1.0"
         CURRENT_PROJECT_VERSION: "1"
         TARGETED_DEVICE_FAMILY: "1,2"
@@ -31,6 +32,24 @@ targets:
         GENERATE_INFOPLIST_FILE: NO
     info:
       path: MaskMe/Info.plist
+      properties:
+        CFBundleDisplayName: Mask Me
+        CFBundlePackageType: $(PRODUCT_BUNDLE_PACKAGE_TYPE)
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        LSRequiresIPhoneOS: true
+        UILaunchScreen: {}
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: false
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        NSPhotoLibraryUsageDescription: 編集する写真・動画を読み込むために写真ライブラリへアクセスします。
+        NSPhotoLibraryAddUsageDescription: モザイク加工した写真・動画を保存するために写真ライブラリへアクセスします。
     # Generates a shared "MaskMe" scheme so `xcodebuild -scheme MaskMe`
     # (and SwiftPM package resolution) works in CI. The detection-accuracy
     # tests run under this scheme (`xcodebuild test` / Cmd+U).

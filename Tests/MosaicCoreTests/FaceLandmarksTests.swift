@@ -53,4 +53,40 @@ final class FaceLandmarksTests: XCTestCase {
         )
         XCTAssertEqual(sparse.rollAngle(in: size), 0)
     }
+
+    // MARK: - remapped(into:)
+
+    func testRemappedMapsIntoSubRect() {
+        // (0.5, 0.5) in a crop at (0.2, 0.3, 0.4×0.3) → (0.4, 0.45) in full image
+        let rect = CGRect(x: 0.2, y: 0.3, width: 0.4, height: 0.3)
+        let set = fullMesh { $0[0] = FaceLandmark(x: 0.5, y: 0.5) }
+        let remapped = set.remapped(into: rect)
+        XCTAssertEqual(remapped.points[0].x, 0.4, accuracy: 0.0001)
+        XCTAssertEqual(remapped.points[0].y, 0.45, accuracy: 0.0001)
+    }
+
+    func testRemappedIntoFullRectIsIdentity() {
+        let set = fullMesh { $0[0] = FaceLandmark(x: 0.3, y: 0.7) }
+        let remapped = set.remapped(into: CGRect(x: 0, y: 0, width: 1, height: 1))
+        XCTAssertEqual(remapped.points[0].x, 0.3, accuracy: 0.0001)
+        XCTAssertEqual(remapped.points[0].y, 0.7, accuracy: 0.0001)
+    }
+
+    func testRemappedPreservesConfidenceAndDepth() {
+        let set = FaceLandmarkSet(
+            points: [FaceLandmark(x: 1.0, y: 1.0, z: 0.42)],
+            confidence: 0.85
+        )
+        let remapped = set.remapped(into: CGRect(x: 0, y: 0, width: 0.5, height: 0.5))
+        XCTAssertEqual(remapped.confidence, 0.85, accuracy: 0.0001)
+        XCTAssertEqual(remapped.points[0].z, 0.42, accuracy: 0.0001)
+    }
+
+    func testRemappedTopLeftCropOriginTranslates() {
+        // A landmark at (0, 0) in a crop starting at (0.1, 0.2) → (0.1, 0.2)
+        let set = FaceLandmarkSet(points: [FaceLandmark(x: 0, y: 0)], confidence: 1)
+        let remapped = set.remapped(into: CGRect(x: 0.1, y: 0.2, width: 0.5, height: 0.5))
+        XCTAssertEqual(remapped.points[0].x, 0.1, accuracy: 0.0001)
+        XCTAssertEqual(remapped.points[0].y, 0.2, accuracy: 0.0001)
+    }
 }

@@ -149,24 +149,31 @@ public enum MetalTextureUtilities {
 }
 
 extension MosaicRenderer {
-    /// Convenience over ``render(input:into:landmarks:)`` that allocates a
-    /// matching output texture, runs the mosaic, and returns it. Waits for GPU
-    /// completion so the texture is safe to read back (e.g. into a `CGImage`).
+    /// 既存の単一顔 API（後方互換）。
     @discardableResult
     public func renderToNewTexture(
         input: MTLTexture,
         landmarks: FaceLandmarkSet?
     ) -> (texture: MTLTexture, status: TrackingStatus)? {
-        guard let output = MetalTextureUtilities.makeOutputTexture(
-            like: input,
-            device: device
-        ) else {
+        let sets = landmarks.map { [$0] } ?? []
+        return renderToNewTexture(input: input, landmarkSets: sets)
+    }
+
+    /// 複数顔ランドマーク＋追加パスでレンダリングし、新規テクスチャを返す。
+    @discardableResult
+    public func renderToNewTexture(
+        input: MTLTexture,
+        landmarkSets: [FaceLandmarkSet],
+        additionalPaths: [FaceMaskBuilder.RegionPath] = []
+    ) -> (texture: MTLTexture, status: TrackingStatus)? {
+        guard let output = MetalTextureUtilities.makeOutputTexture(like: input, device: device) else {
             return nil
         }
         let status = render(
             input: input,
             into: output,
-            landmarks: landmarks,
+            landmarkSets: landmarkSets,
+            additionalPaths: additionalPaths,
             waitForCompletion: true
         )
         return (output, status)

@@ -215,6 +215,136 @@ public final class MosaicRenderer: NSObject {
         return newStatus
     }
 
+    /// 複数の顔ランドマークセット（＋追加パス）でモザイクをレンダリングする。
+    /// - フルメッシュ顔はメッシュレンダラーで順番にチェーン処理。
+    /// - 部分メッシュ顔・追加パスはコンタマスクのコンピュートカーネルで処理。
+    @discardableResult
+    public func render(
+        input: MTLTexture,
+        into output: MTLTexture,
+        landmarkSets: [FaceLandmarkSet],
+        additionalPaths: [FaceMaskBuilder.RegionPath] = [],
+        waitForCompletion: Bool = false
+    ) -> TrackingStatus {
+        let maxConfidence = landmarkSets.map(\.confidence).max()
+        let newStatus = evaluator.update(confidence: maxConfidence)
+        statusSubject.send(newStatus)
+
+        let width = input.width
+        let height = input.height
+
+        guard newStatus.faceDetected || !additionalPaths.isEmpty else {
+            copy(from: input, to: output, waitForCompletion: waitForCompletion)
+            return newStatus
+        }
+
+        let fullMesh = landmarkSets.filter(\.isFullMesh)
+        let partial = landmarkSets.filter { !$0.isFullMesh }
+        let hasContour = !partial.isEmpty || !additionalPaths.isEmpty
+
+        // Phase 1: チェーンメッシュレンダリング（フルメッシュ顔）
+        var contourInput = input
+        if let meshRenderer, !fullMesh.isEmpty {
+            // コンタ処理が後続する場合は中間テクスチャに書き出す
+            let meshOut: MTLTexture
+            if hasContour, let temp = MetalTextureUtilities.makeOutputTexture(like: input, device: device) {
+                meshOut = temp
+            } else {
+                meshOut = output
+            }
+            // 1枚目: input → meshOut
+            meshRenderer.render(
+                input: input, output: meshOut,
+                landmarks: fullMesh[0], block: params.block,
+                waitForCompletion: fullMesh.count > 1 || hasContour ? true : waitForCompletion
+            )
+            // 2枚目以降: meshOut → meshOut (同一コマンドバッファ内で安全)
+            for i in 1..<fullMesh.count {
+                let isLast = i == fullMesh.count - 1
+                meshRenderer.render(
+                    input: meshOut, output: meshOut,
+                    landmarks: fullMesh[i], block: params.block,
+                    waitForCompletion: isLast ? (hasContour ? true : waitForCompletion) : true
+                )
+            }
+            contourInput = meshOut
+        }
+
+        // Phase 2: コンタマスク（部分メッシュ顔 + 追加パス）
+        if hasContour {
+            guard let mask = buildCombinedMaskTexture(
+                landmarkSets: partial, additionalPaths: additionalPaths,
+                width: width, height: height
+            ) else {
+                copy(from: contourInput, to: output, waitForCompletion: waitForCompletion)
+                return newStatus
+            }
+            applyContourKernel(input: contourInput, output: output, mask: mask, waitForCompletion: waitForCompletion)
+        }
+
+        return newStatus
+    }
+
+    private func buildCombinedMaskTexture(
+        landmarkSets: [FaceLandmarkSet],
+        additionalPaths: [FaceMaskBuilder.RegionPath],
+        width: Int,
+        height: Int
+    ) -> MTLTexture? {
+        guard let rendered = maskBuilder.renderMask(
+            for: landmarkSets, additionalPaths: additionalPaths,
+            width: width, height: height
+        ) else { return nil }
+        let texture = reuseOrMakeMaskTexture(width: width, height: height)
+        guard let texture else { return nil }
+        rendered.bytes.withUnsafeBytes { raw in
+            texture.replace(
+                region: MTLRegionMake2D(0, 0, width, height),
+                mipmapLevel: 0,
+                withBytes: raw.baseAddress!,
+                bytesPerRow: rendered.bytesPerRow
+            )
+        }
+        return texture
+    }
+
+    private func applyContourKernel(
+        input: MTLTexture,
+        output: MTLTexture,
+        mask: MTLTexture,
+        waitForCompletion: Bool
+    ) {
+        var kernelParams = params
+        kernelParams.width = UInt32(input.width)
+        kernelParams.height = UInt32(input.height)
+        kernelParams.rotation = 0
+        kernelParams.centerX = Float(input.width) / 2
+        kernelParams.centerY = Float(input.height) / 2
+
+        guard let commandBuffer = commandQueue.makeCommandBuffer(),
+              let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            copy(from: input, to: output, waitForCompletion: waitForCompletion)
+            return
+        }
+        encoder.setComputePipelineState(pipelineState)
+        encoder.setTexture(input, index: 0)
+        encoder.setTexture(output, index: 1)
+        encoder.setTexture(mask, index: 2)
+        withUnsafeBytes(of: &kernelParams) { raw in
+            encoder.setBytes(raw.baseAddress!, length: raw.count, index: 0)
+        }
+        let tg = MTLSize(width: 16, height: 16, depth: 1)
+        let groups = MTLSize(
+            width: (input.width + 15) / 16,
+            height: (input.height + 15) / 16,
+            depth: 1
+        )
+        encoder.dispatchThreadgroups(groups, threadsPerThreadgroup: tg)
+        encoder.endEncoding()
+        commandBuffer.commit()
+        if waitForCompletion { commandBuffer.waitUntilCompleted() }
+    }
+
     /// Resets tracking back to idle (e.g. when switching media).
     public func reset() {
         evaluator.reset()

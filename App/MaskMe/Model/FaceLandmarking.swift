@@ -1,24 +1,37 @@
 import UIKit
 import MosaicCore
 
-/// Abstraction over a face-landmark detector. The UI / view model depend on
-/// this protocol rather than MediaPipe directly, so the app compiles without
-/// the pod present and a stub can be injected for previews and tests.
+/// 顔ランドマーク検出器の抽象。UI / ViewModel は MediaPipe に直接依存しない。
 public protocol FaceLandmarking {
-    /// Detects landmarks in a single still image.
+    /// 静止画像で1件検出する（後方互換用）。
     func landmarks(in image: UIImage) -> FaceLandmarkSet?
 
-    /// Detects landmarks in a video frame presented at `timestampMs`.
+    /// 動画フレームで1件検出する（後方互換用）。
     func landmarks(in image: UIImage, timestampMs: Int) -> FaceLandmarkSet?
+
+    /// 静止画像で複数件検出する。
+    func allLandmarks(in image: UIImage) -> [FaceLandmarkSet]
+
+    /// 動画フレームで複数件検出する。
+    func allLandmarks(in image: UIImage, timestampMs: Int) -> [FaceLandmarkSet]
 }
 
-/// A no-op detector used when MediaPipe is unavailable (SwiftUI previews,
-/// simulator without the model). Always reports "no face", which the renderer
-/// handles gracefully by passing the frame through untouched.
+extension FaceLandmarking {
+    // 既存実装から自動的に多数検出へのデフォルト実装を提供する。
+    public func allLandmarks(in image: UIImage) -> [FaceLandmarkSet] {
+        landmarks(in: image).map { [$0] } ?? []
+    }
+
+    public func allLandmarks(in image: UIImage, timestampMs: Int) -> [FaceLandmarkSet] {
+        landmarks(in: image, timestampMs: timestampMs).map { [$0] } ?? []
+    }
+}
+
+/// MediaPipe が利用できない環境（Simulator・プレビュー）用のスタブ。
 public struct NullFaceLandmarker: FaceLandmarking {
     public init() {}
-
     public func landmarks(in image: UIImage) -> FaceLandmarkSet? { nil }
-
     public func landmarks(in image: UIImage, timestampMs: Int) -> FaceLandmarkSet? { nil }
+    public func allLandmarks(in image: UIImage) -> [FaceLandmarkSet] { [] }
+    public func allLandmarks(in image: UIImage, timestampMs: Int) -> [FaceLandmarkSet] { [] }
 }
