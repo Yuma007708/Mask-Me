@@ -13,12 +13,17 @@ import MosaicCore
 
 /// Returns the best available landmarker: the MediaPipe-backed one when the pod
 /// and model are present, otherwise a ``NullFaceLandmarker``.
-public func makeFaceLandmarker(forVideo: Bool = false, modelName: String = "face_landmarker") -> FaceLandmarking {
+public func makeFaceLandmarker(
+    forVideo: Bool = false,
+    settings: DetectionSettings = DetectionSettings(),
+    modelName: String = "face_landmarker"
+) -> FaceLandmarking {
     #if canImport(MediaPipeTasksVision)
     if let path = Bundle.main.path(forResource: modelName, ofType: "task"),
        let adapter = try? MediaPipeFaceLandmarkerAdapter(
            modelPath: path,
-           runningMode: forVideo ? .video : .image
+           runningMode: forVideo ? .video : .image,
+           settings: settings
        ) {
         return adapter
     }
@@ -35,16 +40,21 @@ import CoreImage.CIFilterBuiltins
 public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
     private let landmarker: FaceLandmarker
     private let ciContext = CIContext(options: [.useSoftwareRenderer: false])
+    private let plausibilityMinSpan: CGFloat
+    private let plausibilityEyeRatioRange: ClosedRange<CGFloat>
 
     /// - Parameter modelPath: path to the bundled `face_landmarker.task` model.
-    public init(modelPath: String, runningMode: RunningMode = .video) throws {
+    public init(modelPath: String, runningMode: RunningMode = .video,
+                settings: DetectionSettings = DetectionSettings()) throws {
         let options = FaceLandmarkerOptions()
         options.baseOptions.modelAssetPath = modelPath
         options.runningMode = runningMode
-        options.numFaces = 5
-        options.minFaceDetectionConfidence = 0.2
-        options.minFacePresenceConfidence = 0.2
-        options.minTrackingConfidence = 0.2
+        options.numFaces = settings.numFaces
+        options.minFaceDetectionConfidence = settings.minFaceDetectionConfidence
+        options.minFacePresenceConfidence  = settings.minFacePresenceConfidence
+        options.minTrackingConfidence      = settings.minTrackingConfidence
+        self.plausibilityMinSpan       = CGFloat(settings.minSpan)
+        self.plausibilityEyeRatioRange = settings.eyeWidthRatioMin...settings.eyeWidthRatioMax
         self.landmarker = try FaceLandmarker(options: options)
     }
 
@@ -83,7 +93,7 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
         guard let mpImage = try? MPImage(uiImage: image),
               let result = try? landmarker.detect(image: mpImage),
               !result.faceLandmarks.isEmpty else { return nil }
-        return Self.convertAll(result)
+        return convertAll(result)
     }
 
     private func detectAllVideoFrame(_ image: UIImage, timestampMs: Int) -> [FaceLandmarkSet]? {
@@ -93,7 +103,7 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
                   timestampInMilliseconds: timestampMs
               ),
               !result.faceLandmarks.isEmpty else { return nil }
-        return Self.convertAll(result)
+        return convertAll(result)
     }
 
     private enum EnhanceLevel { case moderate, aggressive }
@@ -141,12 +151,13 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
     /// MediaPipe 結果の全顔を `[FaceLandmarkSet]` に変換する。
     /// 低いしきい値（暗所・ブレでも検出するため）で拾った誤検出を、幾何学的妥当性
     /// チェックで棄却する（例: 薄暗い場面で体を顔として検出するケース）。
-    static func convertAll(_ result: FaceLandmarkerResult) -> [FaceLandmarkSet] {
+    private func convertAll(_ result: FaceLandmarkerResult) -> [FaceLandmarkSet] {
         result.faceLandmarks.compactMap { face in
             let points = face.map { FaceLandmark(x: $0.x, y: $0.y, z: $0.z) }
             let confidence: Float = points.count >= FaceLandmarkSet.fullMeshCount ? 1.0 : 0.6
             let set = FaceLandmarkSet(points: points, confidence: confidence)
-            return set.isPlausibleFace ? set : nil
+            return set.isPlausibleFace(minSpan: plausibilityMinSpan,
+                                       eyeRatioRange: plausibilityEyeRatioRange) ? set : nil
         }
     }
 }

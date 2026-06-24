@@ -28,14 +28,15 @@ struct EditorView: View {
         let manualRects: [CGRect]
     }
 
-    init(media: PickedMedia, recents: RecentItemsStore, resume: ResumeContext? = nil) {
+    init(media: PickedMedia, recents: RecentItemsStore, resume: ResumeContext? = nil,
+         settings: DetectionSettings = DetectionSettings()) {
         self.media = media
         self.resume = resume
         let mode: MosaicEditorModel.Mode = {
             if case .video = media { return .video }
             return .photo
         }()
-        _model = StateObject(wrappedValue: MosaicEditorModel(mode: mode, recents: recents))
+        _model = StateObject(wrappedValue: MosaicEditorModel(mode: mode, recents: recents, settings: settings))
         _videoDraftID = State(initialValue: resume?.draftID)
     }
 

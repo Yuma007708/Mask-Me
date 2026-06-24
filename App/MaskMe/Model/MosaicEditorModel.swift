@@ -99,14 +99,18 @@ public final class MosaicEditorModel: ObservableObject {
     @Published private var redoStack: [EditSnapshot] = []
     private var lastCommitted: EditSnapshot?
 
+    private let detectionSettings: DetectionSettings
+
     public init(
         mode: Mode,
         recents: RecentItemsStore,
-        landmarker: FaceLandmarking? = nil
+        landmarker: FaceLandmarking? = nil,
+        settings: DetectionSettings = DetectionSettings()
     ) {
         self.mode = mode
         self.recents = recents
-        self.landmarker = landmarker ?? makeFaceLandmarker(forVideo: mode == .video)
+        self.detectionSettings = settings
+        self.landmarker = landmarker ?? makeFaceLandmarker(forVideo: mode == .video, settings: settings)
         self.renderer = try? MosaicRenderer(evaluator: TrackingEvaluator(smoothing: 1.0))
 
         renderer?.statusPublisher
@@ -221,7 +225,7 @@ public final class MosaicEditorModel: ObservableObject {
         }
 
         let croppedImage = UIImage(cgImage: cropped, scale: img.scale, orientation: img.imageOrientation)
-        let scanner = makeFaceLandmarker(forVideo: false)
+        let scanner = makeFaceLandmarker(forVideo: false, settings: detectionSettings)
         let found = scanner.allLandmarks(in: croppedImage)
 
         if !found.isEmpty {
@@ -249,7 +253,7 @@ public final class MosaicEditorModel: ObservableObject {
             return
         }
         isScanning = true
-        let scanner = makeFaceLandmarker(forVideo: false)
+        let scanner = makeFaceLandmarker(forVideo: false, settings: detectionSettings)
         let result = await Task.detached(priority: .userInitiated) { [scanner, asset, rect] in
             await Self.findFaceInVideo(asset: asset, rect: rect, scanner: scanner)
         }.value
@@ -344,7 +348,7 @@ public final class MosaicEditorModel: ObservableObject {
         let t = position * videoDuration
         guard let frame = Self.frame(of: asset, at: t) else { return }
 
-        let scanner = makeFaceLandmarker(forVideo: false)
+        let scanner = makeFaceLandmarker(forVideo: false, settings: detectionSettings)
         let found = scanner.allLandmarks(in: frame)
         detectionCache[t] = found
 
@@ -445,10 +449,10 @@ public final class MosaicEditorModel: ObservableObject {
         scanTask?.cancel()
         isScanning = true
         // video モードスキャナー: temporal tracking で連続フレームの検出精度を上げる
-        let scanner = makeFaceLandmarker(forVideo: true)
+        let scanner = makeFaceLandmarker(forVideo: true, settings: detectionSettings)
         // クロップ検出は独立した image モードスキャナーで行う
         // （video モードスキャナーの timestamp 系列を乱さないため）
-        let cropScanner = makeFaceLandmarker(forVideo: false)
+        let cropScanner = makeFaceLandmarker(forVideo: false, settings: detectionSettings)
         let initialFaceCount = detectedFaces.count
         // ManualRegion の矩形をバックグラウンドスレッドに渡す（値型なので安全）
         let cropRects = manualRegions.map(\.normalizedRect)
