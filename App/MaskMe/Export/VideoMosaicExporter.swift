@@ -7,6 +7,7 @@ import MosaicCore
 import Metal
 
 /// 動画をフレームごとに処理してモザイクを適用し、新しい .mov ファイルを生成する。
+/// 元動画の音声トラックはそのまま（再エンコードせず）保持する。
 public final class VideoMosaicExporter: @unchecked Sendable {
     public enum ExportError: Error {
         case noVideoTrack
@@ -44,126 +45,244 @@ public final class VideoMosaicExporter: @unchecked Sendable {
         faceEnabled: Bool = true,
         progress: @Sendable @escaping (Double) -> Void
     ) async throws -> URL {
-        guard let track = try await asset.loadTracks(withMediaType: .video).first else {
+        guard let videoTrack = try await asset.loadTracks(withMediaType: .video).first else {
             throw ExportError.noVideoTrack
         }
-        let duration = try await asset.load(.duration)
-        let naturalSize = try await track.load(.naturalSize)
-        let transform = try await track.load(.preferredTransform)
+        let audioTrack = (try? await asset.loadTracks(withMediaType: .audio))?.first
 
-        let reader = try makeReader(asset: asset, track: track)
-        guard let trackOutput = reader.outputs.first else {
-            throw ExportError.readerSetupFailed
+        let duration = try await asset.load(.duration)
+        let naturalSize = try await videoTrack.load(.naturalSize)
+        let transform = try await videoTrack.load(.preferredTransform)
+        let estimatedDataRate = (try? await videoTrack.load(.estimatedDataRate)) ?? 0
+        var audioFormat: CMFormatDescription?
+        if let audioTrack {
+            audioFormat = (try? await audioTrack.load(.formatDescriptions))?.first
         }
 
+        // --- Reader: 映像（BGRA）＋ 音声（パススルー） ---
+        let reader = try AVAssetReader(asset: asset)
+        let videoOutput = makeVideoOutput(track: videoTrack)
+        guard reader.canAdd(videoOutput) else { throw ExportError.readerSetupFailed }
+        reader.add(videoOutput)
+
+        var audioOutput: AVAssetReaderTrackOutput?
+        if let audioTrack {
+            let out = AVAssetReaderTrackOutput(track: audioTrack, outputSettings: nil)
+            out.alwaysCopiesSampleData = false
+            if reader.canAdd(out) {
+                reader.add(out)
+                audioOutput = out
+            }
+        }
+
+        // --- Writer: 映像（HEVC優先）＋ 音声（パススルー） ---
         let outputURL = makeOutputURL()
         let writer = try AVAssetWriter(outputURL: outputURL, fileType: .mov)
-        let (writerInput, adaptor) = try makeWriterInput(size: naturalSize, transform: transform)
-        guard writer.canAdd(writerInput) else { throw ExportError.writerSetupFailed }
-        writer.add(writerInput)
+        let (videoInput, adaptor) = try makeVideoWriterInput(
+            size: naturalSize,
+            transform: transform,
+            estimatedDataRate: estimatedDataRate,
+            writer: writer
+        )
 
-        reader.startReading()
-        writer.startWriting()
+        var audioInput: AVAssetWriterInput?
+        if audioOutput != nil {
+            let aIn = AVAssetWriterInput(
+                mediaType: .audio,
+                outputSettings: nil,
+                sourceFormatHint: audioFormat
+            )
+            aIn.expectsMediaDataInRealTime = false
+            if writer.canAdd(aIn) {
+                writer.add(aIn)
+                audioInput = aIn
+            } else {
+                audioOutput = nil
+            }
+        }
+
+        guard reader.startReading() else { throw reader.error ?? ExportError.readerSetupFailed }
+        guard writer.startWriting() else { throw writer.error ?? ExportError.writerSetupFailed }
         writer.startSession(atSourceTime: .zero)
         renderer.reset()
 
-        let targets = selectedFaceTargets
-        let regions = manualRegions
-        let cache = detectionCache
-        let enabled = faceEnabled
+        guard let cache = textureCache else { throw ExportError.textureConversionFailed }
 
-        try await Task.detached(priority: .userInitiated) { [self] in
-            self.processFrames(
-                trackOutput: trackOutput,
-                writerInput: writerInput,
-                adaptor: adaptor,
-                duration: duration,
-                selectedFaceTargets: targets,
-                manualRegions: regions,
-                detectionCache: cache,
-                faceEnabled: enabled,
-                videoSize: naturalSize,
-                progress: progress
-            )
-        }.value
-
-        writerInput.markAsFinished()
-        await writer.finishWriting()
-
-        guard writer.status == .completed else {
-            throw writer.error ?? ExportError.writerSetupFailed
-        }
-        progress(1.0)
-        return outputURL
+        return try await pump(
+            reader: reader,
+            writer: writer,
+            outputURL: outputURL,
+            videoOutput: videoOutput,
+            videoInput: videoInput,
+            adaptor: adaptor,
+            audioOutput: audioOutput,
+            audioInput: audioInput,
+            duration: duration,
+            videoSize: naturalSize,
+            selectedFaceTargets: selectedFaceTargets,
+            manualRegions: manualRegions,
+            detectionCache: detectionCache,
+            faceEnabled: faceEnabled,
+            cache: cache,
+            progress: progress
+        )
     }
 
-    // MARK: - Frame loop
+    // MARK: - Pump（ビジーウェイトなしの読み書き）
 
-    private func processFrames(
-        trackOutput: AVAssetReaderOutput,
-        writerInput: AVAssetWriterInput,
+    // swiftlint:disable:next function_parameter_count function_body_length
+    private func pump(
+        reader: AVAssetReader,
+        writer: AVAssetWriter,
+        outputURL: URL,
+        videoOutput: AVAssetReaderTrackOutput,
+        videoInput: AVAssetWriterInput,
         adaptor: AVAssetWriterInputPixelBufferAdaptor,
+        audioOutput: AVAssetReaderTrackOutput?,
+        audioInput: AVAssetWriterInput?,
         duration: CMTime,
+        videoSize: CGSize,
+        selectedFaceTargets: [FaceTarget],
+        manualRegions: [ManualRegion],
+        detectionCache: [Double: [FaceLandmarkSet]],
+        faceEnabled: Bool,
+        cache: CVMetalTextureCache,
+        progress: @Sendable @escaping (Double) -> Void
+    ) async throws -> URL {
+        let totalSeconds = max(CMTimeGetSeconds(duration), 0.001)
+        let detectionInterval = 2
+
+        return try await withCheckedThrowingContinuation { continuation in
+            let group = DispatchGroup()
+
+            // 映像：必要になったタイミングでだけコールバックが呼ばれる（Thread.sleep 不要）。
+            var frameIndex = 0
+            var cachedLandmarkSets: [FaceLandmarkSet] = []
+            let videoQueue = DispatchQueue(label: "mask-me.export.video")
+            group.enter()
+            videoInput.requestMediaDataWhenReady(on: videoQueue) { [self] in
+                while videoInput.isReadyForMoreMediaData {
+                    guard reader.status == .reading,
+                          let sample = videoOutput.copyNextSampleBuffer() else {
+                        videoInput.markAsFinished()
+                        group.leave()
+                        return
+                    }
+                    // フレーム毎の一時オブジェクトを都度解放し、長尺でのジェットサムを防ぐ。
+                    autoreleasepool {
+                        processVideoSample(
+                            sample,
+                            frameIndex: &frameIndex,
+                            cachedLandmarkSets: &cachedLandmarkSets,
+                            detectionInterval: detectionInterval,
+                            selectedFaceTargets: selectedFaceTargets,
+                            manualRegions: manualRegions,
+                            detectionCache: detectionCache,
+                            faceEnabled: faceEnabled,
+                            videoSize: videoSize,
+                            totalSeconds: totalSeconds,
+                            adaptor: adaptor,
+                            input: videoInput,
+                            cache: cache,
+                            progress: progress
+                        )
+                    }
+                }
+            }
+
+            // 音声：再エンコードせずサンプルをそのままコピー。
+            if let audioInput, let audioOutput {
+                let audioQueue = DispatchQueue(label: "mask-me.export.audio")
+                group.enter()
+                audioInput.requestMediaDataWhenReady(on: audioQueue) {
+                    while audioInput.isReadyForMoreMediaData {
+                        guard reader.status == .reading,
+                              let sample = audioOutput.copyNextSampleBuffer() else {
+                            audioInput.markAsFinished()
+                            group.leave()
+                            return
+                        }
+                        audioInput.append(sample)
+                    }
+                }
+            }
+
+            group.notify(queue: DispatchQueue.global(qos: .userInitiated)) {
+                if reader.status == .failed {
+                    continuation.resume(throwing: reader.error ?? ExportError.readerSetupFailed)
+                    return
+                }
+                writer.finishWriting {
+                    if writer.status == .completed {
+                        progress(1.0)
+                        continuation.resume(returning: outputURL)
+                    } else {
+                        continuation.resume(
+                            throwing: writer.error ?? ExportError.writerSetupFailed
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    // swiftlint:disable:next function_parameter_count
+    private func processVideoSample(
+        _ sample: CMSampleBuffer,
+        frameIndex: inout Int,
+        cachedLandmarkSets: inout [FaceLandmarkSet],
+        detectionInterval: Int,
         selectedFaceTargets: [FaceTarget],
         manualRegions: [ManualRegion],
         detectionCache: [Double: [FaceLandmarkSet]],
         faceEnabled: Bool,
         videoSize: CGSize,
-        progress: @Sendable (Double) -> Void
+        totalSeconds: Double,
+        adaptor: AVAssetWriterInputPixelBufferAdaptor,
+        input: AVAssetWriterInput,
+        cache: CVMetalTextureCache,
+        progress: (Double) -> Void
     ) {
-        let totalSeconds = max(CMTimeGetSeconds(duration), 0.001)
-        let detectionInterval = 2
-        var frameIndex = 0
-        var cachedLandmarkSets: [FaceLandmarkSet] = []
+        guard let sourceBuffer = CMSampleBufferGetImageBuffer(sample) else { return }
+        let pts = CMSampleBufferGetPresentationTimeStamp(sample)
+        let timeSec = CMTimeGetSeconds(pts)
+        let timestampMs = Int(timeSec * 1000)
 
-        guard let cache = textureCache else { return }
-
-        while let sample = trackOutput.copyNextSampleBuffer() {
-            // 各フレームの一時オブジェクト（CIImage/CGImage/テクスチャ等）を都度解放し、
-            // 長尺動画でメモリが膨張してジェットサム(強制終了)される問題を防ぐ。
-            autoreleasepool {
-                guard let sourceBuffer = CMSampleBufferGetImageBuffer(sample) else { return }
-                let pts = CMSampleBufferGetPresentationTimeStamp(sample)
-                let timeSec = CMTimeGetSeconds(pts)
-                let timestampMs = Int(timeSec * 1000)
-
-                if frameIndex % detectionInterval == 0 {
-                    if faceEnabled {
-                        // キャッシュから近傍フレームを探す（なければ新規検出）
-                        let fromCache = lookupCache(detectionCache, at: timeSec)
-                        if !fromCache.isEmpty {
-                            cachedLandmarkSets = filterToSelected(fromCache, targets: selectedFaceTargets)
-                        } else {
-                            let detected = detectAll(in: sourceBuffer, timestampMs: timestampMs)
-                            cachedLandmarkSets = filterToSelected(detected, targets: selectedFaceTargets)
-                        }
-                    } else {
-                        cachedLandmarkSets = []
-                    }
+        if frameIndex % detectionInterval == 0 {
+            if faceEnabled {
+                // キャッシュから近傍フレームを探す（なければ新規検出）
+                let fromCache = lookupCache(detectionCache, at: timeSec)
+                if !fromCache.isEmpty {
+                    cachedLandmarkSets = filterToSelected(fromCache, targets: selectedFaceTargets)
+                } else {
+                    let detected = detectAll(in: sourceBuffer, timestampMs: timestampMs)
+                    cachedLandmarkSets = filterToSelected(detected, targets: selectedFaceTargets)
                 }
-
-                let additionalPaths = manualRegions.map { region -> FaceMaskBuilder.RegionPath in
-                    let path = FaceMaskBuilder.rectPath(from: region.normalizedRect, in: videoSize)
-                    return FaceMaskBuilder.RegionPath(path: path, value: 0.4)
-                }
-
-                try? mosaicFrame(
-                    sourceBuffer: sourceBuffer,
-                    pts: pts,
-                    landmarkSets: cachedLandmarkSets,
-                    additionalPaths: additionalPaths,
-                    adaptor: adaptor,
-                    input: writerInput,
-                    cache: cache
-                )
-
-                // Metal テクスチャキャッシュに溜まった参照を解放。
-                CVMetalTextureCacheFlush(cache, 0)
-
-                frameIndex += 1
-                progress(min(timeSec / totalSeconds, 1.0))
+            } else {
+                cachedLandmarkSets = []
             }
         }
+
+        let additionalPaths = manualRegions.map { region -> FaceMaskBuilder.RegionPath in
+            let path = FaceMaskBuilder.rectPath(from: region.normalizedRect, in: videoSize)
+            return FaceMaskBuilder.RegionPath(path: path, value: 0.4)
+        }
+
+        try? mosaicFrame(
+            sourceBuffer: sourceBuffer,
+            pts: pts,
+            landmarkSets: cachedLandmarkSets,
+            additionalPaths: additionalPaths,
+            adaptor: adaptor,
+            input: input,
+            cache: cache
+        )
+
+        // Metal テクスチャキャッシュに溜まった参照を解放。
+        CVMetalTextureCacheFlush(cache, 0)
+
+        frameIndex += 1
+        progress(min(timeSec / totalSeconds, 1.0))
     }
 
     private func mosaicFrame(
@@ -192,9 +311,7 @@ public final class VideoMosaicExporter: @unchecked Sendable {
             waitForCompletion: true
         )
 
-        while !input.isReadyForMoreMediaData {
-            Thread.sleep(forTimeInterval: 0.005)
-        }
+        // 呼び出し側が isReadyForMoreMediaData を確認済みなのでビジーウェイト不要。
         adaptor.append(outBuffer, withPresentationTime: pts)
     }
 
@@ -239,30 +356,49 @@ public final class VideoMosaicExporter: @unchecked Sendable {
 
     // MARK: - Setup helpers
 
-    private func makeReader(asset: AVAsset, track: AVAssetTrack) throws -> AVAssetReader {
-        let reader = try AVAssetReader(asset: asset)
+    private func makeVideoOutput(track: AVAssetTrack) -> AVAssetReaderTrackOutput {
         let settings: [String: Any] = [
             kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
         ]
         let output = AVAssetReaderTrackOutput(track: track, outputSettings: settings)
         output.alwaysCopiesSampleData = false
-        guard reader.canAdd(output) else { throw ExportError.readerSetupFailed }
-        reader.add(output)
-        return reader
+        return output
     }
 
-    private func makeWriterInput(
+    /// HEVC を優先し、対応していなければ H.264 にフォールバックして映像入力を作る。
+    /// 作成した入力は writer に追加済みで返す。
+    private func makeVideoWriterInput(
         size: CGSize,
-        transform: CGAffineTransform
+        transform: CGAffineTransform,
+        estimatedDataRate: Float,
+        writer: AVAssetWriter
     ) throws -> (AVAssetWriterInput, AVAssetWriterInputPixelBufferAdaptor) {
-        let settings: [String: Any] = [
-            AVVideoCodecKey: AVVideoCodecType.h264,
-            AVVideoWidthKey: Int(size.width),
-            AVVideoHeightKey: Int(size.height)
-        ]
-        let input = AVAssetWriterInput(mediaType: .video, outputSettings: settings)
-        input.expectsMediaDataInRealTime = false
-        input.transform = transform
+        // 元動画のビットレートを踏襲（取得不可なら解像度から概算: 約0.15bpp×30fps）。
+        let bitrate = estimatedDataRate > 0
+            ? Int(estimatedDataRate)
+            : Int(Double(size.width) * Double(size.height) * 0.15 * 30)
+
+        func makeInput(codec: AVVideoCodecType) -> AVAssetWriterInput {
+            let settings: [String: Any] = [
+                AVVideoCodecKey: codec,
+                AVVideoWidthKey: Int(size.width),
+                AVVideoHeightKey: Int(size.height),
+                AVVideoCompressionPropertiesKey: [
+                    AVVideoAverageBitRateKey: bitrate
+                ]
+            ]
+            let input = AVAssetWriterInput(mediaType: .video, outputSettings: settings)
+            input.expectsMediaDataInRealTime = false
+            input.transform = transform
+            return input
+        }
+
+        var input = makeInput(codec: .hevc)
+        if !writer.canAdd(input) {
+            input = makeInput(codec: .h264)
+        }
+        guard writer.canAdd(input) else { throw ExportError.writerSetupFailed }
+        writer.add(input)
 
         let attributes: [String: Any] = [
             kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
