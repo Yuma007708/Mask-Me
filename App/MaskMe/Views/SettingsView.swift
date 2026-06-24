@@ -97,17 +97,8 @@ struct SettingsView: View {
             DetectionSlider(
                 label: "最小顔サイズ",
                 tip: "検出対象とする顔の最小サイズ（画像の幅または高さに対する割合）。遠くの小さな顔を拾うには低くします。",
-                value: $store.settings.minSpan
-            )
-            DetectionSlider(
-                label: "目の位置（下限）",
-                tip: "顔の幅に対する目の間隔の比率の下限。横向きや斜め顔を検出したい場合は低くします。",
-                value: $store.settings.eyeWidthRatioMin
-            )
-            DetectionSlider(
-                label: "目の位置（上限）",
-                tip: "顔の幅に対する目の間隔の比率の上限。通常は変更不要です。",
-                value: $store.settings.eyeWidthRatioMax
+                value: $store.settings.minSpan,
+                range: 0...1
             )
 
             // 最大検出数（Stepper）
@@ -143,6 +134,7 @@ private struct DetectionSlider: View {
     let label: String
     let tip: String
     @Binding var value: Double
+    var range: ClosedRange<Double> = 0.01...1
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -156,7 +148,7 @@ private struct DetectionSlider: View {
                     .foregroundStyle(.secondary)
                     .frame(minWidth: 40, alignment: .trailing)
             }
-            Slider(value: $value, in: 0...1)
+            Slider(value: $value, in: range)
                 .tint(.accentColor)
         }
         .padding(.vertical, 2)
@@ -180,6 +172,19 @@ private struct TipButton: View {
                 .font(.footnote)
                 .padding(12)
                 .frame(maxWidth: 260)
+                .modifier(CompactPopoverModifier())
+        }
+    }
+}
+
+/// iOS 16.4 以降ではポップオーバーをコンパクト表示（吹き出し）にする。
+/// それ以前では popover が自動的に sheet になる。
+private struct CompactPopoverModifier: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(iOS 16.4, *) {
+            content.presentationCompactAdaptation(.popover)
+        } else {
+            content
         }
     }
 }

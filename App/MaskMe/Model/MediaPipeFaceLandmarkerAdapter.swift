@@ -53,8 +53,8 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
         options.minFaceDetectionConfidence = settings.minFaceDetectionConfidence
         options.minFacePresenceConfidence  = settings.minFacePresenceConfidence
         options.minTrackingConfidence      = settings.minTrackingConfidence
-        self.plausibilityMinSpan       = CGFloat(settings.minSpan)
-        self.plausibilityEyeRatioRange = settings.eyeWidthRatioMin...settings.eyeWidthRatioMax
+        self.plausibilityMinSpan = CGFloat(settings.minSpan)
+        self.plausibilityEyeRatioRange = 0.05...1.0
         self.landmarker = try FaceLandmarker(options: options)
     }
 

@@ -8,25 +8,19 @@ public struct DetectionSettings: Equatable, Codable {
     public var minTrackingConfidence: Float = 0.2
     public var numFaces: Int = 5
     public var minSpan: Double = 0.02
-    public var eyeWidthRatioMin: Double = 0.10
-    public var eyeWidthRatioMax: Double = 0.95
 
     public init(
         minFaceDetectionConfidence: Float = 0.2,
         minFacePresenceConfidence: Float = 0.2,
         minTrackingConfidence: Float = 0.2,
         numFaces: Int = 5,
-        minSpan: Double = 0.02,
-        eyeWidthRatioMin: Double = 0.10,
-        eyeWidthRatioMax: Double = 0.95
+        minSpan: Double = 0.02
     ) {
         self.minFaceDetectionConfidence = minFaceDetectionConfidence
         self.minFacePresenceConfidence = minFacePresenceConfidence
         self.minTrackingConfidence = minTrackingConfidence
         self.numFaces = numFaces
         self.minSpan = minSpan
-        self.eyeWidthRatioMin = eyeWidthRatioMin
-        self.eyeWidthRatioMax = eyeWidthRatioMax
     }
 
     public struct Preset {
@@ -41,18 +35,14 @@ public struct DetectionSettings: Equatable, Codable {
             minFacePresenceConfidence: 0.4,
             minTrackingConfidence: 0.4,
             numFaces: 5,
-            minSpan: 0.03,
-            eyeWidthRatioMin: 0.12,
-            eyeWidthRatioMax: 0.92
+            minSpan: 0.03
         )),
         Preset(id: "standard", name: "標準", settings: DetectionSettings(
             minFaceDetectionConfidence: 0.3,
             minFacePresenceConfidence: 0.3,
             minTrackingConfidence: 0.3,
             numFaces: 5,
-            minSpan: 0.025,
-            eyeWidthRatioMin: 0.10,
-            eyeWidthRatioMax: 0.95
+            minSpan: 0.025
         )),
         Preset(id: "indoor", name: "室内", settings: DetectionSettings()),
         Preset(id: "dark", name: "暗所", settings: DetectionSettings(
@@ -60,9 +50,7 @@ public struct DetectionSettings: Equatable, Codable {
             minFacePresenceConfidence: 0.1,
             minTrackingConfidence: 0.1,
             numFaces: 5,
-            minSpan: 0.01,
-            eyeWidthRatioMin: 0.08,
-            eyeWidthRatioMax: 0.97
+            minSpan: 0.01
         ))
     ]
 
