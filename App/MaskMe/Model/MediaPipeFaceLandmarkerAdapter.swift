@@ -59,7 +59,10 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
         options.minFacePresenceConfidence  = clampConfidence(settings.minFacePresenceConfidence)
         options.minTrackingConfidence      = clampConfidence(settings.minTrackingConfidence)
         self.plausibilityMinSpan = CGFloat(settings.minSpan)
-        self.plausibilityEyeRatioRange = 0.05...1.0
+        // 目の間隔／顔幅の比。下限 0.35 で、裸の体（乳首・胸を顔メッシュに誤フィット）を
+        // 棄却する。裸動画の全フレーム実測では乳首誤検出が eyeRatio 0.25〜0.31、正当な
+        // 横顔は 0.41、正面顔は 0.55 以上で、0.35 が乳首と顔を分ける閾値。
+        self.plausibilityEyeRatioRange = 0.35...1.0
         self.landmarker = try FaceLandmarker(options: options)
     }
 
@@ -155,21 +158,17 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
 
     /// MediaPipe 結果の全顔を `[FaceLandmarkSet]` に変換する。
     /// 低いしきい値（暗所・ブレでも検出するため）で拾った誤検出を、幾何学的妥当性
-    /// チェックで棄却する（例: 薄暗い場面で体を顔として検出するケース）。
+    /// チェックで棄却する（例: 薄暗い場面で体や乳首を顔として検出するケース）。
+    /// 全件棄却したらそのまま 0 件を返す（生検出を信頼するフォールバックは入れない。
+    /// 唯一の検出が誤検出だった場合に乳首などを復活させてしまうため）。
     private func convertAll(_ result: FaceLandmarkerResult) -> [FaceLandmarkSet] {
-        let all = result.faceLandmarks.map { face -> FaceLandmarkSet in
+        result.faceLandmarks.compactMap { face in
             let points = face.map { FaceLandmark(x: $0.x, y: $0.y, z: $0.z) }
             let confidence: Float = points.count >= FaceLandmarkSet.fullMeshCount ? 1.0 : 0.6
-            return FaceLandmarkSet(points: points, confidence: confidence)
+            let set = FaceLandmarkSet(points: points, confidence: confidence)
+            return set.isPlausibleFace(minSpan: plausibilityMinSpan,
+                                       eyeRatioRange: plausibilityEyeRatioRange) ? set : nil
         }
-        let plausible = all.filter {
-            $0.isPlausibleFace(minSpan: plausibilityMinSpan,
-                               eyeRatioRange: plausibilityEyeRatioRange)
-        }
-        // 幾何フィルタが全件棄却したら、MediaPipe の生検出を信頼する。
-        // フィルタは複数検出中のノイズ1つを落とすのが目的であり、検出を全滅させるのは
-        // 過剰棄却。MediaPipe が顔を返したのに 0 件になる回帰を防ぐ。
-        return plausible.isEmpty ? all : plausible
     }
 }
 #endif
