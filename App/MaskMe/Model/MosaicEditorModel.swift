@@ -142,7 +142,7 @@ public final class MosaicEditorModel: ObservableObject {
         detectedFaces = faces.map { lm in
             FaceTarget(id: UUID(), landmarks: lm,
                        thumbnail: generateThumbnail(for: lm, from: normalized),
-                       isSelected: true)
+                       isSelected: false)
         }
         manualRegions = []
         sourceTexture = makeTexture(from: normalized)
@@ -165,7 +165,7 @@ public final class MosaicEditorModel: ObservableObject {
             detectedFaces = faces.map { lm in
                 FaceTarget(id: UUID(), landmarks: lm,
                            thumbnail: generateThumbnail(for: lm, from: frame),
-                           isSelected: true)
+                           isSelected: false)
             }
             sourceTexture = makeTexture(from: frame)
             updateBackgroundMask(from: frame)
@@ -228,7 +228,7 @@ public final class MosaicEditorModel: ObservableObject {
             let newFaces = found.map { lm -> FaceTarget in
                 let remapped = lm.remapped(into: normalizedRect)
                 let thumb = generateThumbnail(for: remapped, from: img)
-                return FaceTarget(id: UUID(), landmarks: remapped, thumbnail: thumb, isSelected: true)
+                return FaceTarget(id: UUID(), landmarks: remapped, thumbnail: thumb, isSelected: false)
             }
             detectedFaces += newFaces
         } else {
@@ -258,7 +258,7 @@ public final class MosaicEditorModel: ObservableObject {
         if let (landmarks, foundFrame) = result {
             let thumbSource = referenceImage ?? foundFrame
             let thumb = generateThumbnail(for: landmarks, from: thumbSource)
-            detectedFaces.append(FaceTarget(id: UUID(), landmarks: landmarks, thumbnail: thumb, isSelected: true))
+            detectedFaces.append(FaceTarget(id: UUID(), landmarks: landmarks, thumbnail: thumb, isSelected: false))
         } else {
             // どのフレームでも検出できなかった: 固定矩形マスクにフォールバック
             appendManualRect(rect)
@@ -352,7 +352,7 @@ public final class MosaicEditorModel: ObservableObject {
             detectedFaces = found.map { lm in
                 FaceTarget(id: UUID(), landmarks: lm,
                            thumbnail: generateThumbnail(for: lm, from: frame),
-                           isSelected: true)
+                           isSelected: false)
             }
             sourceImage = frame
             sourceTexture = makeTexture(from: frame)
