@@ -46,13 +46,18 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
     /// - Parameter modelPath: path to the bundled `face_landmarker.task` model.
     public init(modelPath: String, runningMode: RunningMode = .video,
                 settings: DetectionSettings = DetectionSettings()) throws {
+        // confidence は (0, 1] が有効。0 や永続化された不正値を渡すと MediaPipe の
+        // 初期化が失敗し、呼び出し側が NullFaceLandmarker（無検出）に落ちてしまうため、
+        // 安全範囲にクランプして「設定値が原因で一切検出されない」回帰を防ぐ。
+        func clampConfidence(_ value: Float) -> Float { min(max(value, 0.01), 1.0) }
+
         let options = FaceLandmarkerOptions()
         options.baseOptions.modelAssetPath = modelPath
         options.runningMode = runningMode
-        options.numFaces = settings.numFaces
-        options.minFaceDetectionConfidence = settings.minFaceDetectionConfidence
-        options.minFacePresenceConfidence  = settings.minFacePresenceConfidence
-        options.minTrackingConfidence      = settings.minTrackingConfidence
+        options.numFaces = max(settings.numFaces, 1)
+        options.minFaceDetectionConfidence = clampConfidence(settings.minFaceDetectionConfidence)
+        options.minFacePresenceConfidence  = clampConfidence(settings.minFacePresenceConfidence)
+        options.minTrackingConfidence      = clampConfidence(settings.minTrackingConfidence)
         self.plausibilityMinSpan = CGFloat(settings.minSpan)
         self.plausibilityEyeRatioRange = 0.05...1.0
         self.landmarker = try FaceLandmarker(options: options)
@@ -152,13 +157,19 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
     /// 低いしきい値（暗所・ブレでも検出するため）で拾った誤検出を、幾何学的妥当性
     /// チェックで棄却する（例: 薄暗い場面で体を顔として検出するケース）。
     private func convertAll(_ result: FaceLandmarkerResult) -> [FaceLandmarkSet] {
-        result.faceLandmarks.compactMap { face in
+        let all = result.faceLandmarks.map { face -> FaceLandmarkSet in
             let points = face.map { FaceLandmark(x: $0.x, y: $0.y, z: $0.z) }
             let confidence: Float = points.count >= FaceLandmarkSet.fullMeshCount ? 1.0 : 0.6
-            let set = FaceLandmarkSet(points: points, confidence: confidence)
-            return set.isPlausibleFace(minSpan: plausibilityMinSpan,
-                                       eyeRatioRange: plausibilityEyeRatioRange) ? set : nil
+            return FaceLandmarkSet(points: points, confidence: confidence)
         }
+        let plausible = all.filter {
+            $0.isPlausibleFace(minSpan: plausibilityMinSpan,
+                               eyeRatioRange: plausibilityEyeRatioRange)
+        }
+        // 幾何フィルタが全件棄却したら、MediaPipe の生検出を信頼する。
+        // フィルタは複数検出中のノイズ1つを落とすのが目的であり、検出を全滅させるのは
+        // 過剰棄却。MediaPipe が顔を返したのに 0 件になる回帰を防ぐ。
+        return plausible.isEmpty ? all : plausible
     }
 }
 #endif

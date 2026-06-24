@@ -165,7 +165,11 @@ public final class MosaicEditorModel: ObservableObject {
 
         if let frame = Self.firstFrame(of: asset) {
             sourceImage = frame
-            let faces = landmarker.allLandmarks(in: frame, timestampMs: 0)
+            // 最初の1フレームを単独検出するのは IMAGE モードの仕事。
+            // VIDEO モードは連続ストリームの時系列追跡用で、最初のフレームを
+            // 単体で処理するのが苦手（init 失敗 → NullFaceLandmarker になるケースも）。
+            let initialScanner = makeFaceLandmarker(forVideo: false, settings: detectionSettings)
+            let faces = initialScanner.allLandmarks(in: frame)
             detectedFaces = faces.map { lm in
                 FaceTarget(id: UUID(), landmarks: lm,
                            thumbnail: generateThumbnail(for: lm, from: frame),
@@ -513,12 +517,21 @@ public final class MosaicEditorModel: ObservableObject {
                 let facesForCache = faces
                 let timeForCache = t
                 let matchCountsCopy = matchCounts
-                let updated = await MainActor.run { [weak self] () -> [Int] in
+                let updated = await MainActor.run { [weak self, img] () -> [Int] in
                     // 空結果はキャッシュしない（直前の有効検出を再利用させる）
                     if !facesForCache.isEmpty {
                         self?.detectionCache[timeForCache] = facesForCache
                     }
                     guard let self else { return matchCountsCopy }
+                    // 初期フレーム検出が失敗して detectedFaces が空のまま残っている場合、
+                    // プリスキャンで最初に見つかった顔を補完する（安全網）。
+                    if !facesForCache.isEmpty && self.detectedFaces.isEmpty {
+                        self.detectedFaces = facesForCache.map { lm in
+                            FaceTarget(id: UUID(), landmarks: lm,
+                                       thumbnail: self.generateThumbnail(for: lm, from: img),
+                                       isSelected: false)
+                        }
+                    }
                     var counts = matchCountsCopy
                     for (i, target) in self.detectedFaces.prefix(expectedFaceCount).enumerated() {
                         let tc = self.normalizedCentroid(of: target.landmarks)
