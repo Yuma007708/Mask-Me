@@ -42,9 +42,9 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
         options.baseOptions.modelAssetPath = modelPath
         options.runningMode = runningMode
         options.numFaces = 5
-        options.minFaceDetectionConfidence = 0.3
-        options.minFacePresenceConfidence = 0.3
-        options.minTrackingConfidence = 0.3
+        options.minFaceDetectionConfidence = 0.2
+        options.minFacePresenceConfidence = 0.2
+        options.minTrackingConfidence = 0.2
         self.landmarker = try FaceLandmarker(options: options)
     }
 
@@ -62,14 +62,18 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
 
     public func allLandmarks(in image: UIImage) -> [FaceLandmarkSet] {
         if let result = detectAllImage(image) { return result }
-        if let enhanced = enhance(image), let result = detectAllImage(enhanced) { return result }
+        if let e1 = enhance(image, level: .moderate), let result = detectAllImage(e1) { return result }
+        if let e2 = enhance(image, level: .aggressive), let result = detectAllImage(e2) { return result }
         return []
     }
 
     public func allLandmarks(in image: UIImage, timestampMs: Int) -> [FaceLandmarkSet] {
         if let result = detectAllVideoFrame(image, timestampMs: timestampMs) { return result }
-        // enhance の2回目は +1ms でタイムスタンプを進める（video モードは単調増加が必須）
-        if let enhanced = enhance(image), let result = detectAllVideoFrame(enhanced, timestampMs: timestampMs + 1) { return result }
+        // enhance の各パスは +1ms ずつ進める（video モードは単調増加が必須）
+        if let e1 = enhance(image, level: .moderate),
+           let result = detectAllVideoFrame(e1, timestampMs: timestampMs + 1) { return result }
+        if let e2 = enhance(image, level: .aggressive),
+           let result = detectAllVideoFrame(e2, timestampMs: timestampMs + 2) { return result }
         return []
     }
 
@@ -92,18 +96,44 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
         return Self.convertAll(result)
     }
 
-    /// ぼやけ・白飛びに対して CIFilter で補正した画像を返す。
-    private func enhance(_ image: UIImage) -> UIImage? {
+    private enum EnhanceLevel { case moderate, aggressive }
+
+    /// 暗所・ぼやけ補正。
+    /// moderate: 軽微な暗さ・白飛びを改善。
+    /// aggressive: 暗い動画・夜間シーンで顔を検出できるよう全体を大幅増光。
+    private func enhance(_ image: UIImage, level: EnhanceLevel) -> UIImage? {
         guard let cgImage = image.cgImage else { return nil }
-        let ci = CIImage(cgImage: cgImage)
-            .applyingFilter("CIHighlightShadowAdjust", parameters: [
-                "inputHighlightAmount": 0.4,
-                "inputShadowAmount":   0.1,
-            ])
-            .applyingFilter("CISharpenLuminance", parameters: [
-                "inputSharpness": 0.6,
-                "inputRadius":    1.5,
-            ])
+        var ci = CIImage(cgImage: cgImage)
+        switch level {
+        case .moderate:
+            ci = ci
+                .applyingFilter("CIHighlightShadowAdjust", parameters: [
+                    "inputHighlightAmount": 0.6,
+                    "inputShadowAmount":    0.5,
+                ])
+                .applyingFilter("CISharpenLuminance", parameters: [
+                    "inputSharpness": 0.5,
+                    "inputRadius":    1.5,
+                ])
+        case .aggressive:
+            ci = ci
+                .applyingFilter("CIExposureAdjust", parameters: [
+                    "inputEV": 1.5,           // +1.5段分（約2.8倍）明るく
+                ])
+                .applyingFilter("CIHighlightShadowAdjust", parameters: [
+                    "inputHighlightAmount": 0.8,
+                    "inputShadowAmount":    0.9,
+                ])
+                .applyingFilter("CIColorControls", parameters: [
+                    "inputContrast":   1.1,
+                    "inputBrightness": 0.05,
+                    "inputSaturation": 1.0,
+                ])
+                .applyingFilter("CISharpenLuminance", parameters: [
+                    "inputSharpness": 0.7,
+                    "inputRadius":    1.5,
+                ])
+        }
         guard let out = ciContext.createCGImage(ci, from: ci.extent) else { return nil }
         return UIImage(cgImage: out, scale: image.scale, orientation: image.imageOrientation)
     }
