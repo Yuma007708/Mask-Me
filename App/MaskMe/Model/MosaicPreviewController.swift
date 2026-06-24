@@ -26,6 +26,11 @@ final class MosaicPreviewController {
     #if canImport(Vision)
     private let segmenter = PersonSegmenter(quality: .balanced)
     #endif
+    /// 背景マスクのキャッシュ。Vision は重いので毎フレームではなく一定間隔で更新する。
+    private var cachedBackgroundMask: MaskBuffer?
+    private var framesUntilResegment = 0
+    /// 背景マスクの再セグメント間隔（フレーム数）。30fps で約 5fps 相当。
+    private let backgroundSegmentInterval = 6
 
     private(set) var duration: Double = 0
 
@@ -87,8 +92,10 @@ final class MosaicPreviewController {
         guard let player, duration > 0 else { return }
         let sec = position * duration
         let time = CMTime(seconds: sec, preferredTimescale: 600)
-        // シーク先では古いフリーズランドマークを使わない
+        // シーク先では古いフリーズランドマーク・背景マスクを使わない
         lastKnownLandmarks = []
+        cachedBackgroundMask = nil
+        framesUntilResegment = 0
         await player.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero)
         renderCurrentFrame()
     }
@@ -136,7 +143,6 @@ final class MosaicPreviewController {
         }
 
         let bufferWidth = CVPixelBufferGetWidth(pixelBuffer)
-        let bufferHeight = CVPixelBufferGetHeight(pixelBuffer)
 
         // 720px 幅に縮小してから Metal 処理（GPU→CPU 転送量を削減）
         let maxWidth = 720
@@ -165,9 +171,11 @@ final class MosaicPreviewController {
         } else {
             lastKnownLandmarks = landmarks
         }
-        let additionalPaths = model.manualRegionPaths(
-            for: CGSize(width: bufferWidth, height: bufferHeight)
-        )
+        // 手動矩形は顔検出の補助なので顔タブ（faceMosaicOn）の状態に従う。
+        // 解像度は（縮小後の）実テクスチャに合わせる（フルサイズだと 720px 縮小時に位置がずれる）。
+        let additionalPaths = model.faceMosaicOn
+            ? model.manualRegionPaths(for: CGSize(width: tex.width, height: tex.height))
+            : []
 
         guard let result = renderer.renderToNewTexture(
             input: tex,
@@ -176,10 +184,18 @@ final class MosaicPreviewController {
         ) else { return }
 
         // 背景モザイク（平面）。人物前景を反転したマスクで背景だけを処理。
+        // Vision は重いため毎フレームではなく backgroundSegmentInterval ごとに再計算し、
+        // 間のフレームはキャッシュ済みマスクを再利用する。
         var finalTexture = result.texture
         if model.backgroundMosaicOn {
             #if canImport(Vision)
-            if let mask = segmenter.backgroundMask(pixelBuffer: pixelBuffer),
+            if framesUntilResegment <= 0 || cachedBackgroundMask == nil {
+                cachedBackgroundMask = segmenter.backgroundMask(pixelBuffer: pixelBuffer)
+                framesUntilResegment = backgroundSegmentInterval
+            } else {
+                framesUntilResegment -= 1
+            }
+            if let mask = cachedBackgroundMask,
                let out = renderer.renderBackgroundToNewTexture(
                    input: finalTexture,
                    mask: mask,

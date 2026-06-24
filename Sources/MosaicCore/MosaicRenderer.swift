@@ -188,33 +188,10 @@ public final class MosaicRenderer: NSObject {
         kernelParams.centerX = Float(faceCenter.x)
         kernelParams.centerY = Float(faceCenter.y)
 
-        guard let commandBuffer = commandQueue.makeCommandBuffer(),
-              let encoder = commandBuffer.makeComputeCommandEncoder() else {
-            copy(from: input, to: output, waitForCompletion: waitForCompletion)
-            return newStatus
-        }
-
-        encoder.setComputePipelineState(pipelineState)
-        encoder.setTexture(input, index: 0)
-        encoder.setTexture(output, index: 1)
-        encoder.setTexture(mask, index: 2)
-        withUnsafeBytes(of: &kernelParams) { raw in
-            encoder.setBytes(raw.baseAddress!, length: raw.count, index: 0)
-        }
-
-        let threadgroupSize = MTLSize(width: 16, height: 16, depth: 1)
-        let threadgroups = MTLSize(
-            width: (width + threadgroupSize.width - 1) / threadgroupSize.width,
-            height: (height + threadgroupSize.height - 1) / threadgroupSize.height,
-            depth: 1
+        dispatchMosaicKernel(
+            input: input, output: output, mask: mask,
+            params: kernelParams, waitForCompletion: waitForCompletion
         )
-        encoder.dispatchThreadgroups(threadgroups, threadsPerThreadgroup: threadgroupSize)
-        encoder.endEncoding()
-        commandBuffer.commit()
-        if waitForCompletion {
-            commandBuffer.waitUntilCompleted()
-        }
-
         return newStatus
     }
 
@@ -323,7 +300,24 @@ public final class MosaicRenderer: NSObject {
         kernelParams.rotation = 0
         kernelParams.centerX = Float(input.width) / 2
         kernelParams.centerY = Float(input.height) / 2
+        dispatchMosaicKernel(
+            input: input, output: output, mask: mask,
+            params: kernelParams, waitForCompletion: waitForCompletion
+        )
+    }
 
+    /// 共通のモザイク compute カーネル発行。input/output/mask と完成済みの
+    /// `MosaicParams` を受け取り、16x16 スレッドグループでディスパッチする。
+    /// 顔（単一・コンタ）と背景の各パスがこの1経路を共有する。
+    /// コマンドバッファ生成に失敗した場合は input をそのまま output にコピーする。
+    func dispatchMosaicKernel(
+        input: MTLTexture,
+        output: MTLTexture,
+        mask: MTLTexture,
+        params: MosaicParams,
+        waitForCompletion: Bool
+    ) {
+        var kernelParams = params
         guard let commandBuffer = commandQueue.makeCommandBuffer(),
               let encoder = commandBuffer.makeComputeCommandEncoder() else {
             copy(from: input, to: output, waitForCompletion: waitForCompletion)
@@ -384,7 +378,17 @@ public final class MosaicRenderer: NSObject {
     }
 
     private func reuseOrMakeMaskTexture(width: Int, height: Int) -> MTLTexture? {
-        if let existing = maskTexture, existing.width == width, existing.height == height {
+        reuseOrMakeR8Texture(&maskTexture, width: width, height: height)
+    }
+
+    /// r8Unorm のマスクテクスチャを、サイズが一致すれば再利用し、なければ生成して
+    /// `cache` に格納する。顔コンタ用・背景用で同じ確保ロジックを共有する。
+    func reuseOrMakeR8Texture(
+        _ cache: inout MTLTexture?,
+        width: Int,
+        height: Int
+    ) -> MTLTexture? {
+        if let existing = cache, existing.width == width, existing.height == height {
             return existing
         }
         let descriptor = MTLTextureDescriptor.texture2DDescriptor(
@@ -395,7 +399,7 @@ public final class MosaicRenderer: NSObject {
         )
         descriptor.usage = [.shaderRead]
         let texture = device.makeTexture(descriptor: descriptor)
-        maskTexture = texture
+        cache = texture
         return texture
     }
 
