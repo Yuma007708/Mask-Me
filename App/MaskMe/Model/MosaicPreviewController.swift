@@ -135,7 +135,14 @@ final class MosaicPreviewController {
               let cache = textureCache else { return }
 
         let currentTime = player.currentTime()
-        guard let pixelBuffer = videoOutput.copyPixelBuffer(forItemTime: currentTime, itemTimeForDisplay: nil) else {
+        // `copyPixelBuffer(forItemTime:)` は要求時刻に最も近いフレームを返すだけで、
+        // 実際に返ってきたフレームの時刻は内部バッファリング次第（1〜3 フレーム遅延しうる）。
+        // 第 2 引数で実フレーム時刻を受け取り、landmarks の検索もそれに揃えると一拍遅れが消える。
+        var actualItemTime = CMTime()
+        guard let pixelBuffer = videoOutput.copyPixelBuffer(
+            forItemTime: currentTime,
+            itemTimeForDisplay: &actualItemTime
+        ) else {
             return
         }
 
@@ -160,7 +167,9 @@ final class MosaicPreviewController {
 
         guard let tex = inputTex else { return }
 
-        let timeSec = currentTime.seconds
+        // 描画中のフレームの実際の時刻（理想時刻ではなく）で landmarks を引く。
+        // これにより「顔の動きにモザイクが一拍遅れる」現象を解消する。
+        let timeSec = actualItemTime.isValid ? actualItemTime.seconds : currentTime.seconds
         // 顔タブが OFF のときは顔ランドマークを使わない。
         // 検出キャッシュ欠落時の freeze はしない。lookupFaces 側で両側マッチング補間が
         // 連続する顔だけ返すようにしているため、ここで freeze するとアウト→イン時に

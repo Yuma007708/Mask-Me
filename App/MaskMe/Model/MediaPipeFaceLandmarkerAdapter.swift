@@ -65,10 +65,11 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
         options.minFacePresenceConfidence  = clampConfidence(settings.minFacePresenceConfidence)
         options.minTrackingConfidence      = clampConfidence(settings.minTrackingConfidence)
         self.plausibilityMinSpan = CGFloat(settings.minSpan)
-        // 目の間隔／顔幅の比。下限 0.35 で、裸の体（乳首・胸を顔メッシュに誤フィット）を
-        // 棄却する。裸動画の全フレーム実測では乳首誤検出が eyeRatio 0.25〜0.31、正当な
-        // 横顔は 0.41、正面顔は 0.55 以上で、0.35 が乳首と顔を分ける閾値。
-        self.plausibilityEyeRatioRange = 0.35...1.0
+        // 目の間隔／顔幅の比。下限 0.40 は、補助検出器が体（胸・首・手）を bbox 化して
+        // MP IMG モードで再検出させたときの誤フィットを弾くため。実測では乳首は 0.25〜0.31、
+        // 正当な横顔は 0.41、正面顔は 0.55+。0.40 は 0.35→0.40 引き上げで「体の一部に顔メッシュ
+        // をフィットしたが 0.35 を僅かに上回って通過」していたケースを排除する。
+        self.plausibilityEyeRatioRange = 0.40...1.0
         self.landmarker = try FaceLandmarker(options: options)
         // 設定の faceDetectorBackend に応じて補助検出器を構築する。
         self.bboxDetector = Self.makeBBoxDetector(for: settings.faceDetectorBackend)
@@ -164,7 +165,15 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
         useImageMode: Bool
     ) -> [FaceLandmarkSet] {
         guard let bboxDetector else { return mpResults }
-        let visionBoxes = bboxDetector.detectFaceBoundingBoxes(in: image)
+        let rawBoxes = bboxDetector.detectFaceBoundingBoxes(in: image)
+        if rawBoxes.isEmpty { return mpResults }
+        // 補助検出器の生 bbox を「明らかに顔ではない形状」で前段ガードする。
+        // (画面の 4% 未満 or アスペクト比が顔から大きく外れる) を捨てて、ROI 再検出のコストも節約する。
+        let visionBoxes = rawBoxes.filter { box in
+            guard box.width >= 0.04, box.height >= 0.04 else { return false }
+            let ratio = box.width / box.height
+            return ratio >= 0.5 && ratio <= 1.5
+        }
         if visionBoxes.isEmpty { return mpResults }
         let mpBoxes = mpResults.map { $0.boundingBox }
         let novelBoxes = visionBoxes.filter { vb in

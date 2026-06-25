@@ -27,15 +27,28 @@ struct YuNetFaceDetector: FaceBBoxDetecting {
     }
 
     func detectFaceBoundingBoxes(in image: UIImage) -> [CGRect] {
-        guard let model, let cg = image.cgImage,
-              let resized = resizeToBGRA(cg, size: inputSize),
-              let input = makeMultiArray(from: resized, size: inputSize),
+        guard let model, let cg = image.cgImage else { return [] }
+        let origW = cg.width
+        let origH = cg.height
+        guard origW > 0, origH > 0 else { return [] }
+
+        // Letterbox：アスペクト比を保ったまま 640x640 内に収めて余白は黒パディング。
+        // stretch すると元画像のアスペクト比が壊れて、縦長/横長動画で体を顔サイズに誤検出する。
+        let scale = min(CGFloat(inputSize) / CGFloat(origW), CGFloat(inputSize) / CGFloat(origH))
+        let newW = Int((CGFloat(origW) * scale).rounded())
+        let newH = Int((CGFloat(origH) * scale).rounded())
+        let padX = (inputSize - newW) / 2
+        let padY = (inputSize - newH) / 2
+
+        guard let buffer = letterboxBGRA(cg, drawSize: CGSize(width: newW, height: newH),
+                                         intoSize: inputSize, padX: padX, padY: padY),
+              let input = makeMultiArray(from: buffer, size: inputSize),
               let provider = try? MLDictionaryFeatureProvider(dictionary: ["input": input]),
               let output = try? model.prediction(from: provider) else {
             return []
         }
 
-        // Decode each stride and accumulate candidates in 640x640 pixel coords.
+        // Decode each stride and accumulate candidates in 640x640 letterboxed pixel coords.
         var candidates: [(rect: CGRect, score: Float)] = []
         for stride in strides {
             guard let cls = output.featureValue(for: "cls_\(stride)")?.multiArrayValue,
@@ -50,14 +63,23 @@ struct YuNetFaceDetector: FaceBBoxDetecting {
         // NMS to drop duplicate boxes.
         let kept = nms(candidates, iouThreshold: nmsThreshold)
 
-        // Map 640x640 coords back to original image coords, normalized to [0, 1].
-        let inputF = CGFloat(inputSize)
-        return kept.map { det in
-            CGRect(
-                x: det.rect.minX / inputF,
-                y: det.rect.minY / inputF,
-                width: det.rect.width / inputF,
-                height: det.rect.height / inputF
+        // Letterbox 座標 (640x640) → 元画像ピクセル座標 → [0, 1] 正規化。
+        // 引き伸ばし時のアスペクト歪みを排除するため、padX/padY を引いてから scale で割る。
+        let origWF = CGFloat(origW)
+        let origHF = CGFloat(origH)
+        return kept.compactMap { det in
+            let xInScaled = det.rect.minX - CGFloat(padX)
+            let yInScaled = det.rect.minY - CGFloat(padY)
+            let origX = xInScaled / scale
+            let origY = yInScaled / scale
+            let origRectW = det.rect.width / scale
+            let origRectH = det.rect.height / scale
+            guard origRectW > 0, origRectH > 0 else { return nil }
+            return CGRect(
+                x: origX / origWF,
+                y: origY / origHF,
+                width: origRectW / origWF,
+                height: origRectH / origHF
             )
         }
     }
@@ -127,27 +149,29 @@ struct YuNetFaceDetector: FaceBBoxDetecting {
 
     // MARK: - Image prep
 
-    /// CGImage を 640×640 の BGRA バッファ（生 UInt8）に焼き直す。
-    /// アスペクト比は無視して引き伸ばし（OpenCV YuNet サンプルと同じ振る舞い）。
-    private func resizeToBGRA(_ cg: CGImage, size: Int) -> [UInt8]? {
+    /// CGImage を `intoSize × intoSize` の BGRA バッファに letterbox 焼き込みする。
+    /// 余白（pad）は init 時の zero-fill（黒）のまま、scaled image は `(padX, padY)` 位置に描画。
+    private func letterboxBGRA(_ cg: CGImage, drawSize: CGSize, intoSize: Int,
+                               padX: Int, padY: Int) -> [UInt8]? {
         let bytesPerPixel = 4
-        let bytesPerRow = size * bytesPerPixel
-        var buffer = [UInt8](repeating: 0, count: size * size * bytesPerPixel)
+        let bytesPerRow = intoSize * bytesPerPixel
+        var buffer = [UInt8](repeating: 0, count: intoSize * intoSize * bytesPerPixel)
         let cs = CGColorSpaceCreateDeviceRGB()
         // bitmap info: BGRA で並ぶように noneSkipFirst + little endian。
-        // 多くの iOS バッファと一致。
         let bitmapInfo: UInt32 =
             CGImageAlphaInfo.noneSkipFirst.rawValue |
             CGBitmapInfo.byteOrder32Little.rawValue
         guard let ctx = buffer.withUnsafeMutableBytes({ rawBuffer -> CGContext? in
             guard let base = rawBuffer.baseAddress else { return nil }
             return CGContext(
-                data: base, width: size, height: size,
+                data: base, width: intoSize, height: intoSize,
                 bitsPerComponent: 8, bytesPerRow: bytesPerRow,
                 space: cs, bitmapInfo: bitmapInfo
             )
         }) else { return nil }
-        ctx.draw(cg, in: CGRect(x: 0, y: 0, width: size, height: size))
+        ctx.draw(cg, in: CGRect(x: padX, y: padY,
+                                 width: Int(drawSize.width),
+                                 height: Int(drawSize.height)))
         return buffer
     }
 
