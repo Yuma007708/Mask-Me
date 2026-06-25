@@ -119,11 +119,13 @@ struct SettingsView: View {
                     Label("補助検出器", systemImage: "wand.and.stars")
                         .layoutPriority(1)
                     Spacer()
-                    TipButton(text: "MediaPipe が取り逃した顔を別の検出器で見つけ、その領域を MediaPipe で再検出して補完します。Apple Vision は実機専用（シミュレータでは 0 検出になります）。")
+                    TipButton(text: "MediaPipe が取り逃した顔を別の検出器で見つけ、その領域を MediaPipe で再検出して補完します。Apple Vision は実機専用、Face Detector (BlazeFace) はシミュレータでも動作します。両方を選ぶと処理時間が約 2 倍になります。")
                 }
                 Picker("", selection: $store.settings.faceDetectorBackend) {
                     Text("使わない").tag(FaceDetectorBackend.off)
-                    Text("Apple Vision").tag(FaceDetectorBackend.vision)
+                    Text("Vision").tag(FaceDetectorBackend.vision)
+                    Text("Face Det.").tag(FaceDetectorBackend.faceDetector)
+                    Text("両方").tag(FaceDetectorBackend.both)
                 }
                 .pickerStyle(.segmented)
                 .labelsHidden()

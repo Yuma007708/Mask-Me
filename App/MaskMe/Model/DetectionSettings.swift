@@ -9,6 +9,10 @@ public enum FaceDetectorBackend: String, Codable {
     case off
     /// Apple Vision のみ。実機専用（Simulator では 0 検出）。
     case vision
+    /// MediaPipe Face Detector (BlazeFace) のみ。Simulator でも実機でも動作。
+    case faceDetector
+    /// Vision + Face Detector 並走 union。最高検出率だが処理時間も最大。
+    case both
 }
 
 /// 顔検出に関わる全パラメーターを1つにまとめた値型。

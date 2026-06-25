@@ -94,6 +94,10 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
             return nil
         case .vision:
             return AppleVisionFaceDetector()
+        case .faceDetector:
+            return MediaPipeFaceBBoxDetector()
+        case .both:
+            return CompositeBBoxDetector([AppleVisionFaceDetector(), MediaPipeFaceBBoxDetector()])
         }
     }
 
