@@ -389,18 +389,20 @@ public final class VideoMosaicExporter: @unchecked Sendable {
         // 10fps 検出基準で 5 フレームまでの抜けをブリッジする（MosaicEditorModel と同値）。
         let bridgeWindow = 0.5
         var before: (dist: Double, faces: [FaceLandmarkSet])?
-        var hasAfter = false
+        var after: (dist: Double, faces: [FaceLandmarkSet])?
         for (t, faces) in cache where !faces.isEmpty {
             let d = abs(t - time)
             guard d <= bridgeWindow else { continue }
             if t <= time {
                 if before == nil || d < before!.dist { before = (d, faces) }
             } else {
-                hasAfter = true
+                if after == nil || d < after!.dist { after = (d, faces) }
             }
         }
-        guard let before, hasAfter else { return [] }
-        return before.faces
+        guard let before, let after else { return [] }
+        // before の顔のうち、after にも IoU > 0.3 で対応する顔があるものだけ補間に使う。
+        // フレームアウト→イン（位置が大きく変わる）は除外され、アウト位置への固定を防ぐ。
+        return before.faces.filter { $0.hasCounterpart(in: after.faces) }
     }
 
     private func filterToSelected(_ faces: [FaceLandmarkSet], targets: [FaceTarget]) -> [FaceLandmarkSet] {

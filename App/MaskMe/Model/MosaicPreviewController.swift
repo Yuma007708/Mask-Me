@@ -21,8 +21,6 @@ final class MosaicPreviewController {
     private var displayLink: CADisplayLink?
     private let ciContext: CIContext
     private var videoURL: URL?
-    /// 直前フレームで有効だったランドマーク。キャッシュ欠落時のフリーズ用。
-    private var lastKnownLandmarks: [FaceLandmarkSet] = []
     #if canImport(Vision)
     private let segmenter = PersonSegmenter(quality: .balanced)
     #endif
@@ -92,8 +90,7 @@ final class MosaicPreviewController {
         guard let player, duration > 0 else { return }
         let sec = position * duration
         let time = CMTime(seconds: sec, preferredTimescale: 600)
-        // シーク先では古いフリーズランドマーク・背景マスクを使わない
-        lastKnownLandmarks = []
+        // シーク先では古い背景マスクを使わない
         cachedBackgroundMask = nil
         framesUntilResegment = 0
         await player.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero)
@@ -165,21 +162,12 @@ final class MosaicPreviewController {
 
         let timeSec = currentTime.seconds
         // 顔タブが OFF のときは顔ランドマークを使わない。
-        // selectedLandmarks は顔 OFF でも [] を返すが、その [] を「キャッシュ欠落」と
-        // 取り違えて直前ランドマークに freeze すると、顔 OFF にしても顔モザイクが
-        // 残り続けてしまう（かつエクスポートと食い違う）。OFF時は freeze 用の保持も解除する。
-        var landmarks: [FaceLandmarkSet] = []
-        if model.faceMosaicOn {
-            landmarks = model.selectedLandmarks(at: timeSec)
-            // キャッシュにヒットしなければ直前の有効ランドマークで freeze する
-            if landmarks.isEmpty {
-                landmarks = lastKnownLandmarks
-            } else {
-                lastKnownLandmarks = landmarks
-            }
-        } else {
-            lastKnownLandmarks = []
-        }
+        // 検出キャッシュ欠落時の freeze はしない。lookupFaces 側で両側マッチング補間が
+        // 連続する顔だけ返すようにしているため、ここで freeze するとアウト→イン時に
+        // 「アウト位置にモザイクが固定」され、かつエクスポートと挙動が食い違う。
+        let landmarks: [FaceLandmarkSet] = model.faceMosaicOn
+            ? model.selectedLandmarks(at: timeSec)
+            : []
         // 手動矩形は顔検出の補助なので顔タブ（faceMosaicOn）の状態に従う。
         // 解像度は（縮小後の）実テクスチャに合わせる（フルサイズだと 720px 縮小時に位置がずれる）。
         let additionalPaths = model.faceMosaicOn
