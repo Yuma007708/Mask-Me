@@ -112,6 +112,22 @@ struct SettingsView: View {
                         value: $store.settings.numFaces, in: 1...Int.max)
                     .fixedSize()
             }
+
+            // 補助顔検出器のバックエンド選択（実機専用）
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Label("補助検出器", systemImage: "wand.and.stars")
+                        .layoutPriority(1)
+                    Spacer()
+                    TipButton(text: "MediaPipe が取り逃した顔を別の検出器で見つけ、その領域を MediaPipe で再検出して補完します。Apple Vision は実機専用（シミュレータでは 0 検出になります）。")
+                }
+                Picker("", selection: $store.settings.faceDetectorBackend) {
+                    Text("使わない").tag(FaceDetectorBackend.off)
+                    Text("Apple Vision").tag(FaceDetectorBackend.vision)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+            }
         }
     }
 
