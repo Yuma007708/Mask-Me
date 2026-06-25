@@ -11,8 +11,11 @@ public enum FaceDetectorBackend: String, Codable {
     case vision
     /// MediaPipe Face Detector (BlazeFace) のみ。Simulator でも実機でも動作。
     case faceDetector
-    /// Vision + Face Detector 並走 union。最高検出率だが処理時間も最大。
-    case both
+    /// YuNet (OpenCV) のみ。Core ML で動作、シミュレータ・実機どちらでも動く。
+    /// BlazeFace より精度高め（小顔・横顔に強い）が、推論コストはやや高い。
+    case yunet
+    /// Vision + Face Detector + YuNet 並走 union。最高検出率だが処理時間も最大。
+    case all
 }
 
 /// 顔検出に関わる全パラメーターを1つにまとめた値型。

@@ -96,8 +96,14 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
             return AppleVisionFaceDetector()
         case .faceDetector:
             return MediaPipeFaceBBoxDetector()
-        case .both:
-            return CompositeBBoxDetector([AppleVisionFaceDetector(), MediaPipeFaceBBoxDetector()])
+        case .yunet:
+            return YuNetFaceDetector()
+        case .all:
+            return CompositeBBoxDetector([
+                AppleVisionFaceDetector(),
+                MediaPipeFaceBBoxDetector(),
+                YuNetFaceDetector(),
+            ])
         }
     }
 
