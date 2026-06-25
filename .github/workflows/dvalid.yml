@@ -1,0 +1,188 @@
+name: Detection Accuracy (5本サンプル動画)
+
+on:
+  workflow_dispatch:
+    inputs:
+      backends:
+        description: '回す backend（カンマ区切り、サブセット可）'
+        default: 'off,faceDetector,yunet'
+        required: false
+      videos:
+        description: '回す動画（カンマ区切り、サブセット可）'
+        default: 's1,s2,s3,s4,s5'
+        required: false
+
+jobs:
+  test:
+    name: ${{ matrix.video }} / ${{ matrix.backend }}
+    runs-on: macos-15
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        video: [s1, s2, s3, s4, s5]
+        backend: [off, faceDetector, yunet]
+
+    steps:
+      - name: Skip if not in input subset
+        id: subset
+        run: |
+          IFS=',' read -ra VIDEOS <<< "${{ inputs.videos || 's1,s2,s3,s4,s5' }}"
+          IFS=',' read -ra BACKENDS <<< "${{ inputs.backends || 'off,faceDetector,yunet' }}"
+          ok=false
+          for v in "${VIDEOS[@]}"; do [ "$v" = "${{ matrix.video }}" ] && for b in "${BACKENDS[@]}"; do [ "$b" = "${{ matrix.backend }}" ] && ok=true; done; done
+          echo "ok=$ok" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout
+        if: steps.subset.outputs.ok == 'true'
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        if: steps.subset.outputs.ok == 'true'
+        run: sudo xcode-select -s /Applications/Xcode_16.0.app
+
+      - name: Cache CocoaPods
+        if: steps.subset.outputs.ok == 'true'
+        uses: actions/cache@v4
+        with:
+          path: App/Pods
+          key: pods-${{ runner.os }}-${{ hashFiles('App/Podfile.lock') }}
+          restore-keys: pods-${{ runner.os }}-
+
+      - name: Install xcodegen
+        if: steps.subset.outputs.ok == 'true'
+        run: brew install xcodegen
+
+      - name: Setup Python
+        if: steps.subset.outputs.ok == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install gdown
+        if: steps.subset.outputs.ok == 'true'
+        run: pip install --quiet gdown
+
+      - name: Download sample videos from Drive folder
+        if: steps.subset.outputs.ok == 'true'
+        env:
+          FOLDER_ID: ${{ secrets.SAMPLE_DRIVE_FOLDER_ID }}
+        run: |
+          if [ -z "$FOLDER_ID" ]; then
+            echo "::error::secret SAMPLE_DRIVE_FOLDER_ID が未設定です"
+            exit 1
+          fi
+          mkdir -p /tmp/samples
+          cd /tmp/samples
+          gdown --folder "https://drive.google.com/drive/folders/$FOLDER_ID" --remaining-ok --quiet
+          ls -la
+
+      - name: Map Drive filenames → sN.mov
+        if: steps.subset.outputs.ok == 'true'
+        run: |
+          cd /tmp/samples
+          # UUID 一致で確定する 2 本
+          mv copy_5B417FE2*.MOV s4.mov 2>/dev/null || true
+          mv copy_324B1BD2*.MOV s5.mov 2>/dev/null || true
+          # 残り 3 本はサイズで推測（>50MB=S1, >30MB=S2, else=S3）
+          for f in copy_*.MOV; do
+            [ -e "$f" ] || continue
+            size=$(stat -f%z "$f")
+            if [ "$size" -gt 50000000 ]; then
+              mv "$f" s1.mov
+            elif [ "$size" -gt 30000000 ]; then
+              mv "$f" s2.mov
+            else
+              mv "$f" s3.mov
+            fi
+          done
+          ls -la s*.mov
+
+      - name: xcodegen
+        if: steps.subset.outputs.ok == 'true'
+        working-directory: App
+        run: xcodegen generate
+
+      - name: pod install
+        if: steps.subset.outputs.ok == 'true'
+        working-directory: App
+        run: pod install --no-repo-update
+
+      - name: Prepare iOS Simulator
+        if: steps.subset.outputs.ok == 'true'
+        id: simulator
+        run: |
+          # iPhone 17 が未提供の Xcode バージョンを想定して iPhone 15 にフォールバック
+          UUID=$(xcrun simctl list devices available | grep -E "iPhone (17|15) Pro|iPhone (17|15)" | head -1 | grep -oE '[0-9A-F-]{36}')
+          echo "uuid=$UUID" >> "$GITHUB_OUTPUT"
+
+      - name: Run XCTest
+        if: steps.subset.outputs.ok == 'true'
+        env:
+          SAMPLE_VIDEO_DIR: /tmp/samples
+        run: |
+          # backend 名が swift enum case と一致するように補正（CLI から渡された文字列をそのまま test 名に）
+          TEST_BACKEND="${{ matrix.backend }}"
+          # faceDetector → faceDet と短縮した test 名にしている
+          case "$TEST_BACKEND" in
+            faceDetector) TEST_BACKEND_SUFFIX="faceDet" ;;
+            *)            TEST_BACKEND_SUFFIX="$TEST_BACKEND" ;;
+          esac
+          UPPER=$(echo "${{ matrix.video }}" | tr '[:lower:]' '[:upper:]')
+          TEST_NAME="test_${UPPER}_${TEST_BACKEND_SUFFIX}"
+          echo "Running $TEST_NAME"
+          set -o pipefail
+          xcodebuild test \
+            -workspace App/MaskMe.xcworkspace \
+            -scheme MaskMe \
+            -destination "platform=iOS Simulator,id=${{ steps.simulator.outputs.uuid }}" \
+            -only-testing:"MaskMeTests/DValidVideoTests/$TEST_NAME" \
+            2>&1 | tee test.log
+
+      - name: Extract result line
+        if: always() && steps.subset.outputs.ok == 'true'
+        run: |
+          grep -E "\[DVALRESULT\]" test.log > result.json || true
+          cat result.json || true
+
+      - name: Upload artifact
+        if: always() && steps.subset.outputs.ok == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: result-${{ matrix.video }}-${{ matrix.backend }}
+          path: |
+            test.log
+            result.json
+          retention-days: 14
+
+  summary:
+    name: Aggregate results
+    needs: test
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Build summary table
+        run: |
+          echo "# Detection Accuracy Summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| 動画 | backend | hit | total | rate | baseline | lowCy% |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|---|---|---|---|---|" >> "$GITHUB_STEP_SUMMARY"
+          for d in artifacts/result-*; do
+            result_file="$d/result.json"
+            [ -f "$result_file" ] || continue
+            line=$(grep -oE '\{.*\}' "$result_file" | head -1)
+            [ -z "$line" ] && continue
+            v=$(echo "$line"     | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d["video"])')
+            b=$(echo "$line"     | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d["backend"])')
+            hit=$(echo "$line"   | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d["hit"])')
+            total=$(echo "$line" | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d["total"])')
+            rate=$(echo "$line"  | python3 -c 'import sys,json;d=json.load(sys.stdin);print(f"{d[\"rate\"]*100:.1f}%")')
+            bl=$(echo "$line"    | python3 -c 'import sys,json;d=json.load(sys.stdin);print(f"{d[\"baseline\"]*100:.0f}%")')
+            low=$(echo "$line"   | python3 -c 'import sys,json;d=json.load(sys.stdin);print(f"{d[\"lowRate\"]*100:.1f}%")')
+            echo "| $v | $b | $hit | $total | $rate | $bl | $low |" >> "$GITHUB_STEP_SUMMARY"
+          done
