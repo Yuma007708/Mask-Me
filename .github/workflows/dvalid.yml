@@ -74,7 +74,9 @@ jobs:
           fi
           mkdir -p /tmp/samples
           cd /tmp/samples
-          gdown --folder "https://drive.google.com/drive/folders/$FOLDER_ID" --quiet
+          gdown --folder "https://drive.google.com/drive/folders/$FOLDER_ID"
+          echo "--- after gdown ---"
+          ls -la
           ls -la
 
       - name: Map Drive filenames → sN.mov
