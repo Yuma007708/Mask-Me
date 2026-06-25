@@ -12,8 +12,11 @@ extension FaceLandmarkSet {
         public static let minSpan: CGFloat = 0.02          // 遠距離・広角ショットの小さい顔を拾えるよう緩和
         /// …and no larger than this (a real face never exceeds the frame much).
         public static let maxSpan: CGFloat = 1.6
-        /// Face height / width must fall in this range.
-        public static let aspectRange: ClosedRange<CGFloat> = 0.7...2.6
+        /// Face height / width must fall in this range. Wide lower/upper margins so
+        /// tilted (roll) and angled faces — whose axis-aligned box is squarer or
+        /// wider than an upright face — are not falsely rejected. Only clearly
+        /// body-like tall-thin shapes fall outside.
+        public static let aspectRange: ClosedRange<CGFloat> = 0.4...3.0
         /// Inter-ocular distance / face width must fall in this range.
         public static let eyeWidthRatioRange: ClosedRange<CGFloat> = 0.10...0.95  // 斜め向きの顔を許容するよう緩和
     }

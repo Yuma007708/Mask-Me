@@ -381,14 +381,28 @@ public final class VideoMosaicExporter: @unchecked Sendable {
         return landmarker.allLandmarks(in: UIImage(cgImage: cg), timestampMs: timestampMs)
     }
 
+    /// 前後 0.25 秒以内の両側に検出があるときだけ直近フレームで補間する。片側だけ
+    /// （フレームアウト／イン境界）は空を返し、呼び出し側のライブ再検出に委ねる。
+    /// 直近の検出を無条件に外挿すると、顔がフレーム外へ出た位置にモザイクが固定される。
     private func lookupCache(_ cache: [Double: [FaceLandmarkSet]], at time: Double) -> [FaceLandmarkSet] {
-        if let exact = cache[time] { return exact }
-        var best: (dist: Double, faces: [FaceLandmarkSet]) = (0.3, [])
-        for (t, faces) in cache {
+        if let exact = cache[time], !exact.isEmpty { return exact }
+        // 15fps 検出基準で 5 フレームまでの抜けをブリッジする（MosaicEditorModel と同値）。
+        let bridgeWindow = 5.0 / 15.0
+        var before: (dist: Double, faces: [FaceLandmarkSet])?
+        var after: (dist: Double, faces: [FaceLandmarkSet])?
+        for (t, faces) in cache where !faces.isEmpty {
             let d = abs(t - time)
-            if d < best.dist { best = (d, faces) }
+            guard d <= bridgeWindow else { continue }
+            if t <= time {
+                if before == nil || d < before!.dist { before = (d, faces) }
+            } else {
+                if after == nil || d < after!.dist { after = (d, faces) }
+            }
         }
-        return best.faces
+        guard let before, let after else { return [] }
+        // before の顔のうち、after にも IoU > 0.3 で対応する顔があるものだけ補間に使う。
+        // フレームアウト→イン（位置が大きく変わる）は除外され、アウト位置への固定を防ぐ。
+        return before.faces.filter { $0.hasCounterpart(in: after.faces) }
     }
 
     private func filterToSelected(_ faces: [FaceLandmarkSet], targets: [FaceTarget]) -> [FaceLandmarkSet] {

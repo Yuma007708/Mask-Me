@@ -165,7 +165,11 @@ public final class MosaicEditorModel: ObservableObject {
 
         if let frame = Self.firstFrame(of: asset) {
             sourceImage = frame
-            let faces = landmarker.allLandmarks(in: frame, timestampMs: 0)
+            // 最初の1フレームを単独検出するのは IMAGE モードの仕事。
+            // VIDEO モードは連続ストリームの時系列追跡用で、最初のフレームを
+            // 単体で処理するのが苦手（init 失敗 → NullFaceLandmarker になるケースも）。
+            let initialScanner = makeFaceLandmarker(forVideo: false, settings: detectionSettings)
+            let faces = initialScanner.allLandmarks(in: frame)
             detectedFaces = faces.map { lm in
                 FaceTarget(id: UUID(), landmarks: lm,
                            thumbnail: generateThumbnail(for: lm, from: frame),
@@ -404,17 +408,33 @@ public final class MosaicEditorModel: ObservableObject {
 
     // MARK: - 検出キャッシュ参照
 
-    /// 指定時刻に最も近い、非空のキャッシュエントリを返す（最大1秒以内）。
-    /// 空エントリは検出失敗を意味するためスキップし、直前の有効検出を再利用する。
+    /// 指定時刻の顔ランドマークを返す。前後 `bridgeWindow` 秒以内の両側に検出がある
+    /// 「一時的な検出抜け」のみ直近フレームで補間する。片側にしか検出が無い場合
+    /// （顔がフレームアウト／インする境界）は空を返す。
+    ///
+    /// さらに「両側に検出があっても顔の位置が大きく変わっている」場合は
+    /// フレームアウト→イン（新しい位置に再入場）と判定して補間しない。これは
+    /// IoU マッチングで実装する。アウト前の位置にモザイクが貼り付いたままにならない。
     func lookupFaces(at time: Double) -> [FaceLandmarkSet] {
         if let exact = detectionCache[time], !exact.isEmpty { return exact }
-        var best: (dist: Double, faces: [FaceLandmarkSet]) = (1.0, [])
-        for (t, faces) in detectionCache {
-            guard !faces.isEmpty else { continue }
+        // 15fps プリスキャン基準で 5 フレームまでの検出抜けをブリッジする。
+        // これより長い抜けは「顔自体が画面外にいる」可能性が高いので外挿しない。
+        let bridgeWindow = 5.0 / 15.0
+        var before: (dist: Double, faces: [FaceLandmarkSet])?
+        var after: (dist: Double, faces: [FaceLandmarkSet])?
+        for (t, faces) in detectionCache where !faces.isEmpty {
             let d = abs(t - time)
-            if d < best.dist { best = (d, faces) }
+            guard d <= bridgeWindow else { continue }
+            if t <= time {
+                if before == nil || d < before!.dist { before = (d, faces) }
+            } else {
+                if after == nil || d < after!.dist { after = (d, faces) }
+            }
         }
-        return best.faces
+        guard let before, let after else { return [] }
+        // before の顔のうち、after にも「同じ位置 (IoU > 0.3)」で対応する顔があるものだけ補間に使う。
+        // 対応しない顔（アウト前の位置のまま、インでは別の場所に出た）は除外。
+        return before.faces.filter { $0.hasCounterpart(in: after.faces) }
     }
 
     /// 選択中の顔に対応する、指定時刻のランドマークセットを返す。
@@ -476,7 +496,7 @@ public final class MosaicEditorModel: ObservableObject {
         do { dur = try await asset.load(.duration).seconds } catch { return }
         guard dur > 0 else { return }
 
-        let interval = 0.1   // 10fps
+        let interval = 1.0 / 15.0   // 15fps（動きの速い顔と短時間アウトインの追従向上）
         let generator = AVAssetImageGenerator(asset: asset)
         generator.appliesPreferredTrackTransform = true
         generator.requestedTimeToleranceBefore = CMTime(seconds: interval, preferredTimescale: 600)
@@ -513,14 +533,25 @@ public final class MosaicEditorModel: ObservableObject {
                 let facesForCache = faces
                 let timeForCache = t
                 let matchCountsCopy = matchCounts
-                let updated = await MainActor.run { [weak self] () -> [Int] in
+                let updated = await MainActor.run { [weak self, img] () -> [Int] in
                     // 空結果はキャッシュしない（直前の有効検出を再利用させる）
                     if !facesForCache.isEmpty {
                         self?.detectionCache[timeForCache] = facesForCache
                     }
                     guard let self else { return matchCountsCopy }
+                    // 初期フレーム検出が失敗して detectedFaces が空のまま残っている場合、
+                    // プリスキャンで最初に見つかった顔を補完する（安全網）。
+                    if !facesForCache.isEmpty && self.detectedFaces.isEmpty {
+                        self.detectedFaces = facesForCache.map { lm in
+                            FaceTarget(id: UUID(), landmarks: lm,
+                                       thumbnail: self.generateThumbnail(for: lm, from: img),
+                                       isSelected: false)
+                        }
+                    }
                     var counts = matchCountsCopy
-                    for (i, target) in self.detectedFaces.prefix(expectedFaceCount).enumerated() {
+                    // detectedFaces がプリスキャン中に安全網で追加された場合に備えて配列を拡張する
+                    while counts.count < self.detectedFaces.count { counts.append(0) }
+                    for (i, target) in self.detectedFaces.enumerated() {
                         let tc = self.normalizedCentroid(of: target.landmarks)
                         if facesForCache.contains(where: { face in
                             let fc = self.normalizedCentroid(of: face)

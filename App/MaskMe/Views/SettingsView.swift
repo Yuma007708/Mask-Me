@@ -112,6 +112,25 @@ struct SettingsView: View {
                         value: $store.settings.numFaces, in: 1...Int.max)
                     .fixedSize()
             }
+
+            // 補助顔検出器のバックエンド選択（実機専用）
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Label("補助検出器", systemImage: "wand.and.stars")
+                        .layoutPriority(1)
+                    Spacer()
+                    TipButton(text: "MediaPipe が取り逃した顔を別の検出器で見つけ、その領域を MediaPipe で再検出して補完します。Apple Vision は実機専用、Face Detector (BlazeFace) と YuNet (OpenCV) はシミュレータでも動作。「全部」は 3 つを並走させて検出率最大、処理時間も最大（約 3 倍）。")
+                }
+                Picker("", selection: $store.settings.faceDetectorBackend) {
+                    Text("使わない").tag(FaceDetectorBackend.off)
+                    Text("Vision").tag(FaceDetectorBackend.vision)
+                    Text("Face Det.").tag(FaceDetectorBackend.faceDetector)
+                    Text("YuNet").tag(FaceDetectorBackend.yunet)
+                    Text("全部").tag(FaceDetectorBackend.all)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+            }
         }
     }
 

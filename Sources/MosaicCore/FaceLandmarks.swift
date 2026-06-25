@@ -89,6 +89,41 @@ public struct FaceLandmarkSet: Sendable, Equatable {
 }
 
 extension FaceLandmarkSet {
+    /// 全ランドマークを囲む最小矩形（左上原点・`[0, 1]` 正規化座標）。
+    /// 同じフレーム内の検出と、時系列で前後フレームの検出を比較して「同じ顔か」を
+    /// 判定するときの IoU 計算用。
+    public var boundingBox: CGRect {
+        guard !points.isEmpty else { return .zero }
+        var minX: Float = .infinity, minY: Float = .infinity
+        var maxX: Float = -.infinity, maxY: Float = -.infinity
+        for p in points {
+            if p.x < minX { minX = p.x }
+            if p.y < minY { minY = p.y }
+            if p.x > maxX { maxX = p.x }
+            if p.y > maxY { maxY = p.y }
+        }
+        return CGRect(
+            x: CGFloat(minX), y: CGFloat(minY),
+            width: CGFloat(maxX - minX), height: CGFloat(maxY - minY)
+        )
+    }
+
+    /// 他の顔リストの中に、自分と bbox IoU が `iouThreshold` を超えて重なる顔があるか。
+    /// 時系列補間で「before の顔が after にも続いているか（連続している顔か）」を判定する。
+    /// 顔がフレームアウト→インした場合、before と after で位置が大きく変わるので false になり、
+    /// 補間が抑制されて「アウト位置に固定」される事故を防ぐ。
+    public func hasCounterpart(in others: [FaceLandmarkSet], iouThreshold: CGFloat = 0.3) -> Bool {
+        let mine = self.boundingBox
+        for o in others {
+            let inter = mine.intersection(o.boundingBox)
+            guard !inter.isNull, inter.width > 0, inter.height > 0 else { continue }
+            let interArea = inter.width * inter.height
+            let unionArea = mine.width * mine.height + o.boundingBox.width * o.boundingBox.height - interArea
+            if unionArea > 0, interArea / unionArea > iouThreshold { return true }
+        }
+        return false
+    }
+
     /// 正規化ランドマーク座標を `rect` (0-1正規化) のサブ領域から全体画像座標へ逆マッピングする。
     /// 矩形クロップで検出したランドマークを元の画像座標系に戻すときに使う。
     public func remapped(into rect: CGRect) -> FaceLandmarkSet {
