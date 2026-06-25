@@ -75,7 +75,10 @@ jobs:
           mkdir -p /tmp/samples
           cd /tmp/samples
           gdown --folder "https://drive.google.com/drive/folders/$FOLDER_ID"
-          echo "--- after gdown ---"
+          # gdown は Drive 上のフォルダ名（例: 「検証動画」）をサブフォルダとして展開する。
+          # 次ステップは /tmp/samples/ 直下に MOV を期待するので flatten する。
+          find . -mindepth 2 -type f -name "*.MOV" -exec mv -f {} . \;
+          echo "--- after flatten ---"
           ls -la
           ls -la
 
