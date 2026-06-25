@@ -386,8 +386,8 @@ public final class VideoMosaicExporter: @unchecked Sendable {
     /// 直近の検出を無条件に外挿すると、顔がフレーム外へ出た位置にモザイクが固定される。
     private func lookupCache(_ cache: [Double: [FaceLandmarkSet]], at time: Double) -> [FaceLandmarkSet] {
         if let exact = cache[time], !exact.isEmpty { return exact }
-        // 10fps 検出基準で 5 フレームまでの抜けをブリッジする（MosaicEditorModel と同値）。
-        let bridgeWindow = 0.5
+        // 15fps 検出基準で 5 フレームまでの抜けをブリッジする（MosaicEditorModel と同値）。
+        let bridgeWindow = 5.0 / 15.0
         var before: (dist: Double, faces: [FaceLandmarkSet])?
         var after: (dist: Double, faces: [FaceLandmarkSet])?
         for (t, faces) in cache where !faces.isEmpty {

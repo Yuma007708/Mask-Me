@@ -82,6 +82,7 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
         if let result = detectAllImage(image) { return result }
         if let e1 = enhance(image, level: .moderate), let result = detectAllImage(e1) { return result }
         if let e2 = enhance(image, level: .aggressive), let result = detectAllImage(e2) { return result }
+        if let e3 = enhance(image, level: .backlight), let result = detectAllImage(e3) { return result }
         return []
     }
 
@@ -92,6 +93,8 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
            let result = detectAllVideoFrame(e1, timestampMs: timestampMs + 1) { return result }
         if let e2 = enhance(image, level: .aggressive),
            let result = detectAllVideoFrame(e2, timestampMs: timestampMs + 2) { return result }
+        if let e3 = enhance(image, level: .backlight),
+           let result = detectAllVideoFrame(e3, timestampMs: timestampMs + 3) { return result }
         return []
     }
 
@@ -114,11 +117,12 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
         return convertAll(result)
     }
 
-    private enum EnhanceLevel { case moderate, aggressive }
+    private enum EnhanceLevel { case moderate, aggressive, backlight }
 
-    /// 暗所・ぼやけ補正。
+    /// 暗所・ぼやけ・逆光補正。
     /// moderate: 軽微な暗さ・白飛びを改善。
     /// aggressive: 暗い動画・夜間シーンで顔を検出できるよう全体を大幅増光。
+    /// backlight: 逆光・人物のシルエットだけ暗いシーン向け。明部を強く抑え暗部を最大に持ち上げる。
     private func enhance(_ image: UIImage, level: EnhanceLevel) -> UIImage? {
         guard let cgImage = image.cgImage else { return nil }
         var ci = CIImage(cgImage: cgImage)
@@ -150,6 +154,20 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
                 .applyingFilter("CISharpenLuminance", parameters: [
                     "inputSharpness": 0.7,
                     "inputRadius":    1.5,
+                ])
+        case .backlight:
+            // 逆光対策: 明部を抑え、暗部を最大に持ち上げ、ガンマでさらに暗部ディテールを引き出す。
+            ci = ci
+                .applyingFilter("CIHighlightShadowAdjust", parameters: [
+                    "inputHighlightAmount": 0.3,
+                    "inputShadowAmount":    1.0,
+                ])
+                .applyingFilter("CIGammaAdjust", parameters: [
+                    "inputPower": 0.65,    // < 1.0 で暗部側を強く持ち上げる
+                ])
+                .applyingFilter("CISharpenLuminance", parameters: [
+                    "inputSharpness": 0.6,
+                    "inputRadius":    1.2,
                 ])
         }
         guard let out = ciContext.createCGImage(ci, from: ci.extent) else { return nil }

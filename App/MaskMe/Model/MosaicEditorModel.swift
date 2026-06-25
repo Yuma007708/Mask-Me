@@ -417,9 +417,9 @@ public final class MosaicEditorModel: ObservableObject {
     /// IoU マッチングで実装する。アウト前の位置にモザイクが貼り付いたままにならない。
     func lookupFaces(at time: Double) -> [FaceLandmarkSet] {
         if let exact = detectionCache[time], !exact.isEmpty { return exact }
-        // 10fps プリスキャン基準で 5 フレームまでの検出抜けをブリッジする。
+        // 15fps プリスキャン基準で 5 フレームまでの検出抜けをブリッジする。
         // これより長い抜けは「顔自体が画面外にいる」可能性が高いので外挿しない。
-        let bridgeWindow = 0.5
+        let bridgeWindow = 5.0 / 15.0
         var before: (dist: Double, faces: [FaceLandmarkSet])?
         var after: (dist: Double, faces: [FaceLandmarkSet])?
         for (t, faces) in detectionCache where !faces.isEmpty {
@@ -496,7 +496,7 @@ public final class MosaicEditorModel: ObservableObject {
         do { dur = try await asset.load(.duration).seconds } catch { return }
         guard dur > 0 else { return }
 
-        let interval = 0.1   // 10fps
+        let interval = 1.0 / 15.0   // 15fps（動きの速い顔と短時間アウトインの追従向上）
         let generator = AVAssetImageGenerator(asset: asset)
         generator.appliesPreferredTrackTransform = true
         generator.requestedTimeToleranceBefore = CMTime(seconds: interval, preferredTimescale: 600)
