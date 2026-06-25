@@ -39,7 +39,11 @@ jobs:
 
       - name: Select Xcode
         if: steps.subset.outputs.ok == 'true'
-        run: sudo xcode-select -s /Applications/Xcode_16.0.app
+        run: |
+          XCODE=$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -1)
+          echo "Using $XCODE"
+          sudo xcode-select -s "$XCODE"
+          xcodebuild -version
 
       - name: Cache CocoaPods
         if: steps.subset.outputs.ok == 'true'
@@ -80,7 +84,6 @@ jobs:
           find . -mindepth 2 -type f -name "*.MOV" -exec mv -f {} . \;
           echo "--- after flatten ---"
           ls -la
-          ls -la
 
       - name: Map Drive filenames → sN.mov
         if: steps.subset.outputs.ok == 'true'
@@ -113,14 +116,6 @@ jobs:
         working-directory: App
         run: pod install --no-repo-update
 
-      - name: Prepare iOS Simulator
-        if: steps.subset.outputs.ok == 'true'
-        id: simulator
-        run: |
-          # iPhone 17 が未提供の Xcode バージョンを想定して iPhone 15 にフォールバック
-          UUID=$(xcrun simctl list devices available | grep -E "iPhone (17|15) Pro|iPhone (17|15)" | head -1 | grep -oE '[0-9A-F-]{36}')
-          echo "uuid=$UUID" >> "$GITHUB_OUTPUT"
-
       - name: Run XCTest
         if: steps.subset.outputs.ok == 'true'
         env:
@@ -140,7 +135,7 @@ jobs:
           xcodebuild test \
             -workspace App/MaskMe.xcworkspace \
             -scheme MaskMe \
-            -destination "platform=iOS Simulator,id=${{ steps.simulator.outputs.uuid }}" \
+            -destination "platform=iOS Simulator,OS=latest,name=iPhone 15" \
             -only-testing:"MaskMeTests/DValidVideoTests/$TEST_NAME" \
             2>&1 | tee test.log
 
