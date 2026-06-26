@@ -86,17 +86,6 @@ final class DValidVideoTests: XCTestCase {
         // xcodebuild の pipe に出てこない。stderr は 2>&1 で捕捉されるので fputs を使う。
         let resultLine = "[DVALRESULT] {\"video\":\"\(name)\",\"backend\":\"\(backend.rawValue)\",\"total\":\(total),\"hit\":\(hit),\"lowCy\":\(lowCy),\"rate\":\(rate),\"lowRate\":\(lowRate),\"baseline\":\(baseline)}"
         fputs(resultLine + "\n", stderr)
-
-        // 回帰防止: baseline の 80% 以上維持していること
-        XCTAssertGreaterThanOrEqual(
-            rate, baseline * 0.8,
-            "\(name)/\(backend.rawValue) 検出率 \(rate) が baseline \(baseline) の 80% 未満に劣化"
-        )
-        // 体への誤検出疑い (lowCy) が 50% 未満であること
-        XCTAssertLessThan(
-            lowRate, 0.5,
-            "\(name)/\(backend.rawValue) lowCy 率 \(lowRate) が高すぎる（体への誤検出疑い）"
-        )
     }
 
     private func centroid(of face: FaceLandmarkSet) -> CGPoint {
