@@ -136,6 +136,7 @@ jobs:
             -scheme MaskMe \
             -destination "platform=iOS Simulator,id=$SIM_UUID" \
             -only-testing:"MaskMeTests/DValidVideoTests/$TEST_NAME" \
+            -testenv SAMPLE_VIDEO_DIR=/tmp/samples \
             2>&1 | tee test.log
 
       - name: Extract result line
