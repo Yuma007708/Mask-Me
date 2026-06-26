@@ -107,6 +107,34 @@ jobs:
         working-directory: App
         run: xcodegen generate
 
+      - name: Inject SAMPLE_VIDEO_DIR into xcscheme TestAction
+        if: steps.subset.outputs.ok == 'true'
+        run: |
+          python3 - << 'PYEOF'
+          import re, pathlib
+          p = pathlib.Path('App/MaskMe.xcodeproj/xcshareddata/xcschemes/MaskMe.xcscheme')
+          content = p.read_text()
+          # Disable "use launch scheme env" in TestAction so test-specific env vars take effect
+          content = re.sub(
+              r'(<TestAction\b(?:[^>]|\n)*?)shouldUseLaunchSchemeArgsEnv\s*=\s*"YES"',
+              r'\1shouldUseLaunchSchemeArgsEnv = "NO"',
+              content
+          )
+          # Inject SAMPLE_VIDEO_DIR before </TestAction>
+          env_xml = (
+              '\n            <EnvironmentVariables>\n'
+              '               <EnvironmentVariable\n'
+              '                  key = "SAMPLE_VIDEO_DIR"\n'
+              '                  value = "/tmp/samples"\n'
+              '                  isEnabled = "YES">\n'
+              '               </EnvironmentVariable>\n'
+              '            </EnvironmentVariables>'
+          )
+          content = content.replace('</TestAction>', env_xml + '\n         </TestAction>', 1)
+          p.write_text(content)
+          print('Injected SAMPLE_VIDEO_DIR into MaskMe.xcscheme TestAction')
+          PYEOF
+
       - name: pod install
         if: steps.subset.outputs.ok == 'true'
         working-directory: App
@@ -114,8 +142,6 @@ jobs:
 
       - name: Run XCTest
         if: steps.subset.outputs.ok == 'true'
-        env:
-          SAMPLE_VIDEO_DIR: /tmp/samples
         run: |
           TEST_BACKEND="${{ matrix.backend }}"
           case "$TEST_BACKEND" in
@@ -136,7 +162,6 @@ jobs:
             -scheme MaskMe \
             -destination "platform=iOS Simulator,id=$SIM_UUID" \
             -only-testing:"MaskMeTests/DValidVideoTests/$TEST_NAME" \
-            -testenv SAMPLE_VIDEO_DIR=/tmp/samples \
             2>&1 | tee test.log
 
       - name: Extract result line
