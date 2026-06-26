@@ -79,8 +79,6 @@ jobs:
           mkdir -p /tmp/samples
           cd /tmp/samples
           gdown --folder "https://drive.google.com/drive/folders/$FOLDER_ID"
-          # gdown は Drive 上のフォルダ名（例: 「検証動画」）をサブフォルダとして展開する。
-          # 次ステップは /tmp/samples/ 直下に MOV を期待するので flatten する。
           find . -mindepth 2 -type f -name "*.MOV" -exec mv -f {} . \;
           echo "--- after flatten ---"
           ls -la
@@ -89,10 +87,8 @@ jobs:
         if: steps.subset.outputs.ok == 'true'
         run: |
           cd /tmp/samples
-          # UUID 一致で確定する 2 本
           mv copy_5B417FE2*.MOV s4.mov 2>/dev/null || true
           mv copy_324B1BD2*.MOV s5.mov 2>/dev/null || true
-          # 残り 3 本はサイズで推測（>50MB=S1, >30MB=S2, else=S3）
           for f in copy_*.MOV; do
             [ -e "$f" ] || continue
             size=$(stat -f%z "$f")
@@ -121,9 +117,7 @@ jobs:
         env:
           SAMPLE_VIDEO_DIR: /tmp/samples
         run: |
-          # backend 名が swift enum case と一致するように補正（CLI から渡された文字列をそのまま test 名に）
           TEST_BACKEND="${{ matrix.backend }}"
-          # faceDetector → faceDet と短縮した test 名にしている
           case "$TEST_BACKEND" in
             faceDetector) TEST_BACKEND_SUFFIX="faceDet" ;;
             *)            TEST_BACKEND_SUFFIX="$TEST_BACKEND" ;;
@@ -131,11 +125,24 @@ jobs:
           UPPER=$(echo "${{ matrix.video }}" | tr '[:lower:]' '[:upper:]')
           TEST_NAME="test_${UPPER}_${TEST_BACKEND_SUFFIX}"
           echo "Running $TEST_NAME"
+
+          # 利用可能な最新 iPhone シミュレータの UUID を取得（ランナー毎に存在するモデルが変わるため）
+          SIM_UUID=$(xcrun simctl list devices available -j | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+for runtime in sorted(d['devices'].keys(), reverse=True):
+    for dev in d['devices'][runtime]:
+        if 'iPhone' in dev.get('name', '') and dev.get('isAvailable', False):
+            print(dev['udid'])
+            exit()
+")
+          echo "Simulator UUID: $SIM_UUID"
+
           set -o pipefail
           xcodebuild test \
             -workspace App/MaskMe.xcworkspace \
             -scheme MaskMe \
-            -destination "platform=iOS Simulator,OS=latest,name=iPhone 15" \
+            -destination "platform=iOS Simulator,id=$SIM_UUID" \
             -only-testing:"MaskMeTests/DValidVideoTests/$TEST_NAME" \
             2>&1 | tee test.log
 
