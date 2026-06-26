@@ -80,8 +80,10 @@ final class DValidVideoTests: XCTestCase {
 
         let rate = total == 0 ? 0.0 : Double(hit) / Double(total)
         let lowRate = total == 0 ? 0.0 : Double(lowCy) / Double(total)
-        // CI summary に拾わせる JSON 形式の 1 行を stdout に。
-        print("[DVALRESULT] {\"video\":\"\(name)\",\"backend\":\"\(backend.rawValue)\",\"total\":\(total),\"hit\":\(hit),\"lowCy\":\(lowCy),\"rate\":\(rate),\"lowRate\":\(lowRate),\"baseline\":\(baseline)}")
+        // Xcode 26 では print() がシミュレータプロセスの stdout に閉じ込められ
+        // xcodebuild の pipe に出てこない。stderr は 2>&1 で捕捉されるので fputs を使う。
+        let resultLine = "[DVALRESULT] {\"video\":\"\(name)\",\"backend\":\"\(backend.rawValue)\",\"total\":\(total),\"hit\":\(hit),\"lowCy\":\(lowCy),\"rate\":\(rate),\"lowRate\":\(lowRate),\"baseline\":\(baseline)}"
+        fputs(resultLine + "\n", stderr)
 
         // 回帰防止: baseline の 80% 以上維持していること
         XCTAssertGreaterThanOrEqual(
