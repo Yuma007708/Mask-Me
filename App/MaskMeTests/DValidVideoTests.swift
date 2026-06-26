@@ -65,14 +65,16 @@ final class DValidVideoTests: XCTestCase {
         let interval = 1.0 / 15.0   // MosaicEditorModel と同じ刻み
         var t = 0.0
         while t <= duration {
-            if let cg = try? gen.copyCGImage(at: CMTime(seconds: t, preferredTimescale: 600), actualTime: nil) {
-                total += 1
-                let img = UIImage(cgImage: cg)
-                let faces = scanner.allLandmarks(in: img, timestampMs: Int(t * 1000))
-                if !faces.isEmpty {
-                    hit += 1
-                    let c = centroid(of: faces.first!)
-                    if c.y > 0.5 { lowCy += 1 }
+            autoreleasepool {
+                if let cg = try? gen.copyCGImage(at: CMTime(seconds: t, preferredTimescale: 600), actualTime: nil) {
+                    total += 1
+                    let img = UIImage(cgImage: cg)
+                    let faces = scanner.allLandmarks(in: img, timestampMs: Int(t * 1000))
+                    if !faces.isEmpty {
+                        hit += 1
+                        let c = centroid(of: faces.first!)
+                        if c.y > 0.5 { lowCy += 1 }
+                    }
                 }
             }
             t += interval
