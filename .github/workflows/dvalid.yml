@@ -50,7 +50,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: App/Pods
-          key: pods-${{ runner.os }}-${{ hashFiles('App/Podfile.lock') }}
+          key: pods-${{ runner.os }}-${{ hashFiles('App/Podfile') }}
           restore-keys: pods-${{ runner.os }}-
 
       - name: Install xcodegen
