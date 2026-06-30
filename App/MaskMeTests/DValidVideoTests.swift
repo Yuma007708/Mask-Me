@@ -20,23 +20,24 @@ final class DValidVideoTests: XCTestCase {
     private var videoDir: String { ProcessInfo.processInfo.environment["SAMPLE_VIDEO_DIR"] ?? "" }
 
     // MARK: - .off (MP 単独)
+    // baseline は前回ローカル DValid の値。s3 は CI Drive 新動画（初回 13.2%）。
     func test_S1_off()      async throws { try await run("s1", .off,          baseline: 0.16) }
     func test_S2_off()      async throws { try await run("s2", .off,          baseline: 0.58) }
-    func test_S3_off()      async throws { try await run("s3", .off,          baseline: 0.03) }
+    func test_S3_off()      async throws { try await run("s3", .off,          baseline: 0.13) }
     func test_S4_off()      async throws { try await run("s4", .off,          baseline: 0.10) }
     func test_S5_off()      async throws { try await run("s5", .off,          baseline: 0.49) }
 
     // MARK: - .faceDetector (MediaPipe Face Detector / BlazeFace)
     func test_S1_faceDet()  async throws { try await run("s1", .faceDetector, baseline: 0.16) }
     func test_S2_faceDet()  async throws { try await run("s2", .faceDetector, baseline: 0.58) }
-    func test_S3_faceDet()  async throws { try await run("s3", .faceDetector, baseline: 0.03) }
+    func test_S3_faceDet()  async throws { try await run("s3", .faceDetector, baseline: 0.13) }
     func test_S4_faceDet()  async throws { try await run("s4", .faceDetector, baseline: 0.10) }
     func test_S5_faceDet()  async throws { try await run("s5", .faceDetector, baseline: 0.49) }
 
     // MARK: - .yunet (Core ML)
     func test_S1_yunet()    async throws { try await run("s1", .yunet,        baseline: 0.16) }
     func test_S2_yunet()    async throws { try await run("s2", .yunet,        baseline: 0.58) }
-    func test_S3_yunet()    async throws { try await run("s3", .yunet,        baseline: 0.03) }
+    func test_S3_yunet()    async throws { try await run("s3", .yunet,        baseline: 0.13) }
     func test_S4_yunet()    async throws { try await run("s4", .yunet,        baseline: 0.10) }
     func test_S5_yunet()    async throws { try await run("s5", .yunet,        baseline: 0.49) }
 
