@@ -11,10 +11,14 @@ on:
         description: '回す動画（カンマ区切り、サブセット可）'
         default: 's1,s2,s3,s4,s5'
         required: false
+      halves:
+        description: '回す半分（カンマ区切り、サブセット可。A=前半 B=後半）'
+        default: 'A,B'
+        required: false
 
 jobs:
   test:
-    name: ${{ matrix.video }} / ${{ matrix.backend }}
+    name: ${{ matrix.video }} / ${{ matrix.backend }} / ${{ matrix.half }}
     runs-on: macos-15
     timeout-minutes: 60
     strategy:
@@ -22,6 +26,7 @@ jobs:
       matrix:
         video: [s1, s2, s3, s4, s5]
         backend: [off, faceDetector, yunet]
+        half: [A, B]
 
     steps:
       - name: Skip if not in input subset
@@ -29,8 +34,17 @@ jobs:
         run: |
           IFS=',' read -ra VIDEOS <<< "${{ inputs.videos || 's1,s2,s3,s4,s5' }}"
           IFS=',' read -ra BACKENDS <<< "${{ inputs.backends || 'off,faceDetector,yunet' }}"
+          IFS=',' read -ra HALVES <<< "${{ inputs.halves || 'A,B' }}"
           ok=false
-          for v in "${VIDEOS[@]}"; do [ "$v" = "${{ matrix.video }}" ] && for b in "${BACKENDS[@]}"; do [ "$b" = "${{ matrix.backend }}" ] && ok=true; done; done
+          for v in "${VIDEOS[@]}"; do
+            [ "$v" = "${{ matrix.video }}" ] || continue
+            for b in "${BACKENDS[@]}"; do
+              [ "$b" = "${{ matrix.backend }}" ] || continue
+              for h in "${HALVES[@]}"; do
+                [ "$h" = "${{ matrix.half }}" ] && ok=true
+              done
+            done
+          done
           echo "ok=$ok" >> "$GITHUB_OUTPUT"
 
       - name: Checkout
@@ -148,7 +162,7 @@ jobs:
             *)            TEST_BACKEND_SUFFIX="$TEST_BACKEND" ;;
           esac
           UPPER=$(echo "${{ matrix.video }}" | tr '[:lower:]' '[:upper:]')
-          TEST_NAME="test_${UPPER}_${TEST_BACKEND_SUFFIX}"
+          TEST_NAME="test_${UPPER}_${TEST_BACKEND_SUFFIX}_${{ matrix.half }}"
           echo "Running $TEST_NAME"
 
           # 利用可能な最新 iPhone シミュレータの UUID を取得
@@ -173,7 +187,7 @@ jobs:
         if: always() && steps.subset.outputs.ok == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: result-${{ matrix.video }}-${{ matrix.backend }}
+          name: result-${{ matrix.video }}-${{ matrix.backend }}-${{ matrix.half }}
           path: |
             test.log
             result.json
@@ -194,6 +208,7 @@ jobs:
         run: |
           python3 <<'PYEOF'
           import json, glob, os, re
+          from collections import defaultdict
           rows = []
           for path in sorted(glob.glob('artifacts/result-*/result.json')):
               text = open(path).read()
@@ -205,18 +220,38 @@ jobs:
               except Exception:
                   continue
               rows.append(d)
-          rows.sort(key=lambda d: (d.get('video', ''), d.get('backend', '')))
-          out = ['# Detection Accuracy Summary', '',
-                 '| 動画 | backend | hit | total | rate | baseline | Δ | lowCy% | avgJump | jumpBig% |',
-                 '|---|---|---|---|---|---|---|---|---|---|']
+
+          # 動画は前半(A)/後半(B)を別プロセスで走らせているので、集計では
+          # (video, backend) ごとに前半+後半を合算して元の「動画全体」の指標に戻す。
+          merged = defaultdict(lambda: {'hit': 0, 'total': 0, 'lowCy': 0,
+                                          'jumpBig': 0, 'pairCount': 0,
+                                          'sumJumpWeighted': 0.0, 'baseline': 0.0,
+                                          'halves': []})
           for d in rows:
-              rate = d['rate'] * 100
-              bl = d['baseline'] * 100
+              key = (d.get('video', ''), d.get('backend', ''))
+              m = merged[key]
+              m['hit'] += d.get('hit', 0)
+              m['total'] += d.get('total', 0)
+              m['lowCy'] += d.get('lowCy', 0)
+              m['jumpBig'] += d.get('jumpBig', 0)
+              m['pairCount'] += d.get('pairCount', 0)
+              m['sumJumpWeighted'] += d.get('avgJump', 0.0) * d.get('pairCount', 0)
+              m['baseline'] = d.get('baseline', 0.0)
+              m['halves'].append(d.get('half', '?'))
+
+          out = ['# Detection Accuracy Summary', '',
+                 '| 動画 | backend | half | hit | total | rate | baseline | Δ | lowCy% | avgJump | jumpBig% |',
+                 '|---|---|---|---|---|---|---|---|---|---|---|']
+          for (video, backend), m in sorted(merged.items()):
+              total = m['total']
+              rate = (m['hit'] / total * 100) if total else 0.0
+              bl = m['baseline'] * 100
               delta = rate - bl
-              low = d['lowRate'] * 100
-              avg_jump = d.get('avgJump', 0.0)
-              jump_big_rate = d.get('jumpBigRate', 0.0) * 100
-              out.append(f"| {d['video']} | {d['backend']} | {d['hit']} | {d['total']} | {rate:.1f}% | {bl:.0f}% | {delta:+.1f}pp | {low:.1f}% | {avg_jump:.4f} | {jump_big_rate:.1f}% |")
+              low = (m['lowCy'] / total * 100) if total else 0.0
+              avg_jump = (m['sumJumpWeighted'] / m['pairCount']) if m['pairCount'] else 0.0
+              jump_big_rate = (m['jumpBig'] / m['pairCount'] * 100) if m['pairCount'] else 0.0
+              half_label = '+'.join(sorted(m['halves'])) or '?'
+              out.append(f"| {video} | {backend} | {half_label} | {m['hit']} | {total} | {rate:.1f}% | {bl:.0f}% | {delta:+.1f}pp | {low:.1f}% | {avg_jump:.4f} | {jump_big_rate:.1f}% |")
           summary = '\n'.join(out) + '\n'
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
               f.write(summary)

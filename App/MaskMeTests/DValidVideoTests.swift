@@ -11,39 +11,62 @@ import MosaicCore
 /// 環境変数が未設定 or ファイルが見つからない場合は `XCTSkip`（ローカル開発時は走らない）。
 ///
 /// 想定運用は GitHub Actions の workflow で動画を Drive から落としてくる構成
-/// （`.github/workflows/dvalid.yml`）。`-only-testing:MaskMeTests/DValidVideoTests/test_S1_off`
-/// のように matrix で並列ジョブを切り、各ジョブが 1 テストメソッドを走らせる。
+/// （`.github/workflows/dvalid.yml`）。`-only-testing:MaskMeTests/DValidVideoTests/test_S1_off_A`
+/// のように matrix で並列ジョブを切り、各ジョブが 1 テストメソッド（1 半分の動画）を走らせる。
 ///
-/// 前回 baseline（MP 単独 = `.off`）:
+/// 前回 baseline（MP 単独 = `.off`、動画全体での検出率）:
 ///   S1=16% / S2=58% / S3=3%(全誤検出) / S4=10% / S5=49%
+///
+/// 92 秒超の長尺動画 + 補助検出器 (.off/.yunet) の組み合わせで、1 プロセスが長時間
+/// 連続で detect し続けるとテストプロセスがフレームループ終盤で異常終了する
+/// 構造的 flaky（0 tests executed）が確認されている。前半/後半に分けて別プロセスで
+/// 走らせることで 1 プロセスあたりの累積処理量・実行時間を半分にし、発生条件に
+/// 到達しにくくする。
 final class DValidVideoTests: XCTestCase {
     private var videoDir: String { ProcessInfo.processInfo.environment["SAMPLE_VIDEO_DIR"] ?? "" }
 
+    private enum Half: String { case first = "A", second = "B" }
+
     // MARK: - .off (MP 単独)
-    // baseline は前回ローカル DValid の値。s3 は CI Drive 新動画（初回 13.2%）。
-    func test_S1_off()      async throws { try await run("s1", .off,          baseline: 0.16) }
-    func test_S2_off()      async throws { try await run("s2", .off,          baseline: 0.58) }
-    func test_S3_off()      async throws { try await run("s3", .off,          baseline: 0.13) }
-    func test_S4_off()      async throws { try await run("s4", .off,          baseline: 0.10) }
-    func test_S5_off()      async throws { try await run("s5", .off,          baseline: 0.49) }
+    // baseline は前回ローカル DValid の値（動画全体）。s3 は CI Drive 新動画（初回 13.2%）。
+    func test_S1_off_A()     async throws { try await run("s1", .off,          baseline: 0.16, half: .first) }
+    func test_S1_off_B()     async throws { try await run("s1", .off,          baseline: 0.16, half: .second) }
+    func test_S2_off_A()     async throws { try await run("s2", .off,          baseline: 0.58, half: .first) }
+    func test_S2_off_B()     async throws { try await run("s2", .off,          baseline: 0.58, half: .second) }
+    func test_S3_off_A()     async throws { try await run("s3", .off,          baseline: 0.13, half: .first) }
+    func test_S3_off_B()     async throws { try await run("s3", .off,          baseline: 0.13, half: .second) }
+    func test_S4_off_A()     async throws { try await run("s4", .off,          baseline: 0.10, half: .first) }
+    func test_S4_off_B()     async throws { try await run("s4", .off,          baseline: 0.10, half: .second) }
+    func test_S5_off_A()     async throws { try await run("s5", .off,          baseline: 0.49, half: .first) }
+    func test_S5_off_B()     async throws { try await run("s5", .off,          baseline: 0.49, half: .second) }
 
     // MARK: - .faceDetector (MediaPipe Face Detector / BlazeFace)
-    func test_S1_faceDet()  async throws { try await run("s1", .faceDetector, baseline: 0.16) }
-    func test_S2_faceDet()  async throws { try await run("s2", .faceDetector, baseline: 0.58) }
-    func test_S3_faceDet()  async throws { try await run("s3", .faceDetector, baseline: 0.13) }
-    func test_S4_faceDet()  async throws { try await run("s4", .faceDetector, baseline: 0.10) }
-    func test_S5_faceDet()  async throws { try await run("s5", .faceDetector, baseline: 0.49) }
+    func test_S1_faceDet_A() async throws { try await run("s1", .faceDetector, baseline: 0.16, half: .first) }
+    func test_S1_faceDet_B() async throws { try await run("s1", .faceDetector, baseline: 0.16, half: .second) }
+    func test_S2_faceDet_A() async throws { try await run("s2", .faceDetector, baseline: 0.58, half: .first) }
+    func test_S2_faceDet_B() async throws { try await run("s2", .faceDetector, baseline: 0.58, half: .second) }
+    func test_S3_faceDet_A() async throws { try await run("s3", .faceDetector, baseline: 0.13, half: .first) }
+    func test_S3_faceDet_B() async throws { try await run("s3", .faceDetector, baseline: 0.13, half: .second) }
+    func test_S4_faceDet_A() async throws { try await run("s4", .faceDetector, baseline: 0.10, half: .first) }
+    func test_S4_faceDet_B() async throws { try await run("s4", .faceDetector, baseline: 0.10, half: .second) }
+    func test_S5_faceDet_A() async throws { try await run("s5", .faceDetector, baseline: 0.49, half: .first) }
+    func test_S5_faceDet_B() async throws { try await run("s5", .faceDetector, baseline: 0.49, half: .second) }
 
     // MARK: - .yunet (Core ML)
-    func test_S1_yunet()    async throws { try await run("s1", .yunet,        baseline: 0.16) }
-    func test_S2_yunet()    async throws { try await run("s2", .yunet,        baseline: 0.58) }
-    func test_S3_yunet()    async throws { try await run("s3", .yunet,        baseline: 0.13) }
-    func test_S4_yunet()    async throws { try await run("s4", .yunet,        baseline: 0.10) }
-    func test_S5_yunet()    async throws { try await run("s5", .yunet,        baseline: 0.49) }
+    func test_S1_yunet_A()   async throws { try await run("s1", .yunet,        baseline: 0.16, half: .first) }
+    func test_S1_yunet_B()   async throws { try await run("s1", .yunet,        baseline: 0.16, half: .second) }
+    func test_S2_yunet_A()   async throws { try await run("s2", .yunet,        baseline: 0.58, half: .first) }
+    func test_S2_yunet_B()   async throws { try await run("s2", .yunet,        baseline: 0.58, half: .second) }
+    func test_S3_yunet_A()   async throws { try await run("s3", .yunet,        baseline: 0.13, half: .first) }
+    func test_S3_yunet_B()   async throws { try await run("s3", .yunet,        baseline: 0.13, half: .second) }
+    func test_S4_yunet_A()   async throws { try await run("s4", .yunet,        baseline: 0.10, half: .first) }
+    func test_S4_yunet_B()   async throws { try await run("s4", .yunet,        baseline: 0.10, half: .second) }
+    func test_S5_yunet_A()   async throws { try await run("s5", .yunet,        baseline: 0.49, half: .first) }
+    func test_S5_yunet_B()   async throws { try await run("s5", .yunet,        baseline: 0.49, half: .second) }
 
     // MARK: - Implementation
 
-    private func run(_ name: String, _ backend: FaceDetectorBackend, baseline: Double) async throws {
+    private func run(_ name: String, _ backend: FaceDetectorBackend, baseline: Double, half: Half) async throws {
         try XCTSkipIf(videoDir.isEmpty, "SAMPLE_VIDEO_DIR 未設定（ローカルでは XCTSkip）")
         let url = URL(fileURLWithPath: "\(videoDir)/\(name).mov")
         try XCTSkipIf(!FileManager.default.fileExists(atPath: url.path),
@@ -51,17 +74,7 @@ final class DValidVideoTests: XCTestCase {
 
         var settings = DetectionSettings()
         settings.faceDetectorBackend = backend
-        var scanner = makeFaceLandmarker(forVideo: true, settings: settings)
-        // 92 秒超の長尺動画 + 補助検出器 (.off/.yunet) の組み合わせで、フレームループ末尾付近
-        // (全フレーム処理完了直前) にテストプロセスがクラッシュする構造的 flaky が確認されている
-        // (0 tests executed で完走しない)。MediaPipe VIDEO ランニングモードの landmarker は
-        // 内部に時系列トラッキング用のバッファ/GPU (Metal) リソースを蓄積し続け、長時間の
-        // 連続 detect 呼び出しでそれが肥大化して落ちていると推測される。
-        // 一定フレームごとに scanner (=MediaPipeFaceLandmarkerAdapter とその内部 FaceLandmarker)
-        // を新しいインスタンスに差し替えることで、蓄積したネイティブ状態を定期的に解放し、
-        // クラッシュに到達する前にリセットする。VIDEO モードのタイムスタンプはインスタンスごとに
-        // 独立して単調増加であればよいため、差し替え後も `Int(t * 1000)` をそのまま渡して問題ない。
-        let scannerRefreshInterval = 200
+        let scanner = makeFaceLandmarker(forVideo: true, settings: settings)
 
         let asset = AVAsset(url: url)
         let duration = try await asset.load(.duration).seconds
@@ -82,14 +95,15 @@ final class DValidVideoTests: XCTestCase {
         var jumpBig = 0
         let bigJumpThreshold: Double = 0.05
         let interval = 1.0 / 15.0   // MosaicEditorModel と同じ刻み
-        var t = 0.0
-        while t <= duration {
+        // 動画を前半/後半に分け、それぞれ別プロセス（別 XCTest メソッド）で走らせることで
+        // 1 プロセスあたりの連続 detect 呼び出し数と実行時間を半分にする。
+        let midpoint = duration / 2
+        let (tStart, tEnd) = half == .first ? (0.0, midpoint) : (midpoint, duration)
+        var t = tStart
+        while t <= tEnd {
             autoreleasepool {
                 if let cg = try? gen.copyCGImage(at: CMTime(seconds: t, preferredTimescale: 600), actualTime: nil) {
                     total += 1
-                    if total % scannerRefreshInterval == 0 {
-                        scanner = makeFaceLandmarker(forVideo: true, settings: settings)
-                    }
                     let img = UIImage(cgImage: cg)
                     let faces = scanner.allLandmarks(in: img, timestampMs: Int(t * 1000))
                     if let first = faces.first {
@@ -120,7 +134,7 @@ final class DValidVideoTests: XCTestCase {
         let jumpBigRate = pairCount == 0 ? 0.0 : Double(jumpBig) / Double(pairCount)
         // Xcode 26 では print() がシミュレータプロセスの stdout に閉じ込められ
         // xcodebuild の pipe に出てこない。stderr は 2>&1 で捕捉されるので fputs を使う。
-        let resultLine = "[DVALRESULT] {\"video\":\"\(name)\",\"backend\":\"\(backend.rawValue)\",\"total\":\(total),\"hit\":\(hit),\"lowCy\":\(lowCy),\"rate\":\(rate),\"lowRate\":\(lowRate),\"baseline\":\(baseline),\"avgJump\":\(avgJump),\"jumpBig\":\(jumpBig),\"jumpBigRate\":\(jumpBigRate),\"pairCount\":\(pairCount)}"
+        let resultLine = "[DVALRESULT] {\"video\":\"\(name)\",\"backend\":\"\(backend.rawValue)\",\"half\":\"\(half.rawValue)\",\"total\":\(total),\"hit\":\(hit),\"lowCy\":\(lowCy),\"rate\":\(rate),\"lowRate\":\(lowRate),\"baseline\":\(baseline),\"avgJump\":\(avgJump),\"jumpBig\":\(jumpBig),\"jumpBigRate\":\(jumpBigRate),\"pairCount\":\(pairCount)}"
         fputs(resultLine + "\n", stderr)
     }
 
