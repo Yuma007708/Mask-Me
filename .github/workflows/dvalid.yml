@@ -170,12 +170,27 @@ jobs:
           echo "Simulator UUID: $SIM_UUID"
 
           set -o pipefail
-          xcodebuild test \
+          # 動画 1 本分の連続 detect 呼び出し中に、シミュレータ上でテストプロセスが
+          # 稀に無言で異常終了する（0 tests executed）ことがある。backend・動画長を問わず
+          # 確率的に起きる infra 起因の flaky と判断しており、クラッシュレポートも
+          # 取得できていないため、失敗時はテストプロセスを最大 3 回まで再試行する。
+          max_attempts=3
+          attempt=1
+          until xcodebuild test \
             -workspace App/MaskMe.xcworkspace \
             -scheme MaskMe \
             -destination "platform=iOS Simulator,id=$SIM_UUID" \
             -only-testing:"MaskMeTests/DValidVideoTests/$TEST_NAME" \
             2>&1 | tee test.log
+          do
+            ec=${PIPESTATUS[0]}
+            if [ "$attempt" -ge "$max_attempts" ]; then
+              echo "::error::$TEST_NAME failed after $attempt attempts (exit $ec)"
+              exit "$ec"
+            fi
+            echo "::warning::$TEST_NAME attempt $attempt failed (exit $ec), retrying ($((attempt + 1))/$max_attempts)"
+            attempt=$((attempt + 1))
+          done
 
       - name: Extract result line
         if: always() && steps.subset.outputs.ok == 'true'
