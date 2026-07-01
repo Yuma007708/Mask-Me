@@ -51,7 +51,17 @@ final class DValidVideoTests: XCTestCase {
 
         var settings = DetectionSettings()
         settings.faceDetectorBackend = backend
-        let scanner = makeFaceLandmarker(forVideo: true, settings: settings)
+        var scanner = makeFaceLandmarker(forVideo: true, settings: settings)
+        // 92 秒超の長尺動画 + 補助検出器 (.off/.yunet) の組み合わせで、フレームループ末尾付近
+        // (全フレーム処理完了直前) にテストプロセスがクラッシュする構造的 flaky が確認されている
+        // (0 tests executed で完走しない)。MediaPipe VIDEO ランニングモードの landmarker は
+        // 内部に時系列トラッキング用のバッファ/GPU (Metal) リソースを蓄積し続け、長時間の
+        // 連続 detect 呼び出しでそれが肥大化して落ちていると推測される。
+        // 一定フレームごとに scanner (=MediaPipeFaceLandmarkerAdapter とその内部 FaceLandmarker)
+        // を新しいインスタンスに差し替えることで、蓄積したネイティブ状態を定期的に解放し、
+        // クラッシュに到達する前にリセットする。VIDEO モードのタイムスタンプはインスタンスごとに
+        // 独立して単調増加であればよいため、差し替え後も `Int(t * 1000)` をそのまま渡して問題ない。
+        let scannerRefreshInterval = 200
 
         let asset = AVAsset(url: url)
         let duration = try await asset.load(.duration).seconds
@@ -77,6 +87,9 @@ final class DValidVideoTests: XCTestCase {
             autoreleasepool {
                 if let cg = try? gen.copyCGImage(at: CMTime(seconds: t, preferredTimescale: 600), actualTime: nil) {
                     total += 1
+                    if total % scannerRefreshInterval == 0 {
+                        scanner = makeFaceLandmarker(forVideo: true, settings: settings)
+                    }
                     let img = UIImage(cgImage: cg)
                     let faces = scanner.allLandmarks(in: img, timestampMs: Int(t * 1000))
                     if let first = faces.first {
