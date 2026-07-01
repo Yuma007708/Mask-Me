@@ -207,14 +207,16 @@ jobs:
               rows.append(d)
           rows.sort(key=lambda d: (d.get('video', ''), d.get('backend', '')))
           out = ['# Detection Accuracy Summary', '',
-                 '| 動画 | backend | hit | total | rate | baseline | Δ | lowCy% |',
-                 '|---|---|---|---|---|---|---|---|']
+                 '| 動画 | backend | hit | total | rate | baseline | Δ | lowCy% | avgJump | jumpBig% |',
+                 '|---|---|---|---|---|---|---|---|---|---|']
           for d in rows:
               rate = d['rate'] * 100
               bl = d['baseline'] * 100
               delta = rate - bl
               low = d['lowRate'] * 100
-              out.append(f"| {d['video']} | {d['backend']} | {d['hit']} | {d['total']} | {rate:.1f}% | {bl:.0f}% | {delta:+.1f}pp | {low:.1f}% |")
+              avg_jump = d.get('avgJump', 0.0)
+              jump_big_rate = d.get('jumpBigRate', 0.0) * 100
+              out.append(f"| {d['video']} | {d['backend']} | {d['hit']} | {d['total']} | {rate:.1f}% | {bl:.0f}% | {delta:+.1f}pp | {low:.1f}% | {avg_jump:.4f} | {jump_big_rate:.1f}% |")
           summary = '\n'.join(out) + '\n'
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
               f.write(summary)

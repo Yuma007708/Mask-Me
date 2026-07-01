@@ -63,6 +63,14 @@ final class DValidVideoTests: XCTestCase {
         gen.requestedTimeToleranceAfter  = CMTime(seconds: 0.067, preferredTimescale: 600)
 
         var total = 0, hit = 0, lowCy = 0
+        // 連続検出フレーム間の centroid 距離を蓄積して、ちらつき/追従の代理指標とする。
+        // - avgJump: 連続する検出フレーム間の平均移動量（顔がゆっくり動く前提で、大きいほど不安定）
+        // - jumpBig: 0.05 (画面 5%) を超えるジャンプ数 = ちらつき/位置ズレ疑い件数
+        var lastCentroid: CGPoint? = nil
+        var sumJump: Double = 0
+        var pairCount = 0
+        var jumpBig = 0
+        let bigJumpThreshold: Double = 0.05
         let interval = 1.0 / 15.0   // MosaicEditorModel と同じ刻み
         var t = 0.0
         while t <= duration {
@@ -71,10 +79,22 @@ final class DValidVideoTests: XCTestCase {
                     total += 1
                     let img = UIImage(cgImage: cg)
                     let faces = scanner.allLandmarks(in: img, timestampMs: Int(t * 1000))
-                    if !faces.isEmpty {
+                    if let first = faces.first {
                         hit += 1
-                        let c = centroid(of: faces.first!)
+                        let c = centroid(of: first)
                         if c.y > 0.5 { lowCy += 1 }
+                        if let prev = lastCentroid {
+                            let dx = Double(c.x - prev.x)
+                            let dy = Double(c.y - prev.y)
+                            let d = (dx * dx + dy * dy).squareRoot()
+                            sumJump += d
+                            pairCount += 1
+                            if d > bigJumpThreshold { jumpBig += 1 }
+                        }
+                        lastCentroid = c
+                    } else {
+                        // 検出途切れは pair を切る（次のヒットとの距離を測らない）
+                        lastCentroid = nil
                     }
                 }
             }
@@ -83,9 +103,11 @@ final class DValidVideoTests: XCTestCase {
 
         let rate = total == 0 ? 0.0 : Double(hit) / Double(total)
         let lowRate = total == 0 ? 0.0 : Double(lowCy) / Double(total)
+        let avgJump = pairCount == 0 ? 0.0 : sumJump / Double(pairCount)
+        let jumpBigRate = pairCount == 0 ? 0.0 : Double(jumpBig) / Double(pairCount)
         // Xcode 26 では print() がシミュレータプロセスの stdout に閉じ込められ
         // xcodebuild の pipe に出てこない。stderr は 2>&1 で捕捉されるので fputs を使う。
-        let resultLine = "[DVALRESULT] {\"video\":\"\(name)\",\"backend\":\"\(backend.rawValue)\",\"total\":\(total),\"hit\":\(hit),\"lowCy\":\(lowCy),\"rate\":\(rate),\"lowRate\":\(lowRate),\"baseline\":\(baseline)}"
+        let resultLine = "[DVALRESULT] {\"video\":\"\(name)\",\"backend\":\"\(backend.rawValue)\",\"total\":\(total),\"hit\":\(hit),\"lowCy\":\(lowCy),\"rate\":\(rate),\"lowRate\":\(lowRate),\"baseline\":\(baseline),\"avgJump\":\(avgJump),\"jumpBig\":\(jumpBig),\"jumpBigRate\":\(jumpBigRate),\"pairCount\":\(pairCount)}"
         fputs(resultLine + "\n", stderr)
     }
 

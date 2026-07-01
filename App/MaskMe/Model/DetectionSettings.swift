@@ -31,9 +31,11 @@ public struct DetectionSettings: Equatable, Codable {
     /// 設定 UI には出さず、常時 true がデフォルト。
     public var useVision: Bool = true
     /// MediaPipe Face Detector (BlazeFace) を補助検出器として使う。
-    public var useFaceDetector: Bool = true
+    /// デフォルト OFF（オプトイン）。ON にすると検出率が上がるが処理も重くなる。
+    public var useFaceDetector: Bool = false
     /// YuNet (Core ML) を補助検出器として使う。
-    public var useYunet: Bool = true
+    /// デフォルト OFF（オプトイン）。
+    public var useYunet: Bool = false
 
     /// 旧 API 互換。3 Bool の組み合わせを最も近い enum で返し、setter で 3 Bool に展開する。
     public var faceDetectorBackend: FaceDetectorBackend {
@@ -65,7 +67,7 @@ public struct DetectionSettings: Equatable, Codable {
         minTrackingConfidence: Float = 0.2,
         numFaces: Int = 5,
         minSpan: Double = 0.02,
-        faceDetectorBackend: FaceDetectorBackend = .all
+        faceDetectorBackend: FaceDetectorBackend = .vision
     ) {
         self.minFaceDetectionConfidence = minFaceDetectionConfidence
         self.minFacePresenceConfidence = minFacePresenceConfidence
@@ -131,11 +133,11 @@ public struct DetectionSettings: Equatable, Codable {
         } else if let legacy = try c.decodeIfPresent(Bool.self, forKey: .useAppleVision) {
             self.faceDetectorBackend = legacy ? .vision : .off
         } else {
-            // 何も無ければ全部 true（Vision + FaceDetector + YuNet 並走）。
-            // 旧デフォルト .vision よりも検出率が高い側に倒す。
+            // 何も無ければ旧デフォルト .vision 相当（Vision のみ ON）。
+            // FaceDetector / YuNet は UI からオプトインさせる。
             self.useVision = true
-            self.useFaceDetector = true
-            self.useYunet = true
+            self.useFaceDetector = false
+            self.useYunet = false
         }
     }
 
