@@ -71,8 +71,12 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
         // をフィットしたが 0.35 を僅かに上回って通過」していたケースを排除する。
         self.plausibilityEyeRatioRange = 0.40...1.0
         self.landmarker = try FaceLandmarker(options: options)
-        // 設定の faceDetectorBackend に応じて補助検出器を構築する。
-        self.bboxDetector = Self.makeBBoxDetector(for: settings.faceDetectorBackend)
+        // useVision / useFaceDetector / useYunet の組み合わせから補助検出器を構築する。
+        self.bboxDetector = Self.makeBBoxDetector(
+            useVision: settings.useVision,
+            useFaceDetector: settings.useFaceDetector,
+            useYunet: settings.useYunet
+        )
         // VID モードかつ補助検出器があるなら、ROI 再検出用に IMG モードの landmarker を追加で持つ。
         // IMG モード本体では同じ landmarker をそのまま使えるので追加不要。
         if bboxDetector != nil && runningMode == .video {
@@ -89,22 +93,19 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
         }
     }
 
-    private static func makeBBoxDetector(for backend: FaceDetectorBackend) -> FaceBBoxDetecting? {
-        switch backend {
-        case .off:
-            return nil
-        case .vision:
-            return AppleVisionFaceDetector()
-        case .faceDetector:
-            return MediaPipeFaceBBoxDetector()
-        case .yunet:
-            return YuNetFaceDetector()
-        case .all:
-            return CompositeBBoxDetector([
-                AppleVisionFaceDetector(),
-                MediaPipeFaceBBoxDetector(),
-                YuNetFaceDetector(),
-            ])
+    private static func makeBBoxDetector(
+        useVision: Bool,
+        useFaceDetector: Bool,
+        useYunet: Bool
+    ) -> FaceBBoxDetecting? {
+        var detectors: [FaceBBoxDetecting] = []
+        if useVision         { detectors.append(AppleVisionFaceDetector()) }
+        if useFaceDetector   { detectors.append(MediaPipeFaceBBoxDetector()) }
+        if useYunet          { detectors.append(YuNetFaceDetector()) }
+        switch detectors.count {
+        case 0:  return nil
+        case 1:  return detectors[0]
+        default: return CompositeBBoxDetector(detectors)
         }
     }
 

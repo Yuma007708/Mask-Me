@@ -1,0 +1,224 @@
+name: Detection Accuracy (5本サンプル動画)
+
+on:
+  workflow_dispatch:
+    inputs:
+      backends:
+        description: '回す backend（カンマ区切り、サブセット可）'
+        default: 'off,faceDetector,yunet'
+        required: false
+      videos:
+        description: '回す動画（カンマ区切り、サブセット可）'
+        default: 's1,s2,s3,s4,s5'
+        required: false
+
+jobs:
+  test:
+    name: ${{ matrix.video }} / ${{ matrix.backend }}
+    runs-on: macos-15
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        video: [s1, s2, s3, s4, s5]
+        backend: [off, faceDetector, yunet]
+
+    steps:
+      - name: Skip if not in input subset
+        id: subset
+        run: |
+          IFS=',' read -ra VIDEOS <<< "${{ inputs.videos || 's1,s2,s3,s4,s5' }}"
+          IFS=',' read -ra BACKENDS <<< "${{ inputs.backends || 'off,faceDetector,yunet' }}"
+          ok=false
+          for v in "${VIDEOS[@]}"; do [ "$v" = "${{ matrix.video }}" ] && for b in "${BACKENDS[@]}"; do [ "$b" = "${{ matrix.backend }}" ] && ok=true; done; done
+          echo "ok=$ok" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout
+        if: steps.subset.outputs.ok == 'true'
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        if: steps.subset.outputs.ok == 'true'
+        run: |
+          XCODE=$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -1)
+          echo "Using $XCODE"
+          sudo xcode-select -s "$XCODE"
+          xcodebuild -version
+
+      - name: Cache CocoaPods
+        if: steps.subset.outputs.ok == 'true'
+        uses: actions/cache@v4
+        with:
+          path: App/Pods
+          key: pods-${{ runner.os }}-${{ hashFiles('App/Podfile') }}
+          restore-keys: pods-${{ runner.os }}-
+
+      - name: Install xcodegen
+        if: steps.subset.outputs.ok == 'true'
+        run: brew install xcodegen
+
+      - name: Setup Python
+        if: steps.subset.outputs.ok == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install gdown
+        if: steps.subset.outputs.ok == 'true'
+        run: pip install --quiet gdown
+
+      - name: Download sample videos from Drive folder
+        if: steps.subset.outputs.ok == 'true'
+        env:
+          FOLDER_ID: ${{ secrets.SAMPLE_DRIVE_FOLDER_ID }}
+        run: |
+          if [ -z "$FOLDER_ID" ]; then
+            echo "::error::secret SAMPLE_DRIVE_FOLDER_ID が未設定です"
+            exit 1
+          fi
+          mkdir -p /tmp/samples
+          cd /tmp/samples
+          gdown --folder "https://drive.google.com/drive/folders/$FOLDER_ID"
+          find . -mindepth 2 -type f -name "*.MOV" -exec mv -f {} . \;
+          echo "--- after flatten ---"
+          ls -la
+
+      - name: Map Drive filenames → sN.mov
+        if: steps.subset.outputs.ok == 'true'
+        run: |
+          # 全ファイル名固定マップ。サイズ判定は動画追加で壊れるので使わない。
+          # ローカル baseline で計測した動画に対応：
+          #   s1 = 65MB / 92s
+          #   s2 = 13MB / 29s  (元ローカル S2)
+          #   s3 = 48MB / 159s (Drive に新規追加された動画、新 baseline 計測)
+          #   s4 = 52MB / 38s
+          #   s5 = 87MB / 104s
+          cd /tmp/samples
+          mv copy_4D828ACB*.MOV s1.mov 2>/dev/null || true
+          mv copy_0C57704F*.MOV s2.mov 2>/dev/null || true
+          mv copy_EB41EC4E*.MOV s3.mov 2>/dev/null || true
+          mv copy_5B417FE2*.MOV s4.mov 2>/dev/null || true
+          mv copy_324B1BD2*.MOV s5.mov 2>/dev/null || true
+          ls -la s*.mov
+
+      - name: xcodegen
+        if: steps.subset.outputs.ok == 'true'
+        working-directory: App
+        run: xcodegen generate
+
+      - name: Inject SAMPLE_VIDEO_DIR into xcscheme TestAction
+        if: steps.subset.outputs.ok == 'true'
+        run: |
+          python3 - << 'PYEOF'
+          import re, pathlib
+          p = pathlib.Path('App/MaskMe.xcodeproj/xcshareddata/xcschemes/MaskMe.xcscheme')
+          content = p.read_text()
+          # Disable "use launch scheme env" in TestAction so test-specific env vars take effect
+          content = re.sub(
+              r'(<TestAction\b(?:[^>]|\n)*?)shouldUseLaunchSchemeArgsEnv\s*=\s*"YES"',
+              r'\1shouldUseLaunchSchemeArgsEnv = "NO"',
+              content
+          )
+          # Inject SAMPLE_VIDEO_DIR before </TestAction>
+          env_xml = (
+              '\n            <EnvironmentVariables>\n'
+              '               <EnvironmentVariable\n'
+              '                  key = "SAMPLE_VIDEO_DIR"\n'
+              '                  value = "/tmp/samples"\n'
+              '                  isEnabled = "YES">\n'
+              '               </EnvironmentVariable>\n'
+              '            </EnvironmentVariables>'
+          )
+          content = content.replace('</TestAction>', env_xml + '\n         </TestAction>', 1)
+          p.write_text(content)
+          print('Injected SAMPLE_VIDEO_DIR into MaskMe.xcscheme TestAction')
+          PYEOF
+
+      - name: pod install
+        if: steps.subset.outputs.ok == 'true'
+        working-directory: App
+        run: pod install --no-repo-update
+
+      - name: Run XCTest
+        if: steps.subset.outputs.ok == 'true'
+        run: |
+          TEST_BACKEND="${{ matrix.backend }}"
+          case "$TEST_BACKEND" in
+            faceDetector) TEST_BACKEND_SUFFIX="faceDet" ;;
+            *)            TEST_BACKEND_SUFFIX="$TEST_BACKEND" ;;
+          esac
+          UPPER=$(echo "${{ matrix.video }}" | tr '[:lower:]' '[:upper:]')
+          TEST_NAME="test_${UPPER}_${TEST_BACKEND_SUFFIX}"
+          echo "Running $TEST_NAME"
+
+          # 利用可能な最新 iPhone シミュレータの UUID を取得
+          SIM_UUID=$(xcrun simctl list devices available | grep -E 'iPhone' | head -1 | grep -oE '[0-9A-F-]{36}')
+          echo "Simulator UUID: $SIM_UUID"
+
+          set -o pipefail
+          xcodebuild test \
+            -workspace App/MaskMe.xcworkspace \
+            -scheme MaskMe \
+            -destination "platform=iOS Simulator,id=$SIM_UUID" \
+            -only-testing:"MaskMeTests/DValidVideoTests/$TEST_NAME" \
+            2>&1 | tee test.log
+
+      - name: Extract result line
+        if: always() && steps.subset.outputs.ok == 'true'
+        run: |
+          grep -E "\[DVALRESULT\]" test.log > result.json || true
+          cat result.json || true
+
+      - name: Upload artifact
+        if: always() && steps.subset.outputs.ok == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: result-${{ matrix.video }}-${{ matrix.backend }}
+          path: |
+            test.log
+            result.json
+          retention-days: 14
+
+  summary:
+    name: Aggregate results
+    needs: test
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Build summary table
+        run: |
+          python3 <<'PYEOF'
+          import json, glob, os, re
+          rows = []
+          for path in sorted(glob.glob('artifacts/result-*/result.json')):
+              text = open(path).read()
+              m = re.search(r'\{.*\}', text)
+              if not m:
+                  continue
+              try:
+                  d = json.loads(m.group(0))
+              except Exception:
+                  continue
+              rows.append(d)
+          rows.sort(key=lambda d: (d.get('video', ''), d.get('backend', '')))
+          out = ['# Detection Accuracy Summary', '',
+                 '| 動画 | backend | hit | total | rate | baseline | Δ | lowCy% | avgJump | jumpBig% |',
+                 '|---|---|---|---|---|---|---|---|---|---|']
+          for d in rows:
+              rate = d['rate'] * 100
+              bl = d['baseline'] * 100
+              delta = rate - bl
+              low = d['lowRate'] * 100
+              avg_jump = d.get('avgJump', 0.0)
+              jump_big_rate = d.get('jumpBigRate', 0.0) * 100
+              out.append(f"| {d['video']} | {d['backend']} | {d['hit']} | {d['total']} | {rate:.1f}% | {bl:.0f}% | {delta:+.1f}pp | {low:.1f}% | {avg_jump:.4f} | {jump_big_rate:.1f}% |")
+          summary = '\n'.join(out) + '\n'
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
+              f.write(summary)
+          print(summary)
+          PYEOF
