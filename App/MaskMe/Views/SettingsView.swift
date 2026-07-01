@@ -113,23 +113,29 @@ struct SettingsView: View {
                     .fixedSize()
             }
 
-            // 補助顔検出器のバックエンド選択（実機専用）
+            // 補助顔検出器の選択。
+            // Apple Vision は常時 ON（実機のみ動作・設定 UI には出さない）。
+            // FaceDetector と YuNet は個別トグルで切替。
+            // Pro 機能：`EntitlementProvider` の isPro が false の時はトグルをロックする。
             VStack(alignment: .leading, spacing: 6) {
                 HStack {
                     Label("補助検出器", systemImage: "wand.and.stars")
                         .layoutPriority(1)
                     Spacer()
-                    TipButton(text: "MediaPipe が取り逃した顔を別の検出器で見つけ、その領域を MediaPipe で再検出して補完します。Apple Vision は実機専用、Face Detector (BlazeFace) と YuNet (OpenCV) はシミュレータでも動作。「全部」は 3 つを並走させて検出率最大、処理時間も最大（約 3 倍）。")
+                    TipButton(text: "MediaPipe が取り逃した顔を別の検出器で見つけ、その領域を MediaPipe で再検出して補完します。Apple Vision は常時 ON（実機のみ動作）。Face Detector (BlazeFace) と YuNet (OpenCV) は ON にすると検出率が上がりますが、処理時間も増えます。")
                 }
-                Picker("", selection: $store.settings.faceDetectorBackend) {
-                    Text("使わない").tag(FaceDetectorBackend.off)
-                    Text("Vision").tag(FaceDetectorBackend.vision)
-                    Text("Face Det.").tag(FaceDetectorBackend.faceDetector)
-                    Text("YuNet").tag(FaceDetectorBackend.yunet)
-                    Text("全部").tag(FaceDetectorBackend.all)
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
+                AuxDetectorToggle(
+                    title: "MediaPipe Face Detector",
+                    subtitle: "BlazeFace。軽量・標準的な顔をカバー",
+                    isOn: $store.settings.useFaceDetector,
+                    isLocked: !LocalEntitlementProvider.shared.isPro
+                )
+                AuxDetectorToggle(
+                    title: "YuNet",
+                    subtitle: "Core ML。小顔・横顔に強い",
+                    isOn: $store.settings.useYunet,
+                    isLocked: !LocalEntitlementProvider.shared.isPro
+                )
             }
         }
     }
@@ -148,6 +154,37 @@ struct SettingsView: View {
 }
 
 // MARK: - サブビュー
+
+/// 補助検出器の ON/OFF トグル。Pro 機能でロックされている時は鍵アイコンを表示し操作を無効化する。
+private struct AuxDetectorToggle: View {
+    let title: String
+    let subtitle: String
+    @Binding var isOn: Bool
+    let isLocked: Bool
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 8) {
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 4) {
+                    Text(title)
+                    if isLocked {
+                        Image(systemName: "lock.fill")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Text(subtitle)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Toggle("", isOn: $isOn)
+                .labelsHidden()
+                .disabled(isLocked)
+        }
+        .padding(.vertical, 2)
+    }
+}
 
 private struct DetectionSlider: View {
     let label: String
