@@ -13,6 +13,7 @@ TikTok 風の「顔ピクセルモザイク」を画像・動画に適用する 
 - **フォールバック（凸包マスク + 傾き追従）** — フルメッシュが得られない場合は、顔ランドマークの凸包マスク（`FaceMaskBuilder`）＋ roll に追従して回転するブロック格子（`MosaicShader.metal` の `blockAverage`）で処理。
 - **粗さ調整** — 粗さスライダー 1 本でブロックサイズを調整（ハードエッジ）。顔全体への適用を ON/OFF 切替可能。
 - **追従率（0–100%）と自動復帰** — 検出信頼度を EMA で平滑化して追従率を算出。顔をロストしてもクラッシュせず `idle → searching → tracking → lost → searching → tracking` と遷移し、再検出フレームで遅延なく復帰（`TrackingEvaluator` / `TrackingStatus`）。
+- **補助検出器の個別トグル** — MediaPipe が取り逃した顔を別の検出器で見つけ、その領域を MediaPipe で再検出して補完します。Apple Vision（実機専用、常時 ON）に加え、MediaPipe Face Detector (BlazeFace) と YuNet (Core ML) を設定画面から個別に ON/OFF できます（`DetectionSettings`）。デフォルトは Vision のみ ON — 実機で全補助検出器を並走させると FPS 低下による検出間引き・追従遅れ・ちらつきが発生するため、FaceDetector/YuNet はオプトインです。
 - **SwiftUI 連携** — `TrackingStatusStore`（`ObservableObject`）で追従状態を購読。
 
 ## アーキテクチャ
@@ -76,6 +77,9 @@ open MaskMe.xcworkspace
   - **粗さスライダー**1 本（モザイクの強さ＝ブロックサイズ）。エッジは常にハード。
   - **追従バッジ**（追従率% ・状態）は**動画モードのみ**表示（写真は静止画のため非表示）。
   - 写真は「保存」、動画は「エクスポート」（進捗表示）。
+- **設定**（下部タブバー「設定」）：検出感度・存在確信度・追跡確信度・最小顔サイズ・最大検出数
+  のスライダー / ステッパーに加え、**補助検出器の個別トグル**（MediaPipe Face Detector /
+  YuNet）を提供（`SettingsView`）。Apple Vision は実機専用のため UI には出さず常時 ON。
 
 ## ビルド・テスト（コア層）
 
