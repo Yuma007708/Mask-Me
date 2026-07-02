@@ -249,12 +249,18 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
     }
 
     /// 低 confidence 最終フォールバックの全画面走査（video パス専用）。
+    /// conf 0.05 まで下げると体（胸・股・手）への誤フィットが本経路経由で急増する
+    /// （s5 実測: 本経路ヒットの 44% が画面下半分 = 体疑い）ため、eyeRatio 下限を
+    /// 本体の 0.40 より厳しい 0.45 にする。正面顔は 0.55+ なので通り、横顔（0.41）は
+    /// 弾かれるが、最終手段の一走査としては誤モザイク防止を優先する。
     private func lowConfDetect(_ image: UIImage) -> [FaceLandmarkSet] {
         guard let lm = landmarkerLowConf,
               let mpImage = try? MPImage(uiImage: image),
               let result = try? lm.detect(image: mpImage),
               !result.faceLandmarks.isEmpty else { return [] }
-        return convertAll(result)
+        return convertAll(result).filter {
+            $0.isPlausibleFace(minSpan: plausibilityMinSpan, eyeRatioRange: 0.45...1.0)
+        }
     }
 
     // MARK: - テンポラル ROI 再検出

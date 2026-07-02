@@ -43,10 +43,10 @@ final class DetectionBridgeTests: XCTestCase {
     func testGapWiderThanWindowReturnsEmpty() {
         let cache: [Double: [FaceLandmarkSet]] = [
             0.0: [face(cx: 0.5, cy: 0.5)],
-            1.0: [face(cx: 0.5, cy: 0.5)]
+            1.5: [face(cx: 0.5, cy: 0.5)]
         ]
-        // 両側とも bridgeWindow (5/15≒0.33s) を超えて離れている
-        XCTAssertTrue(bridge.faces(in: cache, at: 0.5).isEmpty)
+        // 両側とも bridgeWindow (8/15≒0.53s) を超えて離れている
+        XCTAssertTrue(bridge.faces(in: cache, at: 0.75).isEmpty)
     }
 
     func testTeleportedFaceIsNotBridged() {
@@ -119,13 +119,13 @@ final class DetectionBridgeTests: XCTestCase {
     }
 
     func testWiderWindowBridgesLongerGap() {
-        let wide = DetectionBridge(bridgeWindow: 10.0 / 15.0)
+        let narrow = DetectionBridge(bridgeWindow: 5.0 / 15.0)
         let cache: [Double: [FaceLandmarkSet]] = [
             1.0: [face(cx: 0.5, cy: 0.5)],
             2.0: [face(cx: 0.5, cy: 0.5)]
         ]
-        // 既定 (5/15) では届かないギャップも window 拡大なら埋まる
-        XCTAssertTrue(bridge.faces(in: cache, at: 1.5).isEmpty)
-        XCTAssertEqual(wide.faces(in: cache, at: 1.5).count, 1)
+        // 狭い window (5/15) では届かないギャップも既定 (8/15) なら埋まる
+        XCTAssertTrue(narrow.faces(in: cache, at: 1.5).isEmpty)
+        XCTAssertEqual(bridge.faces(in: cache, at: 1.5).count, 1)
     }
 }
