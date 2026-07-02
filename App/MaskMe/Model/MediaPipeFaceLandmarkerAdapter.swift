@@ -35,6 +35,26 @@ public func makeFaceLandmarker(
 import MediaPipeTasksVision
 import CoreImage.CIFilterBuiltins
 
+/// フレームの顔をどの検出経路が最初に拾ったか。精度計測（DValid）で
+/// 「どのレバーが何フレーム救ったか」を1ランで帰属するための統計に使う。
+public enum FaceDetectionSource: String {
+    case mp          // MediaPipe FaceLandmarker 本検出（enhance なし）
+    case enhance = "enh"  // enhance（moderate/aggressive/backlight）後に検出
+    case bbox        // 補助検出器 bbox → ROI 再検出のみが拾った
+    case roi         // テンポラル ROI 再検出（前フレーム bbox）
+    case lowConf = "low"  // 低 confidence 最終フォールバック
+    case none = ""   // 未検出
+}
+
+/// 検出ソース別の「そのソースが最初の顔を提供したフレーム数」。
+public struct FaceDetectionSourceStats {
+    public var mpFrames = 0
+    public var enhanceFrames = 0
+    public var bboxFrames = 0
+    public var roiFrames = 0
+    public var lowConfFrames = 0
+}
+
 /// Thin wrapper around MediaPipe's `FaceLandmarker` that produces the
 /// framework-agnostic `FaceLandmarkSet` consumed by `MosaicRenderer`.
 public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
@@ -48,6 +68,24 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
     private let plausibilityEyeRatioRange: ClosedRange<CGFloat>
     /// 補助 bbox 検出器（Vision / Core ML / 並走など）。nil なら MP 単独。
     private let bboxDetector: FaceBBoxDetecting?
+
+    /// 直近フレームで最初の顔を提供した検出ソース（未検出なら `.none`）。
+    /// インスタンスは単一ストリーム直列使用が前提（テスト・アプリとも直列）。
+    public private(set) var lastSource: FaceDetectionSource = .none
+    /// ソース別の累計フレーム数。精度計測でのレバー帰属用。
+    public private(set) var sourceStats = FaceDetectionSourceStats()
+
+    private func recordSource(_ source: FaceDetectionSource) {
+        lastSource = source
+        switch source {
+        case .mp:       sourceStats.mpFrames += 1
+        case .enhance:  sourceStats.enhanceFrames += 1
+        case .bbox:     sourceStats.bboxFrames += 1
+        case .roi:      sourceStats.roiFrames += 1
+        case .lowConf:  sourceStats.lowConfFrames += 1
+        case .none:     break
+        }
+    }
 
     /// - Parameter modelPath: path to the bundled `face_landmarker.task` model.
     public init(modelPath: String, runningMode: RunningMode = .video,
@@ -122,37 +160,49 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
     // MARK: - Multi-face API
 
     public func allLandmarks(in image: UIImage) -> [FaceLandmarkSet] {
-        let mp = mpDetectImageWithEnhance(image)
-        guard bboxDetector != nil else { return mp }
-        return augmentWithBBoxDetector(image: image, mpResults: mp, useImageMode: true)
+        let (mp, mpSource) = mpDetectImageWithEnhance(image)
+        guard bboxDetector != nil else {
+            // MP が生検出しても妥当性フィルタで全棄却されると空になるため、
+            // 「最初の顔を提供した」ソースは空でないときだけ記録する。
+            recordSource(mp.isEmpty ? .none : mpSource)
+            return mp
+        }
+        let result = augmentWithBBoxDetector(image: image, mpResults: mp, useImageMode: true)
+        recordSource(mp.isEmpty ? (result.isEmpty ? .none : .bbox) : mpSource)
+        return result
     }
 
     public func allLandmarks(in image: UIImage, timestampMs: Int) -> [FaceLandmarkSet] {
-        let mp = mpDetectVideoWithEnhance(image, timestampMs: timestampMs)
-        guard bboxDetector != nil else { return mp }
-        return augmentWithBBoxDetector(image: image, mpResults: mp, useImageMode: false)
+        let (mp, mpSource) = mpDetectVideoWithEnhance(image, timestampMs: timestampMs)
+        guard bboxDetector != nil else {
+            recordSource(mp.isEmpty ? .none : mpSource)
+            return mp
+        }
+        let result = augmentWithBBoxDetector(image: image, mpResults: mp, useImageMode: false)
+        recordSource(mp.isEmpty ? (result.isEmpty ? .none : .bbox) : mpSource)
+        return result
     }
 
     // MARK: - MediaPipe (既存ロジックを切り出し)
 
-    private func mpDetectImageWithEnhance(_ image: UIImage) -> [FaceLandmarkSet] {
-        if let result = detectAllImage(image) { return result }
-        if let e1 = enhance(image, level: .moderate), let result = detectAllImage(e1) { return result }
-        if let e2 = enhance(image, level: .aggressive), let result = detectAllImage(e2) { return result }
-        if let e3 = enhance(image, level: .backlight), let result = detectAllImage(e3) { return result }
-        return []
+    private func mpDetectImageWithEnhance(_ image: UIImage) -> ([FaceLandmarkSet], FaceDetectionSource) {
+        if let result = detectAllImage(image) { return (result, .mp) }
+        if let e1 = enhance(image, level: .moderate), let result = detectAllImage(e1) { return (result, .enhance) }
+        if let e2 = enhance(image, level: .aggressive), let result = detectAllImage(e2) { return (result, .enhance) }
+        if let e3 = enhance(image, level: .backlight), let result = detectAllImage(e3) { return (result, .enhance) }
+        return ([], .none)
     }
 
-    private func mpDetectVideoWithEnhance(_ image: UIImage, timestampMs: Int) -> [FaceLandmarkSet] {
-        if let result = detectAllVideoFrame(image, timestampMs: timestampMs) { return result }
+    private func mpDetectVideoWithEnhance(_ image: UIImage, timestampMs: Int) -> ([FaceLandmarkSet], FaceDetectionSource) {
+        if let result = detectAllVideoFrame(image, timestampMs: timestampMs) { return (result, .mp) }
         // enhance の各パスは +1ms ずつ進める（video モードは単調増加が必須）
         if let e1 = enhance(image, level: .moderate),
-           let result = detectAllVideoFrame(e1, timestampMs: timestampMs + 1) { return result }
+           let result = detectAllVideoFrame(e1, timestampMs: timestampMs + 1) { return (result, .enhance) }
         if let e2 = enhance(image, level: .aggressive),
-           let result = detectAllVideoFrame(e2, timestampMs: timestampMs + 2) { return result }
+           let result = detectAllVideoFrame(e2, timestampMs: timestampMs + 2) { return (result, .enhance) }
         if let e3 = enhance(image, level: .backlight),
-           let result = detectAllVideoFrame(e3, timestampMs: timestampMs + 3) { return result }
-        return []
+           let result = detectAllVideoFrame(e3, timestampMs: timestampMs + 3) { return (result, .enhance) }
+        return ([], .none)
     }
 
     // MARK: - 補助 bbox 検出器による補完

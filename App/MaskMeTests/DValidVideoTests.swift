@@ -94,6 +94,11 @@ final class DValidVideoTests: XCTestCase {
         var pairCount = 0
         var jumpBig = 0
         let bigJumpThreshold: Double = 0.05
+        // 追従率（アプリ体験の代理指標）計測用: 検出成功フレームのキャッシュと
+        // サンプル時刻列を蓄積し、ループ後に DetectionBridge（アプリの補間と同一実装）
+        // で「補間で救済されるフレームも含めた率 = bridgedRate」を求める。
+        var detectionCache: [Double: [FaceLandmarkSet]] = [:]
+        var sampleTimes: [Double] = []
         let interval = 1.0 / 15.0   // MosaicEditorModel と同じ刻み
         // 動画を前半/後半に分け、それぞれ別プロセス（別 XCTest メソッド）で走らせることで
         // 1 プロセスあたりの連続 detect 呼び出し数と実行時間を半分にする。
@@ -104,10 +109,13 @@ final class DValidVideoTests: XCTestCase {
             autoreleasepool {
                 if let cg = try? gen.copyCGImage(at: CMTime(seconds: t, preferredTimescale: 600), actualTime: nil) {
                     total += 1
+                    sampleTimes.append(t)
                     let img = UIImage(cgImage: cg)
                     let faces = scanner.allLandmarks(in: img, timestampMs: Int(t * 1000))
+                    let src = (scanner as? MediaPipeFaceLandmarkerAdapter)?.lastSource.rawValue ?? ""
                     if let first = faces.first {
                         hit += 1
+                        detectionCache[t] = faces
                         let c = centroid(of: first)
                         if c.y > 0.5 { lowCy += 1 }
                         if let prev = lastCentroid {
@@ -119,22 +127,49 @@ final class DValidVideoTests: XCTestCase {
                             if d > bigJumpThreshold { jumpBig += 1 }
                         }
                         lastCentroid = c
+                        // フレームタイムライン: 追従層（bridgeWindow/lerp/EMA）のパラメータ探索を
+                        // CI 再実行なしのオフライン計算にするための1行/フレーム出力。
+                        let bb = first.boundingBox
+                        let frameLine = String(
+                            format: "[DVALFRAME] {\"t\":%.3f,\"hit\":1,\"cx\":%.4f,\"cy\":%.4f," +
+                                    "\"bx\":%.4f,\"by\":%.4f,\"bw\":%.4f,\"bh\":%.4f,\"src\":\"%@\"}",
+                            t, c.x, c.y, bb.origin.x, bb.origin.y, bb.width, bb.height, src
+                        )
+                        fputs(frameLine + "\n", stderr)
                     } else {
                         // 検出途切れは pair を切る（次のヒットとの距離を測らない）
                         lastCentroid = nil
+                        fputs(String(format: "[DVALFRAME] {\"t\":%.3f,\"hit\":0}", t) + "\n", stderr)
                     }
                 }
             }
             t += interval
         }
 
+        // アプリの両側補間（DetectionBridge）で救済されるフレームも含めた追従率。
+        // bridgedRate は現行アプリ挙動（window=5/15）、bridgedRate10 は window 拡大
+        // (10/15) の事前評価（検出コストゼロで効果を見積もる）。
+        let bridge5 = DetectionBridge()
+        let bridge10 = DetectionBridge(bridgeWindow: 10.0 / 15.0)
+        var bridgedHit = 0
+        var bridgedHit10 = 0
+        for st in sampleTimes {
+            if !bridge5.faces(in: detectionCache, at: st).isEmpty { bridgedHit += 1 }
+            if !bridge10.faces(in: detectionCache, at: st).isEmpty { bridgedHit10 += 1 }
+        }
+
+        let stats = (scanner as? MediaPipeFaceLandmarkerAdapter)?.sourceStats
+                    ?? FaceDetectionSourceStats()
+
         let rate = total == 0 ? 0.0 : Double(hit) / Double(total)
         let lowRate = total == 0 ? 0.0 : Double(lowCy) / Double(total)
         let avgJump = pairCount == 0 ? 0.0 : sumJump / Double(pairCount)
         let jumpBigRate = pairCount == 0 ? 0.0 : Double(jumpBig) / Double(pairCount)
+        let bridgedRate = total == 0 ? 0.0 : Double(bridgedHit) / Double(total)
+        let bridgedRate10 = total == 0 ? 0.0 : Double(bridgedHit10) / Double(total)
         // Xcode 26 では print() がシミュレータプロセスの stdout に閉じ込められ
         // xcodebuild の pipe に出てこない。stderr は 2>&1 で捕捉されるので fputs を使う。
-        let resultLine = "[DVALRESULT] {\"video\":\"\(name)\",\"backend\":\"\(backend.rawValue)\",\"half\":\"\(half.rawValue)\",\"total\":\(total),\"hit\":\(hit),\"lowCy\":\(lowCy),\"rate\":\(rate),\"lowRate\":\(lowRate),\"baseline\":\(baseline),\"avgJump\":\(avgJump),\"jumpBig\":\(jumpBig),\"jumpBigRate\":\(jumpBigRate),\"pairCount\":\(pairCount)}"
+        let resultLine = "[DVALRESULT] {\"video\":\"\(name)\",\"backend\":\"\(backend.rawValue)\",\"half\":\"\(half.rawValue)\",\"total\":\(total),\"hit\":\(hit),\"lowCy\":\(lowCy),\"rate\":\(rate),\"lowRate\":\(lowRate),\"baseline\":\(baseline),\"avgJump\":\(avgJump),\"jumpBig\":\(jumpBig),\"jumpBigRate\":\(jumpBigRate),\"pairCount\":\(pairCount),\"bridgedHit\":\(bridgedHit),\"bridgedRate\":\(bridgedRate),\"bridgedHit10\":\(bridgedHit10),\"bridgedRate10\":\(bridgedRate10),\"srcMp\":\(stats.mpFrames),\"srcEnh\":\(stats.enhanceFrames),\"srcBbox\":\(stats.bboxFrames),\"srcRoi\":\(stats.roiFrames),\"srcLow\":\(stats.lowConfFrames)}"
         fputs(resultLine + "\n", stderr)
     }
 

@@ -408,33 +408,10 @@ public final class MosaicEditorModel: ObservableObject {
 
     // MARK: - 検出キャッシュ参照
 
-    /// 指定時刻の顔ランドマークを返す。前後 `bridgeWindow` 秒以内の両側に検出がある
-    /// 「一時的な検出抜け」のみ直近フレームで補間する。片側にしか検出が無い場合
-    /// （顔がフレームアウト／インする境界）は空を返す。
-    ///
-    /// さらに「両側に検出があっても顔の位置が大きく変わっている」場合は
-    /// フレームアウト→イン（新しい位置に再入場）と判定して補間しない。これは
-    /// IoU マッチングで実装する。アウト前の位置にモザイクが貼り付いたままにならない。
+    /// 指定時刻の顔ランドマークを返す。補間の仕様は `DetectionBridge` を参照
+    /// （プレビュー・エクスポート・精度計測で共通の挙動）。
     func lookupFaces(at time: Double) -> [FaceLandmarkSet] {
-        if let exact = detectionCache[time], !exact.isEmpty { return exact }
-        // 15fps プリスキャン基準で 5 フレームまでの検出抜けをブリッジする。
-        // これより長い抜けは「顔自体が画面外にいる」可能性が高いので外挿しない。
-        let bridgeWindow = 5.0 / 15.0
-        var before: (dist: Double, faces: [FaceLandmarkSet])?
-        var after: (dist: Double, faces: [FaceLandmarkSet])?
-        for (t, faces) in detectionCache where !faces.isEmpty {
-            let d = abs(t - time)
-            guard d <= bridgeWindow else { continue }
-            if t <= time {
-                if before == nil || d < before!.dist { before = (d, faces) }
-            } else {
-                if after == nil || d < after!.dist { after = (d, faces) }
-            }
-        }
-        guard let before, let after else { return [] }
-        // before の顔のうち、after にも「同じ位置 (IoU > 0.3)」で対応する顔があるものだけ補間に使う。
-        // 対応しない顔（アウト前の位置のまま、インでは別の場所に出た）は除外。
-        return before.faces.filter { $0.hasCounterpart(in: after.faces) }
+        DetectionBridge().faces(in: detectionCache, at: time)
     }
 
     /// 選択中の顔に対応する、指定時刻のランドマークセットを返す。

@@ -241,6 +241,9 @@ jobs:
           merged = defaultdict(lambda: {'hit': 0, 'total': 0, 'lowCy': 0,
                                           'jumpBig': 0, 'pairCount': 0,
                                           'sumJumpWeighted': 0.0, 'baseline': 0.0,
+                                          'bridgedHit': 0, 'bridgedHit10': 0,
+                                          'srcMp': 0, 'srcEnh': 0, 'srcBbox': 0,
+                                          'srcRoi': 0, 'srcLow': 0,
                                           'halves': []})
           for d in rows:
               key = (d.get('video', ''), d.get('backend', ''))
@@ -252,11 +255,18 @@ jobs:
               m['pairCount'] += d.get('pairCount', 0)
               m['sumJumpWeighted'] += d.get('avgJump', 0.0) * d.get('pairCount', 0)
               m['baseline'] = d.get('baseline', 0.0)
+              m['bridgedHit'] += d.get('bridgedHit', 0)
+              m['bridgedHit10'] += d.get('bridgedHit10', 0)
+              m['srcMp'] += d.get('srcMp', 0)
+              m['srcEnh'] += d.get('srcEnh', 0)
+              m['srcBbox'] += d.get('srcBbox', 0)
+              m['srcRoi'] += d.get('srcRoi', 0)
+              m['srcLow'] += d.get('srcLow', 0)
               m['halves'].append(d.get('half', '?'))
 
           out = ['# Detection Accuracy Summary', '',
-                 '| 動画 | backend | half | hit | total | rate | baseline | Δ | lowCy% | avgJump | jumpBig% |',
-                 '|---|---|---|---|---|---|---|---|---|---|---|']
+                 '| 動画 | backend | half | hit | total | rate | baseline | Δ | bridged | bridged10 | lowCy% | avgJump | jumpBig% | src mp/enh/bbox/roi/low |',
+                 '|---|---|---|---|---|---|---|---|---|---|---|---|---|---|']
           for (video, backend), m in sorted(merged.items()):
               total = m['total']
               rate = (m['hit'] / total * 100) if total else 0.0
@@ -265,8 +275,11 @@ jobs:
               low = (m['lowCy'] / total * 100) if total else 0.0
               avg_jump = (m['sumJumpWeighted'] / m['pairCount']) if m['pairCount'] else 0.0
               jump_big_rate = (m['jumpBig'] / m['pairCount'] * 100) if m['pairCount'] else 0.0
+              bridged = (m['bridgedHit'] / total * 100) if total else 0.0
+              bridged10 = (m['bridgedHit10'] / total * 100) if total else 0.0
+              srcs = f"{m['srcMp']}/{m['srcEnh']}/{m['srcBbox']}/{m['srcRoi']}/{m['srcLow']}"
               half_label = '+'.join(sorted(m['halves'])) or '?'
-              out.append(f"| {video} | {backend} | {half_label} | {m['hit']} | {total} | {rate:.1f}% | {bl:.0f}% | {delta:+.1f}pp | {low:.1f}% | {avg_jump:.4f} | {jump_big_rate:.1f}% |")
+              out.append(f"| {video} | {backend} | {half_label} | {m['hit']} | {total} | {rate:.1f}% | {bl:.0f}% | {delta:+.1f}pp | {bridged:.1f}% | {bridged10:.1f}% | {low:.1f}% | {avg_jump:.4f} | {jump_big_rate:.1f}% | {srcs} |")
           summary = '\n'.join(out) + '\n'
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
               f.write(summary)
