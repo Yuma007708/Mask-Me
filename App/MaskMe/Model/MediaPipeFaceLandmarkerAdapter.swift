@@ -43,6 +43,7 @@ public enum FaceDetectionSource: String {
     case bbox        // 補助検出器 bbox → ROI 再検出のみが拾った
     case roi         // テンポラル ROI 再検出（前フレーム bbox）
     case lowConf = "low"  // 低 confidence 最終フォールバック
+    case tiled = "tile"   // タイル分割再検出（track なしの長期ロスト用）
     case none = ""   // 未検出
 }
 
@@ -53,6 +54,7 @@ public struct FaceDetectionSourceStats {
     public var bboxFrames = 0
     public var roiFrames = 0
     public var lowConfFrames = 0
+    public var tiledFrames = 0
 }
 
 /// Thin wrapper around MediaPipe's `FaceLandmarker` that produces the
@@ -122,6 +124,7 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
         case .bbox:     sourceStats.bboxFrames += 1
         case .roi:      sourceStats.roiFrames += 1
         case .lowConf:  sourceStats.lowConfFrames += 1
+        case .tiled:    sourceStats.tiledFrames += 1
         case .none:     break
         }
     }
@@ -244,6 +247,18 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
                 trackedFaces = result.map { TrackedFace(box: $0.boundingBox, missCount: 0) }
             }
         }
+        if result.isEmpty, trackedFaces.isEmpty {
+            // track も無い長期ロスト時のみ、フレームをタイル分割して再走査する。
+            // 全画面検出はモデル入力への縮小で小顔が潰れるため、タイル crop で
+            // 顔の相対サイズを稼ぐ（実測: フレーム比 10% 台の顔は全画面 + enhance
+            // 全滅でもタイル内なら検出できる）。成功したら track を再シードして
+            // 以降のフレームは安価な ROI 追跡に引き継ぐ。
+            result = tiledDetect(image)
+            source = result.isEmpty ? .none : .tiled
+            if !result.isEmpty {
+                trackedFaces = result.map { TrackedFace(box: $0.boundingBox, missCount: 0) }
+            }
+        }
         recordSource(source)
         return result
     }
@@ -261,6 +276,48 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
         return convertAll(result).filter {
             $0.isPlausibleFace(minSpan: plausibilityMinSpan, eyeRatioRange: 0.45...1.0)
         }
+    }
+
+    // MARK: - タイル分割再検出
+
+    /// 4 隅 0.65×0.65 + 中央 0.5×0.5 の重なり付き 5 タイル。重なり 0.3 以上を確保し、
+    /// フレーム比 3 割までの顔ならどこにいても必ずいずれかのタイルに丸ごと収まる。
+    private static let detectionTiles: [CGRect] = [
+        CGRect(x: 0, y: 0, width: 0.65, height: 0.65),
+        CGRect(x: 0.35, y: 0, width: 0.65, height: 0.65),
+        CGRect(x: 0, y: 0.35, width: 0.65, height: 0.65),
+        CGRect(x: 0.35, y: 0.35, width: 0.65, height: 0.65),
+        CGRect(x: 0.25, y: 0.25, width: 0.5, height: 0.5)
+    ]
+
+    /// track なし長期ロスト専用の最終フォールバック。各タイル crop を IMG モードで
+    /// 再走査し（素 → だめなら aggressive 強調フレームの同タイル）、タイル座標から
+    /// 元画像座標へ逆変換して返す。lowConf と同じ理由で eyeRatio 下限は 0.45 に厳格化し、
+    /// 重なりタイルが同じ顔を二重に拾った分は IoU で間引く。
+    private func tiledDetect(_ image: UIImage) -> [FaceLandmarkSet] {
+        guard let cropLandmarker = landmarkerForCrop else { return [] }
+        let enhanced = enhance(image, level: .aggressive)
+        var found: [FaceLandmarkSet] = []
+        for tile in Self.detectionTiles {
+            var candidate: FaceLandmarkSet?
+            for variant in [image, enhanced].compactMap({ $0 }) {
+                guard let cropped = cropImage(variant, normalizedRect: tile),
+                      let mpImage = try? MPImage(uiImage: cropped),
+                      let result = try? cropLandmarker.detect(image: mpImage),
+                      let first = result.faceLandmarks.first else { continue }
+                let points = first.map { FaceLandmark(x: $0.x, y: $0.y, z: $0.z) }
+                let confidence: Float = points.count >= FaceLandmarkSet.fullMeshCount ? 1.0 : 0.6
+                candidate = FaceLandmarkSet(points: points, confidence: confidence)
+                    .remapped(into: tile)
+                break
+            }
+            guard let remapped = candidate else { continue }
+            guard remapped.isPlausibleFace(minSpan: plausibilityMinSpan, eyeRatioRange: 0.45...1.0),
+                  !found.contains(where: { iou($0.boundingBox, remapped.boundingBox) > 0.3 })
+            else { continue }
+            found.append(remapped)
+        }
+        return found
     }
 
     // MARK: - テンポラル ROI 再検出
@@ -285,14 +342,28 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
             let oldBox = trackedFaces[index].box
             let roi = expandedClamped(oldBox, factor: roiExpansion)
             guard roi.width > 0, roi.height > 0,
-                  let cropped = cropImage(image, normalizedRect: roi),
-                  let mpImage = try? MPImage(uiImage: upscaledIfSmall(cropped)),
-                  let result = try? cropLandmarker.detect(image: mpImage),
-                  let face = result.faceLandmarks.first else {
+                  let cropped = cropImage(image, normalizedRect: roi) else {
                 trackedFaces[index].missCount += 1
                 continue
             }
-            let points = face.map { FaceLandmark(x: $0.x, y: $0.y, z: $0.z) }
+            // 素の crop で失敗したら強調（暗所 → 逆光の順）をかけて再試行する。
+            // 全画面の enhance ではモデル入力への縮小で潰れる小顔も、crop + 強調なら
+            // 拾えることがある。crop は小さいので追加コストは僅少。
+            let upscaled = upscaledIfSmall(cropped)
+            var detectedFace: [FaceLandmark]?
+            for variant in [upscaled,
+                            enhance(upscaled, level: .aggressive),
+                            enhance(upscaled, level: .backlight)].compactMap({ $0 }) {
+                guard let mpImage = try? MPImage(uiImage: variant),
+                      let result = try? cropLandmarker.detect(image: mpImage),
+                      let first = result.faceLandmarks.first else { continue }
+                detectedFace = first.map { FaceLandmark(x: $0.x, y: $0.y, z: $0.z) }
+                break
+            }
+            guard let points = detectedFace else {
+                trackedFaces[index].missCount += 1
+                continue
+            }
             let confidence: Float = points.count >= FaceLandmarkSet.fullMeshCount ? 1.0 : 0.6
             let remapped = FaceLandmarkSet(points: points, confidence: confidence)
                 .remapped(into: roi)

@@ -169,7 +169,7 @@ final class DValidVideoTests: XCTestCase {
         let bridgedRate10 = total == 0 ? 0.0 : Double(bridgedHit10) / Double(total)
         // Xcode 26 では print() がシミュレータプロセスの stdout に閉じ込められ
         // xcodebuild の pipe に出てこない。stderr は 2>&1 で捕捉されるので fputs を使う。
-        let resultLine = "[DVALRESULT] {\"video\":\"\(name)\",\"backend\":\"\(backend.rawValue)\",\"half\":\"\(half.rawValue)\",\"total\":\(total),\"hit\":\(hit),\"lowCy\":\(lowCy),\"rate\":\(rate),\"lowRate\":\(lowRate),\"baseline\":\(baseline),\"avgJump\":\(avgJump),\"jumpBig\":\(jumpBig),\"jumpBigRate\":\(jumpBigRate),\"pairCount\":\(pairCount),\"bridgedHit\":\(bridgedHit),\"bridgedRate\":\(bridgedRate),\"bridgedHit10\":\(bridgedHit10),\"bridgedRate10\":\(bridgedRate10),\"srcMp\":\(stats.mpFrames),\"srcEnh\":\(stats.enhanceFrames),\"srcBbox\":\(stats.bboxFrames),\"srcRoi\":\(stats.roiFrames),\"srcLow\":\(stats.lowConfFrames)}"
+        let resultLine = "[DVALRESULT] {\"video\":\"\(name)\",\"backend\":\"\(backend.rawValue)\",\"half\":\"\(half.rawValue)\",\"total\":\(total),\"hit\":\(hit),\"lowCy\":\(lowCy),\"rate\":\(rate),\"lowRate\":\(lowRate),\"baseline\":\(baseline),\"avgJump\":\(avgJump),\"jumpBig\":\(jumpBig),\"jumpBigRate\":\(jumpBigRate),\"pairCount\":\(pairCount),\"bridgedHit\":\(bridgedHit),\"bridgedRate\":\(bridgedRate),\"bridgedHit10\":\(bridgedHit10),\"bridgedRate10\":\(bridgedRate10),\"srcMp\":\(stats.mpFrames),\"srcEnh\":\(stats.enhanceFrames),\"srcBbox\":\(stats.bboxFrames),\"srcRoi\":\(stats.roiFrames),\"srcLow\":\(stats.lowConfFrames),\"srcTile\":\(stats.tiledFrames)}"
         fputs(resultLine + "\n", stderr)
     }
 

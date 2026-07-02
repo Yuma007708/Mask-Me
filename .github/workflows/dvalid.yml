@@ -243,7 +243,7 @@ jobs:
                                           'sumJumpWeighted': 0.0, 'baseline': 0.0,
                                           'bridgedHit': 0, 'bridgedHit10': 0,
                                           'srcMp': 0, 'srcEnh': 0, 'srcBbox': 0,
-                                          'srcRoi': 0, 'srcLow': 0,
+                                          'srcRoi': 0, 'srcLow': 0, 'srcTile': 0,
                                           'halves': []})
           for d in rows:
               key = (d.get('video', ''), d.get('backend', ''))
@@ -262,10 +262,11 @@ jobs:
               m['srcBbox'] += d.get('srcBbox', 0)
               m['srcRoi'] += d.get('srcRoi', 0)
               m['srcLow'] += d.get('srcLow', 0)
+              m['srcTile'] += d.get('srcTile', 0)
               m['halves'].append(d.get('half', '?'))
 
           out = ['# Detection Accuracy Summary', '',
-                 '| 動画 | backend | half | hit | total | rate | baseline | Δ | bridged | bridged10 | lowCy% | avgJump | jumpBig% | src mp/enh/bbox/roi/low |',
+                 '| 動画 | backend | half | hit | total | rate | baseline | Δ | bridged | bridged10 | lowCy% | avgJump | jumpBig% | src mp/enh/bbox/roi/low/tile |',
                  '|---|---|---|---|---|---|---|---|---|---|---|---|---|---|']
           for (video, backend), m in sorted(merged.items()):
               total = m['total']
@@ -277,7 +278,7 @@ jobs:
               jump_big_rate = (m['jumpBig'] / m['pairCount'] * 100) if m['pairCount'] else 0.0
               bridged = (m['bridgedHit'] / total * 100) if total else 0.0
               bridged10 = (m['bridgedHit10'] / total * 100) if total else 0.0
-              srcs = f"{m['srcMp']}/{m['srcEnh']}/{m['srcBbox']}/{m['srcRoi']}/{m['srcLow']}"
+              srcs = f"{m['srcMp']}/{m['srcEnh']}/{m['srcBbox']}/{m['srcRoi']}/{m['srcLow']}/{m['srcTile']}"
               half_label = '+'.join(sorted(m['halves'])) or '?'
               out.append(f"| {video} | {backend} | {half_label} | {m['hit']} | {total} | {rate:.1f}% | {bl:.0f}% | {delta:+.1f}pp | {bridged:.1f}% | {bridged10:.1f}% | {low:.1f}% | {avg_jump:.4f} | {jump_big_rate:.1f}% | {srcs} |")
           summary = '\n'.join(out) + '\n'
