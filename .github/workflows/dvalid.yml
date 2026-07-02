@@ -11,10 +11,14 @@ on:
         description: '回す動画（カンマ区切り、サブセット可）'
         default: 's1,s2,s3,s4,s5'
         required: false
+      halves:
+        description: '回す半分（カンマ区切り、サブセット可。A=前半 B=後半）'
+        default: 'A,B'
+        required: false
 
 jobs:
   test:
-    name: ${{ matrix.video }} / ${{ matrix.backend }}
+    name: ${{ matrix.video }} / ${{ matrix.backend }} / ${{ matrix.half }}
     runs-on: macos-15
     timeout-minutes: 60
     strategy:
@@ -22,6 +26,7 @@ jobs:
       matrix:
         video: [s1, s2, s3, s4, s5]
         backend: [off, faceDetector, yunet]
+        half: [A, B]
 
     steps:
       - name: Skip if not in input subset
@@ -29,8 +34,17 @@ jobs:
         run: |
           IFS=',' read -ra VIDEOS <<< "${{ inputs.videos || 's1,s2,s3,s4,s5' }}"
           IFS=',' read -ra BACKENDS <<< "${{ inputs.backends || 'off,faceDetector,yunet' }}"
+          IFS=',' read -ra HALVES <<< "${{ inputs.halves || 'A,B' }}"
           ok=false
-          for v in "${VIDEOS[@]}"; do [ "$v" = "${{ matrix.video }}" ] && for b in "${BACKENDS[@]}"; do [ "$b" = "${{ matrix.backend }}" ] && ok=true; done; done
+          for v in "${VIDEOS[@]}"; do
+            [ "$v" = "${{ matrix.video }}" ] || continue
+            for b in "${BACKENDS[@]}"; do
+              [ "$b" = "${{ matrix.backend }}" ] || continue
+              for h in "${HALVES[@]}"; do
+                [ "$h" = "${{ matrix.half }}" ] && ok=true
+              done
+            done
+          done
           echo "ok=$ok" >> "$GITHUB_OUTPUT"
 
       - name: Checkout
@@ -148,7 +162,7 @@ jobs:
             *)            TEST_BACKEND_SUFFIX="$TEST_BACKEND" ;;
           esac
           UPPER=$(echo "${{ matrix.video }}" | tr '[:lower:]' '[:upper:]')
-          TEST_NAME="test_${UPPER}_${TEST_BACKEND_SUFFIX}"
+          TEST_NAME="test_${UPPER}_${TEST_BACKEND_SUFFIX}_${{ matrix.half }}"
           echo "Running $TEST_NAME"
 
           # 利用可能な最新 iPhone シミュレータの UUID を取得
@@ -156,12 +170,27 @@ jobs:
           echo "Simulator UUID: $SIM_UUID"
 
           set -o pipefail
-          xcodebuild test \
+          # 動画 1 本分の連続 detect 呼び出し中に、シミュレータ上でテストプロセスが
+          # 稀に無言で異常終了する（0 tests executed）ことがある。backend・動画長を問わず
+          # 確率的に起きる infra 起因の flaky と判断しており、クラッシュレポートも
+          # 取得できていないため、失敗時はテストプロセスを最大 3 回まで再試行する。
+          max_attempts=3
+          attempt=1
+          until xcodebuild test \
             -workspace App/MaskMe.xcworkspace \
             -scheme MaskMe \
             -destination "platform=iOS Simulator,id=$SIM_UUID" \
             -only-testing:"MaskMeTests/DValidVideoTests/$TEST_NAME" \
             2>&1 | tee test.log
+          do
+            ec=${PIPESTATUS[0]}
+            if [ "$attempt" -ge "$max_attempts" ]; then
+              echo "::error::$TEST_NAME failed after $attempt attempts (exit $ec)"
+              exit "$ec"
+            fi
+            echo "::warning::$TEST_NAME attempt $attempt failed (exit $ec), retrying ($((attempt + 1))/$max_attempts)"
+            attempt=$((attempt + 1))
+          done
 
       - name: Extract result line
         if: always() && steps.subset.outputs.ok == 'true'
@@ -173,7 +202,7 @@ jobs:
         if: always() && steps.subset.outputs.ok == 'true'
         uses: actions/upload-artifact@v4
         with:
-          name: result-${{ matrix.video }}-${{ matrix.backend }}
+          name: result-${{ matrix.video }}-${{ matrix.backend }}-${{ matrix.half }}
           path: |
             test.log
             result.json
@@ -194,6 +223,7 @@ jobs:
         run: |
           python3 <<'PYEOF'
           import json, glob, os, re
+          from collections import defaultdict
           rows = []
           for path in sorted(glob.glob('artifacts/result-*/result.json')):
               text = open(path).read()
@@ -205,18 +235,51 @@ jobs:
               except Exception:
                   continue
               rows.append(d)
-          rows.sort(key=lambda d: (d.get('video', ''), d.get('backend', '')))
-          out = ['# Detection Accuracy Summary', '',
-                 '| 動画 | backend | hit | total | rate | baseline | Δ | lowCy% | avgJump | jumpBig% |',
-                 '|---|---|---|---|---|---|---|---|---|---|']
+
+          # 動画は前半(A)/後半(B)を別プロセスで走らせているので、集計では
+          # (video, backend) ごとに前半+後半を合算して元の「動画全体」の指標に戻す。
+          merged = defaultdict(lambda: {'hit': 0, 'total': 0, 'lowCy': 0,
+                                          'jumpBig': 0, 'pairCount': 0,
+                                          'sumJumpWeighted': 0.0, 'baseline': 0.0,
+                                          'bridgedHit': 0, 'bridgedHit10': 0,
+                                          'srcMp': 0, 'srcEnh': 0, 'srcBbox': 0,
+                                          'srcRoi': 0, 'srcLow': 0,
+                                          'halves': []})
           for d in rows:
-              rate = d['rate'] * 100
-              bl = d['baseline'] * 100
+              key = (d.get('video', ''), d.get('backend', ''))
+              m = merged[key]
+              m['hit'] += d.get('hit', 0)
+              m['total'] += d.get('total', 0)
+              m['lowCy'] += d.get('lowCy', 0)
+              m['jumpBig'] += d.get('jumpBig', 0)
+              m['pairCount'] += d.get('pairCount', 0)
+              m['sumJumpWeighted'] += d.get('avgJump', 0.0) * d.get('pairCount', 0)
+              m['baseline'] = d.get('baseline', 0.0)
+              m['bridgedHit'] += d.get('bridgedHit', 0)
+              m['bridgedHit10'] += d.get('bridgedHit10', 0)
+              m['srcMp'] += d.get('srcMp', 0)
+              m['srcEnh'] += d.get('srcEnh', 0)
+              m['srcBbox'] += d.get('srcBbox', 0)
+              m['srcRoi'] += d.get('srcRoi', 0)
+              m['srcLow'] += d.get('srcLow', 0)
+              m['halves'].append(d.get('half', '?'))
+
+          out = ['# Detection Accuracy Summary', '',
+                 '| 動画 | backend | half | hit | total | rate | baseline | Δ | bridged | bridged10 | lowCy% | avgJump | jumpBig% | src mp/enh/bbox/roi/low |',
+                 '|---|---|---|---|---|---|---|---|---|---|---|---|---|---|']
+          for (video, backend), m in sorted(merged.items()):
+              total = m['total']
+              rate = (m['hit'] / total * 100) if total else 0.0
+              bl = m['baseline'] * 100
               delta = rate - bl
-              low = d['lowRate'] * 100
-              avg_jump = d.get('avgJump', 0.0)
-              jump_big_rate = d.get('jumpBigRate', 0.0) * 100
-              out.append(f"| {d['video']} | {d['backend']} | {d['hit']} | {d['total']} | {rate:.1f}% | {bl:.0f}% | {delta:+.1f}pp | {low:.1f}% | {avg_jump:.4f} | {jump_big_rate:.1f}% |")
+              low = (m['lowCy'] / total * 100) if total else 0.0
+              avg_jump = (m['sumJumpWeighted'] / m['pairCount']) if m['pairCount'] else 0.0
+              jump_big_rate = (m['jumpBig'] / m['pairCount'] * 100) if m['pairCount'] else 0.0
+              bridged = (m['bridgedHit'] / total * 100) if total else 0.0
+              bridged10 = (m['bridgedHit10'] / total * 100) if total else 0.0
+              srcs = f"{m['srcMp']}/{m['srcEnh']}/{m['srcBbox']}/{m['srcRoi']}/{m['srcLow']}"
+              half_label = '+'.join(sorted(m['halves'])) or '?'
+              out.append(f"| {video} | {backend} | {half_label} | {m['hit']} | {total} | {rate:.1f}% | {bl:.0f}% | {delta:+.1f}pp | {bridged:.1f}% | {bridged10:.1f}% | {low:.1f}% | {avg_jump:.4f} | {jump_big_rate:.1f}% | {srcs} |")
           summary = '\n'.join(out) + '\n'
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
               f.write(summary)

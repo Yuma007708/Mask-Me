@@ -29,6 +29,9 @@ final class MosaicPreviewController {
     private var framesUntilResegment = 0
     /// 背景マスクの再セグメント間隔（フレーム数）。30fps で約 5fps 相当。
     private let backgroundSegmentInterval = 6
+    /// 描画直前のランドマーク EMA（フレーム間の微小ちらつき吸収）。検出キャッシュには
+    /// 適用しない。シーク時は状態を捨てる。
+    private let landmarkSmoother = LandmarkSmoother()
 
     private(set) var duration: Double = 0
 
@@ -93,6 +96,8 @@ final class MosaicPreviewController {
         // シーク先では古い背景マスクを使わない
         cachedBackgroundMask = nil
         framesUntilResegment = 0
+        // シーク先では前位置の EMA 状態も意味を持たない
+        landmarkSmoother.reset()
         await player.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero)
         renderCurrentFrame()
     }
@@ -174,8 +179,9 @@ final class MosaicPreviewController {
         // 検出キャッシュ欠落時の freeze はしない。lookupFaces 側で両側マッチング補間が
         // 連続する顔だけ返すようにしているため、ここで freeze するとアウト→イン時に
         // 「アウト位置にモザイクが固定」され、かつエクスポートと挙動が食い違う。
+        // 描画直前の EMA でフレーム間の微小ちらつきを吸収する（速い動きはスナップ）。
         let landmarks: [FaceLandmarkSet] = model.faceMosaicOn
-            ? model.selectedLandmarks(at: timeSec)
+            ? landmarkSmoother.smooth(model.selectedLandmarks(at: timeSec))
             : []
         // 手動矩形は顔検出の補助なので顔タブ（faceMosaicOn）の状態に従う。
         // 解像度は（縮小後の）実テクスチャに合わせる（フルサイズだと 720px 縮小時に位置がずれる）。

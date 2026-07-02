@@ -113,15 +113,43 @@ extension FaceLandmarkSet {
     /// 顔がフレームアウト→インした場合、before と after で位置が大きく変わるので false になり、
     /// 補間が抑制されて「アウト位置に固定」される事故を防ぐ。
     public func hasCounterpart(in others: [FaceLandmarkSet], iouThreshold: CGFloat = 0.3) -> Bool {
+        counterpart(in: others, iouThreshold: iouThreshold) != nil
+    }
+
+    /// 他の顔リストの中で、自分と bbox IoU が `iouThreshold` を超えて最も重なる顔を返す。
+    /// 時系列補間で lerp の相手（同じ顔の次の観測）を選ぶのに使う。
+    public func counterpart(
+        in others: [FaceLandmarkSet],
+        iouThreshold: CGFloat = 0.3
+    ) -> FaceLandmarkSet? {
         let mine = self.boundingBox
+        var best: (iou: CGFloat, face: FaceLandmarkSet)?
         for o in others {
             let inter = mine.intersection(o.boundingBox)
             guard !inter.isNull, inter.width > 0, inter.height > 0 else { continue }
             let interArea = inter.width * inter.height
             let unionArea = mine.width * mine.height + o.boundingBox.width * o.boundingBox.height - interArea
-            if unionArea > 0, interArea / unionArea > iouThreshold { return true }
+            guard unionArea > 0 else { continue }
+            let iou = interArea / unionArea
+            if iou > iouThreshold, iou > (best?.iou ?? 0) { best = (iou, o) }
         }
-        return false
+        return best?.face
+    }
+
+    /// `other` に向かって点単位で線形補間した顔を返す（`alpha` = 0 で自分、1 で other）。
+    /// 点数が一致しない場合は補間できないので自分をそのまま返す（ホールド相当）。
+    /// 時系列補間で「before と after の中間時刻の顔」を合成するのに使う。
+    public func interpolated(to other: FaceLandmarkSet, alpha: Float) -> FaceLandmarkSet {
+        guard points.count == other.points.count, !points.isEmpty else { return self }
+        let a = min(max(alpha, 0), 1)
+        let newPoints = zip(points, other.points).map { p, q in
+            FaceLandmark(
+                x: p.x + (q.x - p.x) * a,
+                y: p.y + (q.y - p.y) * a,
+                z: p.z + (q.z - p.z) * a
+            )
+        }
+        return FaceLandmarkSet(points: newPoints, confidence: min(confidence, other.confidence))
     }
 
     /// 正規化ランドマーク座標を `rect` (0-1正規化) のサブ領域から全体画像座標へ逆マッピングする。

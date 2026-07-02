@@ -14,7 +14,9 @@ struct YuNetFaceDetector: FaceBBoxDetecting {
     private let model: MLModel?
     private let inputSize = 640
     private let strides = [8, 16, 32]
-    private let scoreThreshold: Float = 0.6
+    // 0.6 → 0.5: 検出率向上のための引き下げ。緩めた分の誤検出は下流の
+    // bbox 前段ガード（面積4%・アスペクト比0.5-1.5）と isPlausibleFace が受け止める。
+    private let scoreThreshold: Float = 0.5
     private let nmsThreshold: CGFloat = 0.3
 
     init(modelName: String = "yunet") {
