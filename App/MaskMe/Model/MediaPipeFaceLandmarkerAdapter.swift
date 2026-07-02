@@ -92,6 +92,22 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
     /// （15fps サンプリングで 8 フレーム ≒ 0.53 秒）。誤検出 track の自己増殖を防ぐ上限。
     private let maxTrackMisses = 8
 
+    /// 通常パイプライン + テンポラル ROI が全滅したフレーム専用の最終フォールバック。
+    /// confidence を極端に下げた IMG モード landmarker で全画面をもう一度だけ走査する。
+    /// 拾いすぎた誤検出は isPlausibleFace が排除する前提。使うときだけ遅延生成。
+    private lazy var landmarkerLowConf: FaceLandmarker? = {
+        let options = FaceLandmarkerOptions()
+        options.baseOptions.modelAssetPath = modelPath
+        options.runningMode = .image
+        options.numFaces = max(numFaces, 1)
+        options.minFaceDetectionConfidence = 0.05
+        options.minFacePresenceConfidence  = 0.05
+        options.minTrackingConfidence      = 0.05
+        return try? FaceLandmarker(options: options)
+    }()
+    private let modelPath: String
+    private let numFaces: Int
+
     /// 直近フレームで最初の顔を提供した検出ソース（未検出なら `.none`）。
     /// インスタンスは単一ストリーム直列使用が前提（テスト・アプリとも直列）。
     public private(set) var lastSource: FaceDetectionSource = .none
@@ -117,6 +133,9 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
         // 初期化が失敗し、呼び出し側が NullFaceLandmarker（無検出）に落ちてしまうため、
         // 安全範囲にクランプして「設定値が原因で一切検出されない」回帰を防ぐ。
         func clampConfidence(_ value: Float) -> Float { min(max(value, 0.01), 1.0) }
+
+        self.modelPath = modelPath
+        self.numFaces = settings.numFaces
 
         let options = FaceLandmarkerOptions()
         options.baseOptions.modelAssetPath = modelPath
@@ -210,14 +229,32 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
             source = mp.isEmpty ? .none : mpSource
         }
         if result.isEmpty {
-            // 全画面パイプライン全滅 → 前フレームの顔位置周辺だけを再走査する最終手段。
+            // 全画面パイプライン全滅 → 前フレームの顔位置周辺だけを再走査する。
             result = redetectFromTrackedBoxes(image: image)
             source = result.isEmpty ? .none : .roi
         } else {
             trackedFaces = result.map { TrackedFace(box: $0.boundingBox, missCount: 0) }
         }
+        if result.isEmpty {
+            // それでもゼロなら、低 confidence の全画面走査を最後にもう一度だけ。
+            // 妥当性フィルタ通過分のみ採用し、次フレームからの ROI 追跡の種にもする。
+            result = lowConfDetect(image)
+            source = result.isEmpty ? .none : .lowConf
+            if !result.isEmpty {
+                trackedFaces = result.map { TrackedFace(box: $0.boundingBox, missCount: 0) }
+            }
+        }
         recordSource(source)
         return result
+    }
+
+    /// 低 confidence 最終フォールバックの全画面走査（video パス専用）。
+    private func lowConfDetect(_ image: UIImage) -> [FaceLandmarkSet] {
+        guard let lm = landmarkerLowConf,
+              let mpImage = try? MPImage(uiImage: image),
+              let result = try? lm.detect(image: mpImage),
+              !result.faceLandmarks.isEmpty else { return [] }
+        return convertAll(result)
     }
 
     // MARK: - テンポラル ROI 再検出
