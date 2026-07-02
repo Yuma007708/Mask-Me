@@ -83,6 +83,41 @@ final class DetectionBridgeTests: XCTestCase {
         XCTAssertEqual(result.count, 1)
     }
 
+    func testInterpolatingBridgeLerpsTowardAfter() {
+        let lerp = DetectionBridge(interpolates: true)
+        let cache: [Double: [FaceLandmarkSet]] = [
+            1.0: [face(cx: 0.5, cy: 0.5)],
+            1.2: [face(cx: 0.56, cy: 0.5)]
+        ]
+        // 中間時刻 (alpha=0.5) では centroid も中間の 0.53 になる
+        let result = lerp.faces(in: cache, at: 1.1)
+        XCTAssertEqual(result.count, 1)
+        let cx = result[0].points.map(\.x).reduce(0, +) / Float(result[0].points.count)
+        XCTAssertEqual(cx, 0.53, accuracy: 0.001)
+    }
+
+    func testInterpolatingBridgeAlphaFollowsTimeRatio() {
+        let lerp = DetectionBridge(interpolates: true)
+        let cache: [Double: [FaceLandmarkSet]] = [
+            1.0: [face(cx: 0.5, cy: 0.5)],
+            1.2: [face(cx: 0.56, cy: 0.5)]
+        ]
+        // before に近い時刻では before 寄り (alpha=0.25 → 0.515)
+        let result = lerp.faces(in: cache, at: 1.05)
+        let cx = result[0].points.map(\.x).reduce(0, +) / Float(result[0].points.count)
+        XCTAssertEqual(cx, 0.515, accuracy: 0.001)
+    }
+
+    func testInterpolatingBridgeStillRejectsTeleportedFaces() {
+        let lerp = DetectionBridge(interpolates: true)
+        let cache: [Double: [FaceLandmarkSet]] = [
+            1.0: [face(cx: 0.2, cy: 0.2)],
+            1.2: [face(cx: 0.8, cy: 0.8)]
+        ]
+        // IoU マッチしないペアは lerp モードでも補間されない（別人モーフィング防止）
+        XCTAssertTrue(lerp.faces(in: cache, at: 1.1).isEmpty)
+    }
+
     func testWiderWindowBridgesLongerGap() {
         let wide = DetectionBridge(bridgeWindow: 10.0 / 15.0)
         let cache: [Double: [FaceLandmarkSet]] = [

@@ -18,9 +18,14 @@ public struct DetectionBridge: Sendable {
     /// 5 フレーム = 5/15 秒が既定。これより長い抜けは「顔自体が画面外にいる」
     /// 可能性が高いので外挿しない。
     public var bridgeWindow: Double
+    /// true のとき、ブリッジした顔を before の座標のまま返す（ホールド）のではなく、
+    /// after 側の対応顔へ経過時間比で点単位に線形補間して返す。位置がなめらかに遷移する。
+    /// 対応顔と点数が一致しないペアはホールドにフォールバック。
+    public var interpolates: Bool
 
-    public init(bridgeWindow: Double = 5.0 / 15.0) {
+    public init(bridgeWindow: Double = 5.0 / 15.0, interpolates: Bool = false) {
         self.bridgeWindow = bridgeWindow
+        self.interpolates = interpolates
     }
 
     /// `cache` から時刻 `time` の顔リストを返す。
@@ -40,6 +45,14 @@ public struct DetectionBridge: Sendable {
         guard let before, let after else { return [] }
         // before の顔のうち、after にも「同じ位置 (IoU > 0.3)」で対応する顔があるものだけ補間に使う。
         // 対応しない顔（アウト前の位置のまま、インでは別の場所に出た）は除外。
+        if interpolates {
+            let denom = before.dist + after.dist
+            let alpha = denom > 0 ? Float(before.dist / denom) : 0
+            return before.faces.compactMap { face in
+                guard let match = face.counterpart(in: after.faces) else { return nil }
+                return face.interpolated(to: match, alpha: alpha)
+            }
+        }
         return before.faces.filter { $0.hasCounterpart(in: after.faces) }
     }
 }

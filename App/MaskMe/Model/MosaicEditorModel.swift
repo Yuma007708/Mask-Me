@@ -409,9 +409,10 @@ public final class MosaicEditorModel: ObservableObject {
     // MARK: - 検出キャッシュ参照
 
     /// 指定時刻の顔ランドマークを返す。補間の仕様は `DetectionBridge` を参照
-    /// （プレビュー・エクスポート・精度計測で共通の挙動）。
+    /// （プレビュー・エクスポート・精度計測で共通の挙動）。lerp 有効:
+    /// ブリッジ区間の顔が before 位置のホールドではなく前後の中間位置になめらかに動く。
     func lookupFaces(at time: Double) -> [FaceLandmarkSet] {
-        DetectionBridge().faces(in: detectionCache, at: time)
+        DetectionBridge(interpolates: true).faces(in: detectionCache, at: time)
     }
 
     /// 選択中の顔に対応する、指定時刻のランドマークセットを返す。
