@@ -59,15 +59,38 @@ public struct FaceDetectionSourceStats {
 /// framework-agnostic `FaceLandmarkSet` consumed by `MosaicRenderer`.
 public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
     private let landmarker: FaceLandmarker
-    /// VID モードのとき、補助検出器で見つけた追加 bbox を ROI として食わせる
-    /// 専用の IMG モード landmarker。VID は1ストリームに専用なので別インスタンスが要る。
-    /// bboxDetector == nil、または runningMode が .image のときは nil。
+    /// VID モードのとき、bbox を ROI として食わせる専用の IMG モード landmarker。
+    /// VID は1ストリームに専用なので別インスタンスが要る。用途は2つ:
+    /// (1) 補助検出器が見つけた新規 bbox の再検出、(2) テンポラル ROI 再検出
+    /// （前フレームで検出した顔の周辺の再走査）。runningMode == .video なら常時生成。
     private let landmarkerForCrop: FaceLandmarker?
     private let ciContext = CIContext(options: [.useSoftwareRenderer: false])
     private let plausibilityMinSpan: CGFloat
     private let plausibilityEyeRatioRange: ClosedRange<CGFloat>
     /// 補助 bbox 検出器（Vision / Core ML / 並走など）。nil なら MP 単独。
     private let bboxDetector: FaceBBoxDetecting?
+
+    // MARK: - テンポラル追跡（video モード専用）
+    //
+    // 全画面パイプライン（MP → enhance → 補助検出器）が全滅したフレームで、
+    // 「前フレームで顔があった場所の周辺」だけを切り出して IMG モードで再走査する。
+    // 顔は 1/15 秒で大きく動かないので、全画面では小さすぎ/暗すぎて拾えない顔も
+    // 拡大された ROI 内でなら検出できることが多い。
+    //
+    // invariant: video モードの adapter インスタンスは「単一動画ストリームを時刻順に
+    // 直列処理する」用途専用（DValid テストはメソッドごとに独立インスタンス、
+    // アプリはプリスキャン Task / export キューが直列に使う）。並行呼び出しは想定しない。
+    private struct TrackedFace {
+        var box: CGRect
+        var missCount: Int
+    }
+    private var trackedFaces: [TrackedFace] = []
+    private var lastVideoTimestampMs: Int = .min
+    /// ROI は前フレーム bbox を中心固定で何倍に広げるか。
+    private let roiExpansion: CGFloat = 2.0
+    /// 何フレーム連続で ROI 再検出に失敗したら track を破棄するか
+    /// （15fps サンプリングで 8 フレーム ≒ 0.53 秒）。誤検出 track の自己増殖を防ぐ上限。
+    private let maxTrackMisses = 8
 
     /// 直近フレームで最初の顔を提供した検出ソース（未検出なら `.none`）。
     /// インスタンスは単一ストリーム直列使用が前提（テスト・アプリとも直列）。
@@ -115,9 +138,11 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
             useFaceDetector: settings.useFaceDetector,
             useYunet: settings.useYunet
         )
-        // VID モードかつ補助検出器があるなら、ROI 再検出用に IMG モードの landmarker を追加で持つ。
+        // VID モードなら ROI 再検出用に IMG モードの landmarker を常時持つ
+        // （補助検出器の新規 bbox 再検出と、テンポラル ROI 再検出の両方で使う。
+        // 補助検出器なしの構成でもテンポラル追跡は動かしたい）。
         // IMG モード本体では同じ landmarker をそのまま使えるので追加不要。
-        if bboxDetector != nil && runningMode == .video {
+        if runningMode == .video {
             let imgOptions = FaceLandmarkerOptions()
             imgOptions.baseOptions.modelAssetPath = modelPath
             imgOptions.runningMode = .image
@@ -173,14 +198,105 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
     }
 
     public func allLandmarks(in image: UIImage, timestampMs: Int) -> [FaceLandmarkSet] {
+        resetTracksIfNeeded(timestampMs: timestampMs)
         let (mp, mpSource) = mpDetectVideoWithEnhance(image, timestampMs: timestampMs)
-        guard bboxDetector != nil else {
-            recordSource(mp.isEmpty ? .none : mpSource)
-            return mp
+        var result: [FaceLandmarkSet]
+        var source: FaceDetectionSource
+        if bboxDetector != nil {
+            result = augmentWithBBoxDetector(image: image, mpResults: mp, useImageMode: false)
+            source = mp.isEmpty ? (result.isEmpty ? .none : .bbox) : mpSource
+        } else {
+            result = mp
+            source = mp.isEmpty ? .none : mpSource
         }
-        let result = augmentWithBBoxDetector(image: image, mpResults: mp, useImageMode: false)
-        recordSource(mp.isEmpty ? (result.isEmpty ? .none : .bbox) : mpSource)
+        if result.isEmpty {
+            // 全画面パイプライン全滅 → 前フレームの顔位置周辺だけを再走査する最終手段。
+            result = redetectFromTrackedBoxes(image: image)
+            source = result.isEmpty ? .none : .roi
+        } else {
+            trackedFaces = result.map { TrackedFace(box: $0.boundingBox, missCount: 0) }
+        }
+        recordSource(source)
         return result
+    }
+
+    // MARK: - テンポラル ROI 再検出
+
+    /// タイムスタンプが巻き戻った（新ストリーム/リスタート）か 1 秒を超えて飛んだ
+    /// （シーク）場合は、前フレームの顔位置がもう意味を持たないので track を捨てる。
+    private func resetTracksIfNeeded(timestampMs: Int) {
+        if lastVideoTimestampMs != .min,
+           timestampMs <= lastVideoTimestampMs || timestampMs - lastVideoTimestampMs > 1000 {
+            trackedFaces.removeAll()
+        }
+        lastVideoTimestampMs = timestampMs
+    }
+
+    /// 前フレームで検出した顔の bbox を広げた ROI を IMG モードで再走査する。
+    /// 採用条件は「妥当な顔であること」に加えて「前フレームと同じ顔とみなせる連続性」
+    /// （IoU > 0.1 かつ面積比 0.3〜3.0）。誤検出が track を乗っ取って居座るのを防ぐ。
+    private func redetectFromTrackedBoxes(image: UIImage) -> [FaceLandmarkSet] {
+        guard let cropLandmarker = landmarkerForCrop, !trackedFaces.isEmpty else { return [] }
+        var results: [FaceLandmarkSet] = []
+        for index in trackedFaces.indices {
+            let oldBox = trackedFaces[index].box
+            let roi = expandedClamped(oldBox, factor: roiExpansion)
+            guard roi.width > 0, roi.height > 0,
+                  let cropped = cropImage(image, normalizedRect: roi),
+                  let mpImage = try? MPImage(uiImage: upscaledIfSmall(cropped)),
+                  let result = try? cropLandmarker.detect(image: mpImage),
+                  let face = result.faceLandmarks.first else {
+                trackedFaces[index].missCount += 1
+                continue
+            }
+            let points = face.map { FaceLandmark(x: $0.x, y: $0.y, z: $0.z) }
+            let confidence: Float = points.count >= FaceLandmarkSet.fullMeshCount ? 1.0 : 0.6
+            let remapped = FaceLandmarkSet(points: points, confidence: confidence)
+                .remapped(into: roi)
+            let newBox = remapped.boundingBox
+            let areaRatio = oldBox.width * oldBox.height > 0
+                ? (newBox.width * newBox.height) / (oldBox.width * oldBox.height)
+                : 0
+            guard remapped.isPlausibleFace(
+                      minSpan: plausibilityMinSpan,
+                      eyeRatioRange: plausibilityEyeRatioRange
+                  ),
+                  iou(newBox, oldBox) > 0.1,
+                  (0.3...3.0).contains(areaRatio) else {
+                trackedFaces[index].missCount += 1
+                continue
+            }
+            trackedFaces[index] = TrackedFace(box: newBox, missCount: 0)
+            results.append(remapped)
+        }
+        trackedFaces.removeAll { $0.missCount >= maxTrackMisses }
+        return results
+    }
+
+    /// `rect` を中心固定で `factor` 倍に広げ、[0, 1] にクランプした矩形を返す。
+    /// クランプ後の矩形を crop と remap の両方に使うことで座標系のズレを避ける。
+    private func expandedClamped(_ rect: CGRect, factor: CGFloat) -> CGRect {
+        let cx = rect.midX, cy = rect.midY
+        let w = rect.width * factor, h = rect.height * factor
+        let x0 = max(0, cx - w / 2), y0 = max(0, cy - h / 2)
+        let x1 = min(1, cx + w / 2), y1 = min(1, cy + h / 2)
+        return CGRect(x: x0, y: y0, width: x1 - x0, height: y1 - y0)
+    }
+
+    /// 小さい ROI crop は MediaPipe の検出下限を割りやすいので、短辺が `minSide` px
+    /// 未満なら拡大してから検出させる（小顔対策）。
+    private func upscaledIfSmall(_ image: UIImage, minSide: CGFloat = 256) -> UIImage {
+        guard let cg = image.cgImage else { return image }
+        let w = CGFloat(cg.width), h = CGFloat(cg.height)
+        let side = min(w, h)
+        guard side > 0, side < minSide else { return image }
+        let scale = minSide / side
+        let newSize = CGSize(width: (w * scale).rounded(), height: (h * scale).rounded())
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        return UIGraphicsImageRenderer(size: newSize, format: format).image { _ in
+            image.draw(in: CGRect(origin: .zero, size: newSize))
+        }
     }
 
     // MARK: - MediaPipe (既存ロジックを切り出し)
