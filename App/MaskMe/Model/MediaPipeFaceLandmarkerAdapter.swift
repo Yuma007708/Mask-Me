@@ -88,11 +88,20 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
     }
     private var trackedFaces: [TrackedFace] = []
     private var lastVideoTimestampMs: Int = .min
-    /// ROI は前フレーム bbox を中心固定で何倍に広げるか。
+    /// ROI は前フレーム bbox を中心固定で何倍に広げるか（基本値）。ミスが続くほど顔が
+    /// 元位置から離れている可能性が上がるため、missCount に応じて漸増させ上限で頭打ち。
     private let roiExpansion: CGFloat = 2.0
+    private let roiExpansionPerMiss: CGFloat = 0.1
+    private let roiExpansionMax: CGFloat = 3.0
     /// 何フレーム連続で ROI 再検出に失敗したら track を破棄するか
-    /// （15fps サンプリングで 8 フレーム ≒ 0.53 秒）。誤検出 track の自己増殖を防ぐ上限。
-    private let maxTrackMisses = 8
+    /// （15fps サンプリングで 20 フレーム ≒ 1.3 秒）。誤検出 track の自己増殖を防ぐ上限。
+    /// 継続性ガード（IoU・面積比）と漸増 ROI がある前提で、実績のある ROI 強調リトライを
+    /// なるべく長く生かす。
+    private let maxTrackMisses = 20
+    /// track が生きていても、全 track がこのフレーム数連続ミスしたらタイル分割再走査を
+    /// 併走させる（track 死亡まで待つとギャップが伸びる。実測: 同位置の小顔の再取得に
+    /// 10 フレーム以上かかるケースの短縮が狙い）。
+    private let tileKickInMisses = 5
 
     /// 通常パイプライン + テンポラル ROI が全滅したフレーム専用の最終フォールバック。
     /// confidence を極端に下げた IMG モード landmarker で全画面をもう一度だけ走査する。
@@ -247,8 +256,9 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
                 trackedFaces = result.map { TrackedFace(box: $0.boundingBox, missCount: 0) }
             }
         }
-        if result.isEmpty, trackedFaces.isEmpty {
-            // track も無い長期ロスト時のみ、フレームをタイル分割して再走査する。
+        if result.isEmpty, trackedFaces.allSatisfy({ $0.missCount >= tileKickInMisses }) {
+            // track 無し（allSatisfy は空配列で true）、または全 track が連続ミス中の
+            // 長期ロスト時のみ、フレームをタイル分割して再走査する。
             // 全画面検出はモデル入力への縮小で小顔が潰れるため、タイル crop で
             // 顔の相対サイズを稼ぐ（実測: フレーム比 10% 台の顔は全画面 + enhance
             // 全滅でもタイル内なら検出できる）。成功したら track を再シードして
@@ -290,17 +300,18 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
         CGRect(x: 0.25, y: 0.25, width: 0.5, height: 0.5)
     ]
 
-    /// track なし長期ロスト専用の最終フォールバック。各タイル crop を IMG モードで
-    /// 再走査し（素 → だめなら aggressive 強調フレームの同タイル）、タイル座標から
+    /// 長期ロスト専用の最終フォールバック。各タイル crop を IMG モードで
+    /// 再走査し（素 → aggressive → backlight 強調フレームの同タイル）、タイル座標から
     /// 元画像座標へ逆変換して返す。lowConf と同じ理由で eyeRatio 下限は 0.45 に厳格化し、
     /// 重なりタイルが同じ顔を二重に拾った分は IoU で間引く。
     private func tiledDetect(_ image: UIImage) -> [FaceLandmarkSet] {
         guard let cropLandmarker = landmarkerForCrop else { return [] }
         let enhanced = enhance(image, level: .aggressive)
+        let backlit = enhance(image, level: .backlight)
         var found: [FaceLandmarkSet] = []
         for tile in Self.detectionTiles {
             var candidate: FaceLandmarkSet?
-            for variant in [image, enhanced].compactMap({ $0 }) {
+            for variant in [image, enhanced, backlit].compactMap({ $0 }) {
                 guard let cropped = cropImage(variant, normalizedRect: tile),
                       let mpImage = try? MPImage(uiImage: cropped),
                       let result = try? cropLandmarker.detect(image: mpImage),
@@ -340,7 +351,11 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
         var results: [FaceLandmarkSet] = []
         for index in trackedFaces.indices {
             let oldBox = trackedFaces[index].box
-            let roi = expandedClamped(oldBox, factor: roiExpansion)
+            let factor = min(
+                roiExpansion + roiExpansionPerMiss * CGFloat(trackedFaces[index].missCount),
+                roiExpansionMax
+            )
+            let roi = expandedClamped(oldBox, factor: factor)
             guard roi.width > 0, roi.height > 0,
                   let cropped = cropImage(image, normalizedRect: roi) else {
                 trackedFaces[index].missCount += 1
