@@ -269,6 +269,19 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
                 trackedFaces = result.map { TrackedFace(box: $0.boundingBox, missCount: 0) }
             }
         }
+        if !result.isEmpty {
+            let verified = verifySuspiciousFaces(result, in: image)
+            if verified.count != result.count {
+                let droppedBoxes = result.map(\.boundingBox).filter { box in
+                    !verified.contains { $0.boundingBox == box }
+                }
+                // 棄却した候補の track だけを外科的に殺す（ROI 延命が体 track を
+                // 引きずるのを防ぐ）。他 track の missCount 状態は保持する。
+                trackedFaces.removeAll { tf in droppedBoxes.contains { iou(tf.box, $0) > 0.5 } }
+                result = verified
+                if result.isEmpty { source = .none }
+            }
+        }
         recordSource(source)
         return result
     }
@@ -335,6 +348,38 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
 
     /// タイムスタンプが巻き戻った（新ストリーム/リスタート）か 1 秒を超えて飛んだ
     /// （シーク）場合は、前フレームの顔位置がもう意味を持たないので track を捨てる。
+    /// 画面下寄りの採用候補に対する体誤フィット検証パス。s5 実測で誤モザイク（lowCy）の
+    /// 大半が画面下半分（胸・股への顔メッシュフィット)に集中し、mp/enhance 経路にも
+    /// baseline から存在するため、最終採用の直前に「疑わしい位置」の候補だけを再確認する:
+    /// bbox の 1.3 倍 crop を IMG モードで再検出し、eyeRatio ≥ 0.45（lowConf/タイルと同じ
+    /// 厳格値）+ 位置一致（IoU>0.3）を満たさなければ棄却。体フィットは文脈（video モードの
+    /// 追跡状態）が切れたタイト crop では再現しにくく、実顔は再検出できるという非対称を使う。
+    /// 上半分の候補には一切触れないので、正位置の検出率への影響はない。
+    private let verifySuspectCy: CGFloat = 0.55
+    private let verifyCropExpansion: CGFloat = 1.3
+
+    private func verifySuspiciousFaces(_ faces: [FaceLandmarkSet], in image: UIImage) -> [FaceLandmarkSet] {
+        guard let cropLandmarker = landmarkerForCrop else { return faces }
+        return faces.filter { face in
+            let box = face.boundingBox
+            guard box.midY > verifySuspectCy else { return true }
+            guard face.isPlausibleFace(minSpan: plausibilityMinSpan, eyeRatioRange: 0.45...1.0) else {
+                return false
+            }
+            let roi = expandedClamped(box, factor: verifyCropExpansion)
+            guard roi.width > 0, roi.height > 0,
+                  let cropped = cropImage(image, normalizedRect: roi),
+                  let mpImage = try? MPImage(uiImage: upscaledIfSmall(cropped)),
+                  let result = try? cropLandmarker.detect(image: mpImage),
+                  let first = result.faceLandmarks.first else { return false }
+            let points = first.map { FaceLandmark(x: $0.x, y: $0.y, z: $0.z) }
+            let confidence: Float = points.count >= FaceLandmarkSet.fullMeshCount ? 1.0 : 0.6
+            let redetected = FaceLandmarkSet(points: points, confidence: confidence)
+                .remapped(into: roi)
+            return iou(redetected.boundingBox, box) > 0.3
+        }
+    }
+
     private func resetTracksIfNeeded(timestampMs: Int) {
         if lastVideoTimestampMs != .min,
            timestampMs <= lastVideoTimestampMs || timestampMs - lastVideoTimestampMs > 1000 {

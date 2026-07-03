@@ -20,7 +20,10 @@ jobs:
   test:
     name: ${{ matrix.video }} / ${{ matrix.backend }} / ${{ matrix.half }}
     runs-on: macos-15
-    timeout-minutes: 60
+    # s3 の A/B ハーフは 1 attempt に 35〜48 分かかるため、VM クラッシュで
+    # 1 回リトライすると 60 分では attempt 2 の途中で確実に詰む（2 回実測）。
+    # 2 attempt 分 + 余裕で 90 分。
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
