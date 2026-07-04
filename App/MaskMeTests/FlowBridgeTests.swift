@@ -223,5 +223,33 @@ final class FlowBridgeTests: XCTestCase {
         throw XCTSkip("DEBUG限定のテスト専用シーム(simulateDetectionFailureForTesting)を使うため、DEBUGビルドでのみ実行可能")
         #endif
     }
+
+    // MARK: - (d) 面積ゲート isFlowBridgeEligible の境界
+
+    /// 実顔（≤0.06）は通し、s5の体誤検出相当（0.11〜0.17）は弾く面積ゲートの境界確認。
+    /// 実検出・フローの状態機械には触れず、純粋関数としての境界のみを検証する。
+    func test_isFlowBridgeEligible_boundary() throws {
+        let adapter = try makeAdapter()
+
+        let area006 = CGRect(x: 0, y: 0, width: 0.3, height: 0.2)
+        XCTAssertTrue(
+            adapter.isFlowBridgeEligible(area006),
+            "面積0.06（真顔相当）は適格のはず"
+        )
+
+        // 0.4×0.2 は浮動小数点誤差で 0.08000000000000002 (> 0.08) になるため、
+        // 二進表現で厳密に 0.08 になる組み合わせ (0.16×0.5) を使う。
+        let area008 = CGRect(x: 0, y: 0, width: 0.16, height: 0.5)
+        XCTAssertTrue(
+            adapter.isFlowBridgeEligible(area008),
+            "面積0.08ちょうど（上限）は適格のはず（境界含む）"
+        )
+
+        let area012 = CGRect(x: 0, y: 0, width: 0.4, height: 0.3)
+        XCTAssertFalse(
+            adapter.isFlowBridgeEligible(area012),
+            "面積0.12（体誤検出相当）は不適格のはず"
+        )
+    }
 }
 #endif

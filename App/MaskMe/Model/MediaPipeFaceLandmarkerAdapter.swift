@@ -108,6 +108,10 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
     /// 連続フロー供給の上限フレーム数（15fps サンプリングで 30 ≒ 2 秒）。
     /// ドリフト（ズレの蓄積）で実顔から外れたまま供給し続けるのを防ぐ。
     private let maxFlowFrames = 30
+    /// フローブリッジを許可するトラックbboxの正規化面積上限。
+    /// 実測: 真顔の面積は s1/s2/s5 全てで ≤0.06、s5の体誤検出は 0.11〜0.17（DVALFRAME分析、2026-07-04）。
+    /// これを超えるトラックはブリッジせずミス扱い（baseline挙動に戻るだけの安全な劣化）。
+    private let maxFlowBridgeArea: CGFloat = 0.08
     private let maxFlowTracks = 3
     private var consecutiveFlowFrames = 0
     /// ROI は前フレーム bbox を中心固定で何倍に広げるか（基本値）。ミスが続くほど顔が
@@ -339,6 +343,10 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
             // index が重複してしまい、誤 track の bbox を上書きしうるため）。
             var claimedTrackedIndices: Set<Int> = []
             for var state in flowStates {
+                // 面積ゲート: 真顔として妥当な大きさのトラックのみブリッジ対象にする
+                // （s5の体誤検出のような大型bboxはここで seed/advance をスキップして
+                // 従来の「全段失敗」＝ミス扱いに落とす）。
+                guard isFlowBridgeEligible(state.lastLandmarks.boundingBox) else { continue }
                 guard let match = state.tracker.advance(with: image),
                       let transform = SimilarityTransform.estimate(
                           from: match.previousPoints.map(\.cgPointValue),
@@ -381,6 +389,12 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
         }
         recordSource(source)
         return result
+    }
+
+    /// トラックの正規化bbox面積が、フローブリッジしてよい「顔として妥当な」範囲か。
+    /// `@testable` からユニットテストで直接境界を検証できるよう internal にしている。
+    func isFlowBridgeEligible(_ normalizedBox: CGRect) -> Bool {
+        normalizedBox.width * normalizedBox.height <= maxFlowBridgeArea
     }
 
     /// 低 confidence 最終フォールバックの全画面走査（video パス専用）。
