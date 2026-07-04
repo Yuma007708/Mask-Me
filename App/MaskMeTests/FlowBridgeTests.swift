@@ -1,4 +1,5 @@
 import XCTest
+import AVFoundation
 import MosaicCore
 @testable import MaskMe
 
@@ -8,32 +9,72 @@ import MediaPipeTasksVision
 /// `MediaPipeFaceLandmarkerAdapter` の「検出全滅フレームをオプティカルフローで
 /// ブリッジする」状態機械（src=flow・連続上限30・実検出復帰で再seed）を検証する。
 ///
+/// seed 用の実顔フレームは `DValidVideoTests` と同じ方式でサンプル動画から取得する:
+/// 環境変数 `SAMPLE_VIDEO_DIR` の指すディレクトリの `s2.mov`（検出率が最も安定）の
+/// 中盤付近から `AVAssetImageGenerator` で1フレーム切り出す。環境変数未設定 or
+/// 動画不在の場合のみ `XCTSkip`（`DValidVideoTests` と同条件）。
+///
 /// MediaPipe の実検出を決定論的に全滅させるため、Adapter の DEBUG 専用テストシーム
 /// `simulateDetectionFailureForTesting` を使う（true の間は検出パイプライン全段を
-/// スキップし、そのフレームを「検出全滅」として扱う）。実顔画像は
-/// `DetectionAccuracyTests` と同じ `Fixtures/faces` を流用し、既知量だけ平行移動した
-/// フレームを CoreGraphics で生成して与える（余白は黒。移動後も顔領域自体は写っている
-/// ので疎 LK は追跡できる）。
-///
-/// MediaPipe pod・モデル・実顔フィクスチャが必要なため、欠けている場合や実顔フィク
-/// スチャがこの環境で検出できない場合は、失敗ではなく `XCTSkip` する
-/// （`DetectionAccuracyTests` と同じ方針）。
+/// スキップし、そのフレームを「検出全滅」として扱う）。平行移動フレームは取得した
+/// seed フレームから CoreGraphics で生成する（余白は黒。移動後も顔領域自体は
+/// 写っているので疎 LK は追跡できる）。
 final class FlowBridgeTests: XCTestCase {
 
+    private var videoDir: String { ProcessInfo.processInfo.environment["SAMPLE_VIDEO_DIR"] ?? "" }
+
+    /// MediaPipe モデルはテストホスト (MaskMe.app) のバンドルから解決する
+    /// （`makeFaceLandmarker` と同じ経路。FixtureLoader は使わない）。
     private func makeAdapter() throws -> MediaPipeFaceLandmarkerAdapter {
-        guard let modelPath = FixtureLoader.modelPath() else {
-            throw XCTSkip("face_landmarker.task が見つかりません（Fixtures に配置してください）")
+        guard let modelPath = Bundle.main.path(forResource: "face_landmarker", ofType: "task") else {
+            throw XCTSkip("face_landmarker.task がアプリバンドルにありません")
         }
-        return try MediaPipeFaceLandmarkerAdapter(modelPath: modelPath, runningMode: .video)
+        // DValidVideoTests の .off backend と同じ MP 単独構成（決定論性優先）。
+        var settings = DetectionSettings()
+        settings.faceDetectorBackend = .off
+        return try MediaPipeFaceLandmarkerAdapter(
+            modelPath: modelPath, runningMode: .video, settings: settings
+        )
     }
 
-    private func firstFaceImage() throws -> UIImage {
-        let faces = FixtureLoader.images(in: "faces")
-        try XCTSkipIf(faces.isEmpty, "Fixtures/faces に顔画像がありません")
-        return faces[0]
+    /// s2.mov の中盤付近から「実検出が成功する」フレームを1枚探して返す。
+    /// s2 は検出率 88.9% で最も安定しているため、中盤±数フレームの走査で必ず見つかる想定。
+    /// 動画不在時のみ XCTSkip。見つからなければ XCTFail（環境ではなく検出の退行を疑う）。
+    private func loadDetectableSeedFrame() async throws -> UIImage {
+        try XCTSkipIf(videoDir.isEmpty, "SAMPLE_VIDEO_DIR 未設定（ローカルでは XCTSkip）")
+        let url = URL(fileURLWithPath: "\(videoDir)/s2.mov")
+        try XCTSkipIf(!FileManager.default.fileExists(atPath: url.path),
+                      "\(url.path) が存在しません")
+
+        let asset = AVAsset(url: url)
+        let duration = try await asset.load(.duration).seconds
+        XCTAssertGreaterThan(duration, 0)
+
+        let gen = AVAssetImageGenerator(asset: asset)
+        gen.appliesPreferredTrackTransform = true
+        gen.requestedTimeToleranceBefore = CMTime(seconds: 0.067, preferredTimescale: 600)
+        gen.requestedTimeToleranceAfter  = CMTime(seconds: 0.067, preferredTimescale: 600)
+
+        // 検出可否の判定は使い捨ての probe 用 adapter で行い、本編のテスト対象 adapter の
+        // 内部状態（trackedFaces / flowStates / タイムスタンプ）を汚さない。
+        let probe = try makeAdapter()
+        let mid = duration / 2
+        let candidates = stride(from: 0.0, through: 3.0, by: 0.5).map { mid + $0 }
+        for (i, t) in candidates.enumerated() where t < duration {
+            guard let cg = try? gen.copyCGImage(
+                at: CMTime(seconds: t, preferredTimescale: 600), actualTime: nil
+            ) else { continue }
+            let img = UIImage(cgImage: cg)
+            if !probe.allLandmarks(in: img, timestampMs: i * 100).isEmpty {
+                return img
+            }
+        }
+        XCTFail("s2.mov 中盤 \(mid)s 付近で実検出可能なフレームが見つかりませんでした")
+        throw XCTSkip("seed フレーム取得失敗")
     }
 
     /// `image` を黒背景の同サイズキャンバスに (dx, dy) だけずらして描き直す。
+    /// AVAssetImageGenerator 由来のフレームは scale=1 なのでポイント=ピクセル。
     /// 余白は黒でよい。移動後も顔領域自体はフレーム内に残るので LK は追跡できる。
     private func translated(_ image: UIImage, dx: CGFloat, dy: CGFloat) -> UIImage {
         let format = UIGraphicsImageRendererFormat()
@@ -52,34 +93,30 @@ final class FlowBridgeTests: XCTestCase {
         return CGSize(width: cg.width, height: cg.height)
     }
 
-    /// 種フレームを実検出させ、trackedFaces / flowStates を seed する。
-    /// 実顔フィクスチャがこの環境の MediaPipe で検出できない場合は XCTSkip する
-    /// （フロー状態機械そのものの欠陥ではなく環境依存の検出可否のため）。
+    /// seed フレームを実検出させ、trackedFaces / flowStates を seed する。
     @discardableResult
     private func seedWithRealDetection(
         _ adapter: MediaPipeFaceLandmarkerAdapter,
         image: UIImage,
         timestampMs: Int
-    ) throws -> FaceLandmarkSet {
+    ) -> FaceLandmarkSet? {
         adapter.simulateDetectionFailureForTesting = false
         let result = adapter.allLandmarks(in: image, timestampMs: timestampMs)
-        try XCTSkipIf(
-            result.isEmpty,
-            "実顔フィクスチャがこの環境の MediaPipe で検出されませんでした（BLOCKED候補）"
-        )
-        XCTAssertEqual(adapter.lastSource, .mp, "seed フレームは src=mp で検出されるはず")
-        return result[0]
+        XCTAssertFalse(result.isEmpty, "seed フレームは実検出に成功するはず（probe 済み）")
+        XCTAssertNotEqual(adapter.lastSource, .flow, "seed フレームは実検出ソースのはず")
+        XCTAssertNotEqual(adapter.lastSource, .none)
+        return result.first
     }
 
     // MARK: - (a) 既知量の平行移動をフローが前進として反映する
 
-    func test_flowBridge_translatesLandmarksOnKnownShift() throws {
+    func test_flowBridge_translatesLandmarksOnKnownShift() async throws {
         #if DEBUG
+        let baseImage = try await loadDetectableSeedFrame()
         let adapter = try makeAdapter()
-        let baseImage = try firstFaceImage()
         let size = pixelSize(of: baseImage)
 
-        let seeded = try seedWithRealDetection(adapter, image: baseImage, timestampMs: 0)
+        let seeded = try XCTUnwrap(seedWithRealDetection(adapter, image: baseImage, timestampMs: 0))
         let baseFlowFrames = adapter.sourceStats.flowFrames
 
         let dx: CGFloat = 12, dy: CGFloat = 8
@@ -114,11 +151,11 @@ final class FlowBridgeTests: XCTestCase {
 
     // MARK: - (b) 連続上限30フレームで打ち切られる
 
-    func test_flowBridge_stopsAfterMaxConsecutiveFrames() throws {
+    func test_flowBridge_stopsAfterMaxConsecutiveFrames() async throws {
         #if DEBUG
+        let baseImage = try await loadDetectableSeedFrame()
         let adapter = try makeAdapter()
-        let baseImage = try firstFaceImage()
-        try seedWithRealDetection(adapter, image: baseImage, timestampMs: 0)
+        XCTAssertNotNil(seedWithRealDetection(adapter, image: baseImage, timestampMs: 0))
 
         let shifted = translated(baseImage, dx: 12, dy: 8)
         adapter.simulateDetectionFailureForTesting = true
@@ -145,11 +182,11 @@ final class FlowBridgeTests: XCTestCase {
 
     // MARK: - (c) 上限打ち切り後、実検出復帰で再seed・カウンタリセットされる
 
-    func test_flowBridge_reseedsAfterRealDetectionReturns() throws {
+    func test_flowBridge_reseedsAfterRealDetectionReturns() async throws {
         #if DEBUG
+        let baseImage = try await loadDetectableSeedFrame()
         let adapter = try makeAdapter()
-        let baseImage = try firstFaceImage()
-        try seedWithRealDetection(adapter, image: baseImage, timestampMs: 0)
+        XCTAssertNotNil(seedWithRealDetection(adapter, image: baseImage, timestampMs: 0))
 
         let shifted = translated(baseImage, dx: 12, dy: 8)
         adapter.simulateDetectionFailureForTesting = true
@@ -168,11 +205,9 @@ final class FlowBridgeTests: XCTestCase {
         adapter.simulateDetectionFailureForTesting = false
         ts += 10
         let recovered = adapter.allLandmarks(in: baseImage, timestampMs: ts)
-        try XCTSkipIf(
-            recovered.isEmpty,
-            "実顔フィクスチャがこの環境の MediaPipe で検出されませんでした（BLOCKED候補）"
-        )
-        XCTAssertEqual(adapter.lastSource, .mp, "実検出復帰フレームは src=mp のはず")
+        XCTAssertFalse(recovered.isEmpty, "seed 可能フレームなので実検出に復帰するはず")
+        XCTAssertNotEqual(adapter.lastSource, .flow, "復帰フレームは実検出ソースのはず")
+        XCTAssertNotEqual(adapter.lastSource, .none)
 
         // 再seedされているはずなので、フラグを戻せば再びフローが供給される。
         adapter.simulateDetectionFailureForTesting = true
