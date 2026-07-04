@@ -44,6 +44,7 @@ public enum FaceDetectionSource: String {
     case roi         // テンポラル ROI 再検出（前フレーム bbox）
     case lowConf = "low"  // 低 confidence 最終フォールバック
     case tiled = "tile"   // タイル分割再検出（track なしの長期ロスト用）
+    case flow        // オプティカルフロー・ブリッジ（検出ではなく追跡による補完）
     case none = ""   // 未検出
 }
 
@@ -55,6 +56,7 @@ public struct FaceDetectionSourceStats {
     public var roiFrames = 0
     public var lowConfFrames = 0
     public var tiledFrames = 0
+    public var flowFrames = 0
 }
 
 /// Thin wrapper around MediaPipe's `FaceLandmarker` that produces the
@@ -88,6 +90,26 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
     }
     private var trackedFaces: [TrackedFace] = []
     private var lastVideoTimestampMs: Int = .min
+
+    // MARK: - オプティカルフロー・ブリッジ（video モード専用）
+    //
+    // 検出パイプライン全段（MP → enhance → bbox → ROI → lowConf → タイル → 顔検証）が
+    // 全滅したフレームを、OpenCV 疎 LK の「画素の動き」でブリッジする。検出器は
+    // 「顔らしい見た目」が消えたフレーム（横顔・後ろ向き・強ブレ・極暗）で原理的に
+    // 全滅するが、フローは顔かどうかを見ないため位置の供給を続けられる。
+    //
+    // 出力は src=flow でタグ付けし、rate（生検出率）には算入しない（DValid 側で区別）。
+    // フローは顔の存在を証明しないため、trackedFaces の missCount には触らない。
+    private struct FlowState {
+        let tracker: OpticalFlowTracker
+        var lastLandmarks: FaceLandmarkSet
+    }
+    private var flowStates: [FlowState] = []
+    /// 連続フロー供給の上限フレーム数（15fps サンプリングで 30 ≒ 2 秒）。
+    /// ドリフト（ズレの蓄積）で実顔から外れたまま供給し続けるのを防ぐ。
+    private let maxFlowFrames = 30
+    private let maxFlowTracks = 3
+    private var consecutiveFlowFrames = 0
     /// ROI は前フレーム bbox を中心固定で何倍に広げるか（基本値）。ミスが続くほど顔が
     /// 元位置から離れている可能性が上がるため、missCount に応じて漸増させ上限で頭打ち。
     private let roiExpansion: CGFloat = 2.0
@@ -134,6 +156,7 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
         case .roi:      sourceStats.roiFrames += 1
         case .lowConf:  sourceStats.lowConfFrames += 1
         case .tiled:    sourceStats.tiledFrames += 1
+        case .flow:     sourceStats.flowFrames += 1
         case .none:     break
         }
     }
@@ -282,6 +305,52 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
                 if result.isEmpty { source = .none }
             }
         }
+        if result.isEmpty, !flowStates.isEmpty, consecutiveFlowFrames < maxFlowFrames {
+            // 検出全滅 → フローで前回ランドマークを前進させてブリッジする。
+            // 顔検証パス（タイト crop 再検出）は「検出器で見える顔」しか通せないため、
+            // フロー出力には適用しない（検出器が全滅したからこそフローに来ている）。
+            // 誤検出の延命は品質ゲート・上限フレーム・lowCy 番犬の3重で抑える。
+            let imageSize = pixelSize(of: image)
+            var flowFaces: [FaceLandmarkSet] = []
+            var survivors: [FlowState] = []
+            for var state in flowStates {
+                guard let match = state.tracker.advance(with: image),
+                      let transform = SimilarityTransform.estimate(
+                          from: match.previousPoints.map(\.cgPointValue),
+                          to: match.currentPoints.map(\.cgPointValue)),
+                      (0.7...1.4).contains(transform.scale) else { continue }
+                let moved = transform.apply(to: state.lastLandmarks, imageSize: imageSize)
+                state.lastLandmarks = moved
+                flowFaces.append(moved)
+                survivors.append(state)
+                // 対応する track の bbox も前進させ、次フレームの ROI 再検出が
+                // フロー予測位置を走査できるようにする（実顔再取得の早期化）。
+                let movedBox = moved.boundingBox
+                if let ti = trackedFaces.indices.max(by: {
+                    iou(trackedFaces[$0].box, movedBox) < iou(trackedFaces[$1].box, movedBox)
+                }), iou(trackedFaces[ti].box, movedBox) > 0.1 {
+                    trackedFaces[ti].box = movedBox
+                }
+            }
+            flowStates = survivors
+            if !flowFaces.isEmpty {
+                result = flowFaces
+                source = .flow
+                consecutiveFlowFrames += 1
+            }
+        } else if result.isEmpty {
+            flowStates = []
+        }
+        if !result.isEmpty, source != .flow {
+            // 実検出(どのソースでも)に成功したらフローを再シードする。
+            // seed は縮小 ROI の特徴点抽出のみで軽量（〜1ms）なので毎フレーム行う。
+            consecutiveFlowFrames = 0
+            flowStates = result.prefix(maxFlowTracks).compactMap { face in
+                let tracker = OpticalFlowTracker()
+                guard tracker.seed(with: image, faceBox: face.boundingBox) else { return nil }
+                return FlowState(tracker: tracker, lastLandmarks: face)
+            }
+        }
         recordSource(source)
         return result
     }
@@ -384,6 +453,8 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
         if lastVideoTimestampMs != .min,
            timestampMs <= lastVideoTimestampMs || timestampMs - lastVideoTimestampMs > 1000 {
             trackedFaces.removeAll()
+            flowStates = []
+            consecutiveFlowFrames = 0
         }
         lastVideoTimestampMs = timestampMs
     }
@@ -545,6 +616,12 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
             }
         }
         return mpResults + extras
+    }
+
+    /// UIImage のピクセル寸法（UIImage.size はポイント単位で scale 依存のため CGImage を使う）。
+    private func pixelSize(of image: UIImage) -> CGSize {
+        guard let cg = image.cgImage else { return image.size }
+        return CGSize(width: cg.width, height: cg.height)
     }
 
     private func iou(_ a: CGRect, _ b: CGRect) -> CGFloat {
