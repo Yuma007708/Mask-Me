@@ -57,7 +57,7 @@ public struct SimilarityTransform: Sendable, Equatable {
         var a: CGFloat = 0, b: CGFloat = 0, norm: CGFloat = 0
         for i in from.indices {
             let fx = from[i].x - mfx, fy = from[i].y - mfy
-            let tx = to[i].x - mtx,   ty = to[i].y - mty
+            let tx = to[i].x - mtx, ty = to[i].y - mty
             a += fx * tx + fy * ty
             b += fx * ty - fy * tx
             norm += fx * fx + fy * fy
