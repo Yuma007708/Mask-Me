@@ -408,31 +408,11 @@ public final class MosaicEditorModel: ObservableObject {
 
     // MARK: - 検出キャッシュ参照
 
-    /// 指定時刻の顔ランドマークを返す。前後 `bridgeWindow` 秒以内の両側に検出がある
-    /// 「一時的な検出抜け」のみ直近フレームで補間する。片側にしか検出が無い場合
-    /// （顔がフレームアウト／インする境界）は空を返す。
-    ///
-    /// 直近の非空エントリを無条件に外挿すると、顔がフレーム外へ出てもしばらく
-    /// 「出た瞬間の位置」にモザイクが固定され、戻ってきても追従しない。両側補間に
-    /// することで、検出が途切れた瞬間にモザイクを消し、再入場フレームから追従する。
+    /// 指定時刻の顔ランドマークを返す。補間の仕様は `DetectionBridge` を参照
+    /// （プレビュー・エクスポート・精度計測で共通の挙動）。lerp 有効:
+    /// ブリッジ区間の顔が before 位置のホールドではなく前後の中間位置になめらかに動く。
     func lookupFaces(at time: Double) -> [FaceLandmarkSet] {
-        if let exact = detectionCache[time], !exact.isEmpty { return exact }
-        // 10fps プリスキャン基準で 5 フレームまでの検出抜けをブリッジする。
-        // これより長い抜けは「顔自体が画面外にいる」可能性が高いので外挿しない。
-        let bridgeWindow = 0.5
-        var before: (dist: Double, faces: [FaceLandmarkSet])?
-        var hasAfter = false
-        for (t, faces) in detectionCache where !faces.isEmpty {
-            let d = abs(t - time)
-            guard d <= bridgeWindow else { continue }
-            if t <= time {
-                if before == nil || d < before!.dist { before = (d, faces) }
-            } else {
-                hasAfter = true
-            }
-        }
-        guard let before, hasAfter else { return [] }
-        return before.faces
+        DetectionBridge(interpolates: true).faces(in: detectionCache, at: time)
     }
 
     /// 選択中の顔に対応する、指定時刻のランドマークセットを返す。
@@ -494,7 +474,7 @@ public final class MosaicEditorModel: ObservableObject {
         do { dur = try await asset.load(.duration).seconds } catch { return }
         guard dur > 0 else { return }
 
-        let interval = 0.1   // 10fps
+        let interval = 1.0 / 15.0   // 15fps（動きの速い顔と短時間アウトインの追従向上）
         let generator = AVAssetImageGenerator(asset: asset)
         generator.appliesPreferredTrackTransform = true
         generator.requestedTimeToleranceBefore = CMTime(seconds: interval, preferredTimescale: 600)
