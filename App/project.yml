@@ -25,7 +25,10 @@ targets:
     dependencies:
       - package: MosaicCore
         product: MosaicCore
-      - package: OpenCV
+      # OpenCV は直接リンクしない。MediaPipe の graph static library が OpenCV 4.13 を
+      # 内包しているため、アプリターゲットで OpenCV 5.0 をリンクするとシンボル衝突で
+      # ABI が混線する。OpenCV 依存は OpticalFlowKit(動的framework) に隔離してある。
+      - target: OpticalFlowKit
     settings:
       base:
         INFOPLIST_FILE: MaskMe/Info.plist
@@ -65,6 +68,28 @@ targets:
       testTargets:
         - MaskMeTests
 
+  # OpenCV 疎 LK オプティカルフローのラッパー framework。
+  # OpenCV を使ってよいのはこのターゲットだけ（公開 API は Foundation/UIKit 型のみ）。
+  # 動的 framework に隔離する理由は OpticalFlowKit/OpticalFlowKit.h のコメント参照
+  # （MediaPipe 内包の OpenCV 4.13 とのシンボル衝突回避）。
+  OpticalFlowKit:
+    type: framework
+    platform: iOS
+    sources:
+      - path: OpticalFlowKit
+        headerVisibility: public
+    dependencies:
+      - package: OpenCV
+      - sdk: UIKit.framework
+      - sdk: CoreGraphics.framework
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.maskme.opticalflowkit
+        DEFINES_MODULE: YES
+        SWIFT_VERSION: "5.9"
+        GENERATE_INFOPLIST_FILE: YES
+        SKIP_INSTALL: YES
+
   # Unit-test target for real-image face-detection accuracy. Requires the
   # MediaPipe pod + face_landmarker.task model + fixture images, so it runs on a
   # Simulator / device — not in the pod-free CI build. See App/MaskMeTests/Fixtures.
@@ -84,7 +109,9 @@ targets:
       - target: MaskMe
       - package: MosaicCore
         product: MosaicCore
-      - package: OpenCV
+      # NOTE: OpenCV はここに追加しないこと（追加すると Xcode が OpenCV product を
+      # 動的 PackageProduct 化してシンボルが欠落する）。テストは TEST_HOST (MaskMe.app)
+      # に埋め込まれた OpticalFlowKit 経由で OpticalFlowTracker にアクセスできる。
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.maskme.app.tests
