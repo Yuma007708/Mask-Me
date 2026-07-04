@@ -9,6 +9,12 @@ packages:
   MosaicCore:
     # The MediaPipe-free core lives one directory up as a SwiftPM package.
     path: ../
+  OpenCV:
+    # 疎LKオプティカルフロー（goodFeaturesToTrack + calcOpticalFlowPyrLK）専用。
+    # 公式CocoaPods 'OpenCV' は4.3.0(2020)で停止しておりarm64シミュレータ非対応のため
+    # 公式ソースビルドのSwiftPM binary配布を使う（Apache-2.0、Task 2 Step 1で検証済み）。
+    url: https://github.com/yeatse/opencv-spm
+    from: "5.0.0"   # Step 1で確認した最新安定版（公式OpenCVソースからのビルド、ios-arm64-simulatorスライス含む）
 
 targets:
   MaskMe:
@@ -19,6 +25,7 @@ targets:
     dependencies:
       - package: MosaicCore
         product: MosaicCore
+      - package: OpenCV
     settings:
       base:
         INFOPLIST_FILE: MaskMe/Info.plist
@@ -30,6 +37,7 @@ targets:
         SWIFT_VERSION: "5.9"
         ENABLE_USER_SCRIPT_SANDBOXING: YES
         GENERATE_INFOPLIST_FILE: NO
+        SWIFT_OBJC_BRIDGING_HEADER: MaskMe/MaskMe-Bridging-Header.h
     info:
       path: MaskMe/Info.plist
       properties:
@@ -76,6 +84,7 @@ targets:
       - target: MaskMe
       - package: MosaicCore
         product: MosaicCore
+      - package: OpenCV
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.maskme.app.tests
