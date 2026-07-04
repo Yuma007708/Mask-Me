@@ -79,4 +79,26 @@ final class OpticalFlowTrackerTests: XCTestCase {
         let tracker = OpticalFlowTracker()
         XCTAssertNil(tracker.advance(with: flatImage(size: CGSize(width: 100, height: 100))))
     }
+
+    /// 長辺が 640px を超える画像は内部で縮小してから追跡する（コスト上限の縮小経路）。
+    /// 縮小・拡大の丸めで誤差が乗るため、許容誤差は等倍テストの ±1.0px より緩めた ±2.0px。
+    func test_advance_tracksKnownTranslation_whenDownscaled() throws {
+        let size = CGSize(width: 1280, height: 960)
+        let tracker = OpticalFlowTracker()
+        let seeded = tracker.seed(with: dotsImage(size: size, offset: .zero),
+                                  faceBox: CGRect(x: 0.2, y: 0.2, width: 0.5, height: 0.5))
+        XCTAssertTrue(seeded)
+        let match = try XCTUnwrap(
+            tracker.advance(with: dotsImage(size: size, offset: CGPoint(x: 18, y: 10))))
+        XCTAssertGreaterThanOrEqual(match.previousPoints.count, 15)
+        var dx: CGFloat = 0, dy: CGFloat = 0
+        for (p, c) in zip(match.previousPoints, match.currentPoints) {
+            dx += c.cgPointValue.x - p.cgPointValue.x
+            dy += c.cgPointValue.y - p.cgPointValue.y
+        }
+        dx /= CGFloat(match.previousPoints.count)
+        dy /= CGFloat(match.previousPoints.count)
+        XCTAssertEqual(dx, 18, accuracy: 2.0)
+        XCTAssertEqual(dy, 10, accuracy: 2.0)
+    }
 }

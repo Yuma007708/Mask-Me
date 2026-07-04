@@ -45,10 +45,16 @@ cv::Mat grayMat(UIImage *image, double &scaleOut) {
     if (longSide > kMaxLongSide) {
         scaleOut = longSide / kMaxLongSide;
         cv::Mat small;
-        cv::resize(gray, small,
-                   cv::Size((int)std::lround(w / scaleOut),
-                            (int)std::lround(h / scaleOut)),
-                   0, 0, cv::INTER_AREA);
+        try {
+            cv::resize(gray, small,
+                       cv::Size((int)std::lround(w / scaleOut),
+                                (int)std::lround(h / scaleOut)),
+                       0, 0, cv::INTER_AREA);
+        } catch (const cv::Exception &e) {
+            NSLog(@"OpticalFlowTracker: cv::Exception in resize: %s", e.what());
+            scaleOut = 1.0;
+            return cv::Mat();
+        }
         return small;
     }
     return gray;
@@ -82,8 +88,14 @@ cv::Mat grayMat(UIImage *image, double &scaleOut) {
     cv::Mat mask = cv::Mat::zeros(gray.size(), CV_8UC1);
     mask(roi).setTo(255);
     std::vector<cv::Point2f> corners;
-    cv::goodFeaturesToTrack(gray, corners, kMaxCorners, kQualityLevel,
-                            kMinDistance, mask);
+    try {
+        cv::goodFeaturesToTrack(gray, corners, kMaxCorners, kQualityLevel,
+                                kMinDistance, mask);
+    } catch (const cv::Exception &e) {
+        NSLog(@"OpticalFlowTracker: cv::Exception in seed(goodFeaturesToTrack): %s", e.what());
+        [self reset];
+        return NO;
+    }
     if ((int)corners.size() < kMinSurvivors) { [self reset]; return NO; }
     _prevGray = gray;
     _points = corners;
@@ -102,9 +114,14 @@ cv::Mat grayMat(UIImage *image, double &scaleOut) {
     std::vector<uchar> stF, stB;
     std::vector<float> err;
     const cv::Size win(21, 21);
-    cv::calcOpticalFlowPyrLK(_prevGray, gray, _points, next, stF, err, win, 3);
-    // 前後方向チェック: next を逆向きに追跡して元の点に戻るか
-    cv::calcOpticalFlowPyrLK(gray, _prevGray, next, back, stB, err, win, 3);
+    try {
+        cv::calcOpticalFlowPyrLK(_prevGray, gray, _points, next, stF, err, win, 3);
+        // 前後方向チェック: next を逆向きに追跡して元の点に戻るか
+        cv::calcOpticalFlowPyrLK(gray, _prevGray, next, back, stB, err, win, 3);
+    } catch (const cv::Exception &e) {
+        NSLog(@"OpticalFlowTracker: cv::Exception in advance(calcOpticalFlowPyrLK): %s", e.what());
+        return nil;
+    }
 
     NSMutableArray<NSValue *> *prevOut = [NSMutableArray array];
     NSMutableArray<NSValue *> *currOut = [NSMutableArray array];
