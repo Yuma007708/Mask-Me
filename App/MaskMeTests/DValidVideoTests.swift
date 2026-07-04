@@ -85,7 +85,7 @@ final class DValidVideoTests: XCTestCase {
         gen.requestedTimeToleranceBefore = CMTime(seconds: 0.067, preferredTimescale: 600)
         gen.requestedTimeToleranceAfter  = CMTime(seconds: 0.067, preferredTimescale: 600)
 
-        var total = 0, hit = 0, lowCy = 0
+        var total = 0, hit = 0, flowHit = 0, lowCy = 0
         // 連続検出フレーム間の centroid 距離を蓄積して、ちらつき/追従の代理指標とする。
         // - avgJump: 連続する検出フレーム間の平均移動量（顔がゆっくり動く前提で、大きいほど不安定）
         // - jumpBig: 0.05 (画面 5%) を超えるジャンプ数 = ちらつき/位置ズレ疑い件数
@@ -114,7 +114,12 @@ final class DValidVideoTests: XCTestCase {
                     let faces = scanner.allLandmarks(in: img, timestampMs: Int(t * 1000))
                     let src = (scanner as? MediaPipeFaceLandmarkerAdapter)?.lastSource.rawValue ?? ""
                     if let first = faces.first {
-                        hit += 1
+                        // rate（生検出率）の定義は従来どおり「検出器が見つけた」フレームのみ。
+                        // フロー供給フレームは追跡による補完なので flowHit のみに数え、
+                        // 1 回の CI ランで rate（波及効果）と flowRate（フロー込み）を
+                        // 同時に計測する自己対照にする。
+                        if src != FaceDetectionSource.flow.rawValue { hit += 1 }
+                        flowHit += 1
                         detectionCache[t] = faces
                         let c = centroid(of: first)
                         if c.y > 0.5 { lowCy += 1 }
@@ -162,6 +167,7 @@ final class DValidVideoTests: XCTestCase {
                     ?? FaceDetectionSourceStats()
 
         let rate = total == 0 ? 0.0 : Double(hit) / Double(total)
+        let flowRate = total == 0 ? 0.0 : Double(flowHit) / Double(total)
         let lowRate = total == 0 ? 0.0 : Double(lowCy) / Double(total)
         let avgJump = pairCount == 0 ? 0.0 : sumJump / Double(pairCount)
         let jumpBigRate = pairCount == 0 ? 0.0 : Double(jumpBig) / Double(pairCount)
@@ -169,7 +175,7 @@ final class DValidVideoTests: XCTestCase {
         let bridgedRate10 = total == 0 ? 0.0 : Double(bridgedHit10) / Double(total)
         // Xcode 26 では print() がシミュレータプロセスの stdout に閉じ込められ
         // xcodebuild の pipe に出てこない。stderr は 2>&1 で捕捉されるので fputs を使う。
-        let resultLine = "[DVALRESULT] {\"video\":\"\(name)\",\"backend\":\"\(backend.rawValue)\",\"half\":\"\(half.rawValue)\",\"total\":\(total),\"hit\":\(hit),\"lowCy\":\(lowCy),\"rate\":\(rate),\"lowRate\":\(lowRate),\"baseline\":\(baseline),\"avgJump\":\(avgJump),\"jumpBig\":\(jumpBig),\"jumpBigRate\":\(jumpBigRate),\"pairCount\":\(pairCount),\"bridgedHit\":\(bridgedHit),\"bridgedRate\":\(bridgedRate),\"bridgedHit10\":\(bridgedHit10),\"bridgedRate10\":\(bridgedRate10),\"srcMp\":\(stats.mpFrames),\"srcEnh\":\(stats.enhanceFrames),\"srcBbox\":\(stats.bboxFrames),\"srcRoi\":\(stats.roiFrames),\"srcLow\":\(stats.lowConfFrames),\"srcTile\":\(stats.tiledFrames)}"
+        let resultLine = "[DVALRESULT] {\"video\":\"\(name)\",\"backend\":\"\(backend.rawValue)\",\"half\":\"\(half.rawValue)\",\"total\":\(total),\"hit\":\(hit),\"lowCy\":\(lowCy),\"rate\":\(rate),\"lowRate\":\(lowRate),\"baseline\":\(baseline),\"avgJump\":\(avgJump),\"jumpBig\":\(jumpBig),\"jumpBigRate\":\(jumpBigRate),\"pairCount\":\(pairCount),\"bridgedHit\":\(bridgedHit),\"bridgedRate\":\(bridgedRate),\"bridgedHit10\":\(bridgedHit10),\"bridgedRate10\":\(bridgedRate10),\"flowHit\":\(flowHit),\"flowRate\":\(flowRate),\"srcMp\":\(stats.mpFrames),\"srcEnh\":\(stats.enhanceFrames),\"srcBbox\":\(stats.bboxFrames),\"srcRoi\":\(stats.roiFrames),\"srcLow\":\(stats.lowConfFrames),\"srcTile\":\(stats.tiledFrames),\"srcFlow\":\(stats.flowFrames)}"
         fputs(resultLine + "\n", stderr)
     }
 
