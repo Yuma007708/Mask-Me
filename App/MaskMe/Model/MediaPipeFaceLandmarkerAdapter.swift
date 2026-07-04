@@ -125,6 +125,15 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
     /// 10 フレーム以上かかるケースの短縮が狙い）。
     private let tileKickInMisses = 5
 
+    #if DEBUG
+    /// テスト専用シーム。true の間は検出パイプライン全段（MP/enhance/bbox/ROI/
+    /// lowConf/タイル/顔検証）を丸ごとスキップし、そのフレームを「検出全滅」として
+    /// 扱う。フロー・ブリッジ状態機械（src=flow・連続上限30・再seed等）をユニット
+    /// テストで決定論的に駆動するためのフラグ。false（デフォルト）のときはプロダ
+    /// クション経路に一切影響しない。DEBUG ビルド専用（Release には含まれない）。
+    public var simulateDetectionFailureForTesting = false
+    #endif
+
     /// 通常パイプライン + テンポラル ROI が全滅したフレーム専用の最終フォールバック。
     /// confidence を極端に下げた IMG モード landmarker で全画面をもう一度だけ走査する。
     /// 拾いすぎた誤検出は isPlausibleFace が排除する前提。使うときだけ遅延生成。
@@ -253,56 +262,68 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
 
     public func allLandmarks(in image: UIImage, timestampMs: Int) -> [FaceLandmarkSet] {
         resetTracksIfNeeded(timestampMs: timestampMs)
-        let (mp, mpSource) = mpDetectVideoWithEnhance(image, timestampMs: timestampMs)
         var result: [FaceLandmarkSet]
         var source: FaceDetectionSource
-        if bboxDetector != nil {
-            result = augmentWithBBoxDetector(image: image, mpResults: mp, useImageMode: false)
-            source = mp.isEmpty ? (result.isEmpty ? .none : .bbox) : mpSource
+        #if DEBUG
+        let skipDetectionForTesting = simulateDetectionFailureForTesting
+        #else
+        let skipDetectionForTesting = false
+        #endif
+        if skipDetectionForTesting {
+            // テスト専用シーム発火中: 検出パイプライン全段を丸ごとスキップし、
+            // このフレームを「検出全滅」として扱う（flowブリッジ状態機械の検証用）。
+            result = []
+            source = .none
         } else {
-            result = mp
-            source = mp.isEmpty ? .none : mpSource
-        }
-        if result.isEmpty {
-            // 全画面パイプライン全滅 → 前フレームの顔位置周辺だけを再走査する。
-            result = redetectFromTrackedBoxes(image: image)
-            source = result.isEmpty ? .none : .roi
-        } else {
-            trackedFaces = result.map { TrackedFace(box: $0.boundingBox, missCount: 0) }
-        }
-        if result.isEmpty {
-            // それでもゼロなら、低 confidence の全画面走査を最後にもう一度だけ。
-            // 妥当性フィルタ通過分のみ採用し、次フレームからの ROI 追跡の種にもする。
-            result = lowConfDetect(image)
-            source = result.isEmpty ? .none : .lowConf
-            if !result.isEmpty {
+            let (mp, mpSource) = mpDetectVideoWithEnhance(image, timestampMs: timestampMs)
+            if bboxDetector != nil {
+                result = augmentWithBBoxDetector(image: image, mpResults: mp, useImageMode: false)
+                source = mp.isEmpty ? (result.isEmpty ? .none : .bbox) : mpSource
+            } else {
+                result = mp
+                source = mp.isEmpty ? .none : mpSource
+            }
+            if result.isEmpty {
+                // 全画面パイプライン全滅 → 前フレームの顔位置周辺だけを再走査する。
+                result = redetectFromTrackedBoxes(image: image)
+                source = result.isEmpty ? .none : .roi
+            } else {
                 trackedFaces = result.map { TrackedFace(box: $0.boundingBox, missCount: 0) }
             }
-        }
-        if result.isEmpty, trackedFaces.allSatisfy({ $0.missCount >= tileKickInMisses }) {
-            // track 無し（allSatisfy は空配列で true）、または全 track が連続ミス中の
-            // 長期ロスト時のみ、フレームをタイル分割して再走査する。
-            // 全画面検出はモデル入力への縮小で小顔が潰れるため、タイル crop で
-            // 顔の相対サイズを稼ぐ（実測: フレーム比 10% 台の顔は全画面 + enhance
-            // 全滅でもタイル内なら検出できる）。成功したら track を再シードして
-            // 以降のフレームは安価な ROI 追跡に引き継ぐ。
-            result = tiledDetect(image)
-            source = result.isEmpty ? .none : .tiled
-            if !result.isEmpty {
-                trackedFaces = result.map { TrackedFace(box: $0.boundingBox, missCount: 0) }
-            }
-        }
-        if !result.isEmpty {
-            let verified = verifySuspiciousFaces(result, in: image)
-            if verified.count != result.count {
-                let droppedBoxes = result.map(\.boundingBox).filter { box in
-                    !verified.contains { $0.boundingBox == box }
+            if result.isEmpty {
+                // それでもゼロなら、低 confidence の全画面走査を最後にもう一度だけ。
+                // 妥当性フィルタ通過分のみ採用し、次フレームからの ROI 追跡の種にもする。
+                result = lowConfDetect(image)
+                source = result.isEmpty ? .none : .lowConf
+                if !result.isEmpty {
+                    trackedFaces = result.map { TrackedFace(box: $0.boundingBox, missCount: 0) }
                 }
-                // 棄却した候補の track だけを外科的に殺す（ROI 延命が体 track を
-                // 引きずるのを防ぐ）。他 track の missCount 状態は保持する。
-                trackedFaces.removeAll { tf in droppedBoxes.contains { iou(tf.box, $0) > 0.5 } }
-                result = verified
-                if result.isEmpty { source = .none }
+            }
+            if result.isEmpty, trackedFaces.allSatisfy({ $0.missCount >= tileKickInMisses }) {
+                // track 無し（allSatisfy は空配列で true）、または全 track が連続ミス中の
+                // 長期ロスト時のみ、フレームをタイル分割して再走査する。
+                // 全画面検出はモデル入力への縮小で小顔が潰れるため、タイル crop で
+                // 顔の相対サイズを稼ぐ（実測: フレーム比 10% 台の顔は全画面 + enhance
+                // 全滅でもタイル内なら検出できる）。成功したら track を再シードして
+                // 以降のフレームは安価な ROI 追跡に引き継ぐ。
+                result = tiledDetect(image)
+                source = result.isEmpty ? .none : .tiled
+                if !result.isEmpty {
+                    trackedFaces = result.map { TrackedFace(box: $0.boundingBox, missCount: 0) }
+                }
+            }
+            if !result.isEmpty {
+                let verified = verifySuspiciousFaces(result, in: image)
+                if verified.count != result.count {
+                    let droppedBoxes = result.map(\.boundingBox).filter { box in
+                        !verified.contains { $0.boundingBox == box }
+                    }
+                    // 棄却した候補の track だけを外科的に殺す（ROI 延命が体 track を
+                    // 引きずるのを防ぐ）。他 track の missCount 状態は保持する。
+                    trackedFaces.removeAll { tf in droppedBoxes.contains { iou(tf.box, $0) > 0.5 } }
+                    result = verified
+                    if result.isEmpty { source = .none }
+                }
             }
         }
         if result.isEmpty, !flowStates.isEmpty, consecutiveFlowFrames < maxFlowFrames {
@@ -313,6 +334,10 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
             let imageSize = pixelSize(of: image)
             var flowFaces: [FaceLandmarkSet] = []
             var survivors: [FlowState] = []
+            // 同一フレーム内で他の FlowState が既に割り当てた trackedFaces の index は
+            // 除外する（グローバル再探索のみだと、複数顔が近接している場合に最良 IoU の
+            // index が重複してしまい、誤 track の bbox を上書きしうるため）。
+            var claimedTrackedIndices: Set<Int> = []
             for var state in flowStates {
                 guard let match = state.tracker.advance(with: image),
                       let transform = SimilarityTransform.estimate(
@@ -326,10 +351,13 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
                 // 対応する track の bbox も前進させ、次フレームの ROI 再検出が
                 // フロー予測位置を走査できるようにする（実顔再取得の早期化）。
                 let movedBox = moved.boundingBox
-                if let ti = trackedFaces.indices.max(by: {
-                    iou(trackedFaces[$0].box, movedBox) < iou(trackedFaces[$1].box, movedBox)
-                }), iou(trackedFaces[ti].box, movedBox) > 0.1 {
+                if let ti = trackedFaces.indices
+                    .filter({ !claimedTrackedIndices.contains($0) })
+                    .max(by: {
+                        iou(trackedFaces[$0].box, movedBox) < iou(trackedFaces[$1].box, movedBox)
+                    }), iou(trackedFaces[ti].box, movedBox) > 0.1 {
                     trackedFaces[ti].box = movedBox
+                    claimedTrackedIndices.insert(ti)
                 }
             }
             flowStates = survivors
