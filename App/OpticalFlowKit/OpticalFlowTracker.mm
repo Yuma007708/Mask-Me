@@ -25,38 +25,33 @@ constexpr int kMinSurvivors = 15;
 constexpr double kMinSurvivorRatio = 0.40;
 
 /// UIImage → 縮小グレースケール cv::Mat。scaleOut に フルフレームpx / 縮小px の係数を返す。
+/// フル解像度の Mat/CGContext は確保しない: 先に縮小後サイズ (dw,dh) を計算し、
+/// その縮小サイズの Mat/CGContext へ CGContextDrawImage で直接縮小描画する
+/// （cv::resize は使わない。CG の補間は kCGInterpolationMedium）。
 cv::Mat grayMat(UIImage *image, double &scaleOut) {
     CGImageRef cg = image.CGImage;
     if (!cg) { scaleOut = 1.0; return cv::Mat(); }
     const size_t w = CGImageGetWidth(cg), h = CGImageGetHeight(cg);
-    cv::Mat gray((int)h, (int)w, CV_8UC1);
+    const double longSide = std::max(w, h);
+    scaleOut = 1.0;
+    size_t dw = w, dh = h;
+    if (longSide > kMaxLongSide) {
+        scaleOut = longSide / kMaxLongSide;
+        dw = (size_t)std::lround(w / scaleOut);
+        dh = (size_t)std::lround(h / scaleOut);
+    }
+    cv::Mat gray((int)dh, (int)dw, CV_8UC1);
     CGColorSpaceRef space = CGColorSpaceCreateDeviceGray();
     // 自前確保の CV_8UC1 Mat は連続なので bytesPerRow は幅そのもの。
     // （gray.step[0] は MatStep のヘッダ・バイナリ整合に依存し、MediaPipe 内包
-    //   OpenCV 4.13 との混線デバッグ時に不正値を返した実績があるため w を直接渡す。）
-    CGContextRef ctx = CGBitmapContextCreate(gray.data, w, h, 8, w,
+    //   OpenCV 4.13 との混線デバッグ時に不正値を返した実績があるため dw を直接渡す。）
+    CGContextRef ctx = CGBitmapContextCreate(gray.data, dw, dh, 8, dw,
                                              space, kCGImageAlphaNone);
     CGColorSpaceRelease(space);
     if (!ctx) { scaleOut = 1.0; return cv::Mat(); }
-    CGContextDrawImage(ctx, CGRectMake(0, 0, w, h), cg);
+    CGContextSetInterpolationQuality(ctx, kCGInterpolationMedium);
+    CGContextDrawImage(ctx, CGRectMake(0, 0, dw, dh), cg);
     CGContextRelease(ctx);
-    const double longSide = std::max(w, h);
-    scaleOut = 1.0;
-    if (longSide > kMaxLongSide) {
-        scaleOut = longSide / kMaxLongSide;
-        cv::Mat small;
-        try {
-            cv::resize(gray, small,
-                       cv::Size((int)std::lround(w / scaleOut),
-                                (int)std::lround(h / scaleOut)),
-                       0, 0, cv::INTER_AREA);
-        } catch (const cv::Exception &e) {
-            NSLog(@"OpticalFlowTracker: cv::Exception in resize: %s", e.what());
-            scaleOut = 1.0;
-            return cv::Mat();
-        }
-        return small;
-    }
     return gray;
 }
 }  // namespace
