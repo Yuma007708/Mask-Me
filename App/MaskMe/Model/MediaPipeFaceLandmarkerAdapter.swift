@@ -396,7 +396,9 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
         return result
     }
 
-    /// トラックの正規化bbox面積が、フローブリッジしてよい「顔として妥当な」範囲か。
+    /// トラックの正規化bboxが、フローブリッジしてよい「顔として妥当な」範囲か。
+    /// 面積 ≤ `maxFlowBridgeArea`（体誤検出の延命防止）**かつ**
+    /// 中心 midY ≤ `maxFlowBridgeCenterY`（弱ソース低位置検出の延命防止）の AND 条件。
     /// `@testable` からユニットテストで直接境界を検証できるよう internal にしている。
     func isFlowBridgeEligible(_ normalizedBox: CGRect) -> Bool {
         normalizedBox.width * normalizedBox.height <= maxFlowBridgeArea
