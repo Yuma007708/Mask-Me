@@ -112,6 +112,11 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
     /// 実測: 真顔の面積は s1/s2/s5 全てで ≤0.06、s5の体誤検出は 0.11〜0.17（DVALFRAME分析、2026-07-04）。
     /// これを超えるトラックはブリッジせずミス扱い（baseline挙動に戻るだけの安全な劣化）。
     private let maxFlowBridgeArea: CGFloat = 0.08
+    /// フローブリッジを許可するトラックbbox中心の正規化Y座標上限（画面下半分はブリッジしない）。
+    /// 実測: s5_Bでflowが延命したlowCy 33件は全てcy0.49〜0.69の弱ソース(enh/low/tile)検出、
+    /// 一方s4/s1のflow利得239フレーム中cy>0.5は1件のみ（CI run 28710148201のDVALFRAME分析、2026-07-04）。
+    /// これを超えるトラックはブリッジせずミス扱い（baseline挙動に戻るだけの安全な劣化）。
+    private let maxFlowBridgeCenterY: CGFloat = 0.5
     private let maxFlowTracks = 3
     private var consecutiveFlowFrames = 0
     /// ROI は前フレーム bbox を中心固定で何倍に広げるか（基本値）。ミスが続くほど顔が
@@ -395,6 +400,7 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
     /// `@testable` からユニットテストで直接境界を検証できるよう internal にしている。
     func isFlowBridgeEligible(_ normalizedBox: CGRect) -> Bool {
         normalizedBox.width * normalizedBox.height <= maxFlowBridgeArea
+            && normalizedBox.midY <= maxFlowBridgeCenterY
     }
 
     /// 低 confidence 最終フォールバックの全画面走査（video パス専用）。

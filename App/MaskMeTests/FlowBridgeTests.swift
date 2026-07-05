@@ -251,5 +251,35 @@ final class FlowBridgeTests: XCTestCase {
             "面積0.12（体誤検出相当）は不適格のはず"
         )
     }
+
+    // MARK: - (e) cyゲート isFlowBridgeEligible の境界
+
+    /// s5_Bでflowが延命したlowCy 33件はcy0.49〜0.69の弱ソース検出だった一方、
+    /// s4/s1のflow利得239フレーム中cy>0.5は1件のみ（CI run 28710148201、2026-07-04）。
+    /// 画面下半分（midY>0.5）のトラックはブリッジしない cy ゲートの境界確認。
+    func test_isFlowBridgeEligible_centerYBoundary() throws {
+        let adapter = try makeAdapter()
+
+        // 面積0.0625（0.08以下）、midYちょうど0.5 → 適格（上限は含む）
+        let midY05 = CGRect(x: 0.3, y: 0.25, width: 0.125, height: 0.5)
+        XCTAssertTrue(
+            adapter.isFlowBridgeEligible(midY05),
+            "midY0.5ちょうど（上限）は適格のはず（境界含む）"
+        )
+
+        // 面積0.05（0.08以下）、midY0.625 → 不適格
+        let midY0625 = CGRect(x: 0.3, y: 0.5, width: 0.2, height: 0.25)
+        XCTAssertFalse(
+            adapter.isFlowBridgeEligible(midY0625),
+            "midY0.625（画面下半分）は不適格のはず"
+        )
+
+        // 面積0.12（超過）、midY0.25（cyは適格）→ 不適格（面積ゲートが効く）
+        let areaOverCyOk = CGRect(x: 0.1, y: 0.1, width: 0.4, height: 0.3)
+        XCTAssertFalse(
+            adapter.isFlowBridgeEligible(areaOverCyOk),
+            "面積超過かつcy適格でも不適格のはず（AND条件）"
+        )
+    }
 }
 #endif
