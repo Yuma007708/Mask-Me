@@ -58,6 +58,31 @@
 - バイナリサイズ増は実験段階では許容。採用時に部分ビルド（core+imgproc+video のみ）を
   別課題として起票
 
+## 実装での確定・変更事項（2026-07-05 追記、実装済みの正）
+
+上記コンポーネント記述からの実装時変更。詳細な経緯は `.superpowers/sdd/progress.md` 参照。
+
+1. **OpenCV は opencv-spm 5.0.0（SPM, Apache-2.0）を採用**（§4 の CocoaPods 案から変更）。
+2. **OpenCV 依存は専用動的 framework `App/OpticalFlowKit/` に隔離**（§1 の
+   `App/MaskMe/Model/` 直下案から変更）。MediaPipe の graph static lib が OpenCV 4.13 を
+   force_load 内包（cv:: シンボル3,534個）しており、アプリターゲット直リンクは ABI 混線で
+   クラッシュするため。**OpenCV を使うコードは必ず OpticalFlowKit ターゲット内に置くこと。**
+3. **相似変換の推定は純 Swift**（MosaicCore の `SimilarityTransform.estimate`）。
+   `advance` は対応点ペア（`MMFlowMatch`）を返すだけにし、OpenCV の推定APIは使わない。
+   scale 0.7〜1.4 ゲートは Adapter 側で適用。
+4. **フローブリッジ適格ゲート**（`isFlowBridgeEligible`、Adapter）を追加:
+   面積 ≤ 0.08 **かつ** bbox 中心 midY ≤ 0.5 のトラックのみブリッジする。
+   - 面積ゲート: s5_A の体誤検出（面積0.11〜0.17、真顔は≤0.06）の延命防止
+   - cy ゲート: s5_B の弱ソース（enh/low/tile）低位置検出（顔サイズ・cy0.49〜0.69）の
+     延命防止。s4/s1 のフロー利得への損失は実測239フレーム中1のみ
+   - 不適格でも「baseline 挙動（ミス）に戻るだけ」の安全な劣化
+5. **grayMat はフル解像度確保なしの直接縮小描画**（縮小サイズの Mat/CGContext に
+   `kCGInterpolationMedium` で描画）。CI ランナーのメモリ圧対策。
+6. 確定パラメータ: `maxFlowFrames=30` / `kMinSurvivorRatio=0.40` /
+   `maxFlowBridgeArea=0.08` / `maxFlowBridgeCenterY=0.5`。
+   maxFlowFrames=15 と kMinSurvivorRatio=0.55 はプローブで**効果ゼロ**を実証済み
+   （誤検出領域は光学的に安定追跡できるため品質パラメータでは排除不可能）。
+
 ## 計測・比較方法（1回のCIランで自己対照）
 
 - フロー供給フレームは `src=flow` タグ。DVALRESULT に `flowHits` / `flowRate` を新設。
