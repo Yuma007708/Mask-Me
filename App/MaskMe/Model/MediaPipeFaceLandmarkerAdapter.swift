@@ -44,6 +44,7 @@ public enum FaceDetectionSource: String {
     case roi         // テンポラル ROI 再検出（前フレーム bbox）
     case lowConf = "low"  // 低 confidence 最終フォールバック
     case tiled = "tile"   // タイル分割再検出（track なしの長期ロスト用）
+    case flow        // オプティカルフロー・ブリッジ（検出ではなく追跡による補完）
     case none = ""   // 未検出
 }
 
@@ -55,6 +56,7 @@ public struct FaceDetectionSourceStats {
     public var roiFrames = 0
     public var lowConfFrames = 0
     public var tiledFrames = 0
+    public var flowFrames = 0
 }
 
 /// Thin wrapper around MediaPipe's `FaceLandmarker` that produces the
@@ -88,6 +90,35 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
     }
     private var trackedFaces: [TrackedFace] = []
     private var lastVideoTimestampMs: Int = .min
+
+    // MARK: - オプティカルフロー・ブリッジ（video モード専用）
+    //
+    // 検出パイプライン全段（MP → enhance → bbox → ROI → lowConf → タイル → 顔検証）が
+    // 全滅したフレームを、OpenCV 疎 LK の「画素の動き」でブリッジする。検出器は
+    // 「顔らしい見た目」が消えたフレーム（横顔・後ろ向き・強ブレ・極暗）で原理的に
+    // 全滅するが、フローは顔かどうかを見ないため位置の供給を続けられる。
+    //
+    // 出力は src=flow でタグ付けし、rate（生検出率）には算入しない（DValid 側で区別）。
+    // フローは顔の存在を証明しないため、trackedFaces の missCount には触らない。
+    private struct FlowState {
+        let tracker: OpticalFlowTracker
+        var lastLandmarks: FaceLandmarkSet
+    }
+    private var flowStates: [FlowState] = []
+    /// 連続フロー供給の上限フレーム数（15fps サンプリングで 30 ≒ 2 秒）。
+    /// ドリフト（ズレの蓄積）で実顔から外れたまま供給し続けるのを防ぐ。
+    private let maxFlowFrames = 30
+    /// フローブリッジを許可するトラックbboxの正規化面積上限。
+    /// 実測: 真顔の面積は s1/s2/s5 全てで ≤0.06、s5の体誤検出は 0.11〜0.17（DVALFRAME分析、2026-07-04）。
+    /// これを超えるトラックはブリッジせずミス扱い（baseline挙動に戻るだけの安全な劣化）。
+    private let maxFlowBridgeArea: CGFloat = 0.08
+    /// フローブリッジを許可するトラックbbox中心の正規化Y座標上限（画面下半分はブリッジしない）。
+    /// 実測: s5_Bでflowが延命したlowCy 33件は全てcy0.49〜0.69の弱ソース(enh/low/tile)検出、
+    /// 一方s4/s1のflow利得239フレーム中cy>0.5は1件のみ（CI run 28710148201のDVALFRAME分析、2026-07-04）。
+    /// これを超えるトラックはブリッジせずミス扱い（baseline挙動に戻るだけの安全な劣化）。
+    private let maxFlowBridgeCenterY: CGFloat = 0.5
+    private let maxFlowTracks = 3
+    private var consecutiveFlowFrames = 0
     /// ROI は前フレーム bbox を中心固定で何倍に広げるか（基本値）。ミスが続くほど顔が
     /// 元位置から離れている可能性が上がるため、missCount に応じて漸増させ上限で頭打ち。
     private let roiExpansion: CGFloat = 2.0
@@ -102,6 +133,15 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
     /// 併走させる（track 死亡まで待つとギャップが伸びる。実測: 同位置の小顔の再取得に
     /// 10 フレーム以上かかるケースの短縮が狙い）。
     private let tileKickInMisses = 5
+
+    #if DEBUG
+    /// テスト専用シーム。true の間は検出パイプライン全段（MP/enhance/bbox/ROI/
+    /// lowConf/タイル/顔検証）を丸ごとスキップし、そのフレームを「検出全滅」として
+    /// 扱う。フロー・ブリッジ状態機械（src=flow・連続上限30・再seed等）をユニット
+    /// テストで決定論的に駆動するためのフラグ。false（デフォルト）のときはプロダ
+    /// クション経路に一切影響しない。DEBUG ビルド専用（Release には含まれない）。
+    public var simulateDetectionFailureForTesting = false
+    #endif
 
     /// 通常パイプライン + テンポラル ROI が全滅したフレーム専用の最終フォールバック。
     /// confidence を極端に下げた IMG モード landmarker で全画面をもう一度だけ走査する。
@@ -134,6 +174,7 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
         case .roi:      sourceStats.roiFrames += 1
         case .lowConf:  sourceStats.lowConfFrames += 1
         case .tiled:    sourceStats.tiledFrames += 1
+        case .flow:     sourceStats.flowFrames += 1
         case .none:     break
         }
     }
@@ -230,60 +271,138 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
 
     public func allLandmarks(in image: UIImage, timestampMs: Int) -> [FaceLandmarkSet] {
         resetTracksIfNeeded(timestampMs: timestampMs)
-        let (mp, mpSource) = mpDetectVideoWithEnhance(image, timestampMs: timestampMs)
         var result: [FaceLandmarkSet]
         var source: FaceDetectionSource
-        if bboxDetector != nil {
-            result = augmentWithBBoxDetector(image: image, mpResults: mp, useImageMode: false)
-            source = mp.isEmpty ? (result.isEmpty ? .none : .bbox) : mpSource
+        #if DEBUG
+        let skipDetectionForTesting = simulateDetectionFailureForTesting
+        #else
+        let skipDetectionForTesting = false
+        #endif
+        if skipDetectionForTesting {
+            // テスト専用シーム発火中: 検出パイプライン全段を丸ごとスキップし、
+            // このフレームを「検出全滅」として扱う（flowブリッジ状態機械の検証用）。
+            result = []
+            source = .none
         } else {
-            result = mp
-            source = mp.isEmpty ? .none : mpSource
-        }
-        if result.isEmpty {
-            // 全画面パイプライン全滅 → 前フレームの顔位置周辺だけを再走査する。
-            result = redetectFromTrackedBoxes(image: image)
-            source = result.isEmpty ? .none : .roi
-        } else {
-            trackedFaces = result.map { TrackedFace(box: $0.boundingBox, missCount: 0) }
-        }
-        if result.isEmpty {
-            // それでもゼロなら、低 confidence の全画面走査を最後にもう一度だけ。
-            // 妥当性フィルタ通過分のみ採用し、次フレームからの ROI 追跡の種にもする。
-            result = lowConfDetect(image)
-            source = result.isEmpty ? .none : .lowConf
-            if !result.isEmpty {
+            let (mp, mpSource) = mpDetectVideoWithEnhance(image, timestampMs: timestampMs)
+            if bboxDetector != nil {
+                result = augmentWithBBoxDetector(image: image, mpResults: mp, useImageMode: false)
+                source = mp.isEmpty ? (result.isEmpty ? .none : .bbox) : mpSource
+            } else {
+                result = mp
+                source = mp.isEmpty ? .none : mpSource
+            }
+            if result.isEmpty {
+                // 全画面パイプライン全滅 → 前フレームの顔位置周辺だけを再走査する。
+                result = redetectFromTrackedBoxes(image: image)
+                source = result.isEmpty ? .none : .roi
+            } else {
                 trackedFaces = result.map { TrackedFace(box: $0.boundingBox, missCount: 0) }
             }
-        }
-        if result.isEmpty, trackedFaces.allSatisfy({ $0.missCount >= tileKickInMisses }) {
-            // track 無し（allSatisfy は空配列で true）、または全 track が連続ミス中の
-            // 長期ロスト時のみ、フレームをタイル分割して再走査する。
-            // 全画面検出はモデル入力への縮小で小顔が潰れるため、タイル crop で
-            // 顔の相対サイズを稼ぐ（実測: フレーム比 10% 台の顔は全画面 + enhance
-            // 全滅でもタイル内なら検出できる）。成功したら track を再シードして
-            // 以降のフレームは安価な ROI 追跡に引き継ぐ。
-            result = tiledDetect(image)
-            source = result.isEmpty ? .none : .tiled
-            if !result.isEmpty {
-                trackedFaces = result.map { TrackedFace(box: $0.boundingBox, missCount: 0) }
-            }
-        }
-        if !result.isEmpty {
-            let verified = verifySuspiciousFaces(result, in: image)
-            if verified.count != result.count {
-                let droppedBoxes = result.map(\.boundingBox).filter { box in
-                    !verified.contains { $0.boundingBox == box }
+            if result.isEmpty {
+                // それでもゼロなら、低 confidence の全画面走査を最後にもう一度だけ。
+                // 妥当性フィルタ通過分のみ採用し、次フレームからの ROI 追跡の種にもする。
+                result = lowConfDetect(image)
+                source = result.isEmpty ? .none : .lowConf
+                if !result.isEmpty {
+                    trackedFaces = result.map { TrackedFace(box: $0.boundingBox, missCount: 0) }
                 }
-                // 棄却した候補の track だけを外科的に殺す（ROI 延命が体 track を
-                // 引きずるのを防ぐ）。他 track の missCount 状態は保持する。
-                trackedFaces.removeAll { tf in droppedBoxes.contains { iou(tf.box, $0) > 0.5 } }
-                result = verified
-                if result.isEmpty { source = .none }
+            }
+            if result.isEmpty, trackedFaces.allSatisfy({ $0.missCount >= tileKickInMisses }) {
+                // track 無し（allSatisfy は空配列で true）、または全 track が連続ミス中の
+                // 長期ロスト時のみ、フレームをタイル分割して再走査する。
+                // 全画面検出はモデル入力への縮小で小顔が潰れるため、タイル crop で
+                // 顔の相対サイズを稼ぐ（実測: フレーム比 10% 台の顔は全画面 + enhance
+                // 全滅でもタイル内なら検出できる）。成功したら track を再シードして
+                // 以降のフレームは安価な ROI 追跡に引き継ぐ。
+                result = tiledDetect(image)
+                source = result.isEmpty ? .none : .tiled
+                if !result.isEmpty {
+                    trackedFaces = result.map { TrackedFace(box: $0.boundingBox, missCount: 0) }
+                }
+            }
+            if !result.isEmpty {
+                let verified = verifySuspiciousFaces(result, in: image)
+                if verified.count != result.count {
+                    let droppedBoxes = result.map(\.boundingBox).filter { box in
+                        !verified.contains { $0.boundingBox == box }
+                    }
+                    // 棄却した候補の track だけを外科的に殺す（ROI 延命が体 track を
+                    // 引きずるのを防ぐ）。他 track の missCount 状態は保持する。
+                    trackedFaces.removeAll { tf in droppedBoxes.contains { iou(tf.box, $0) > 0.5 } }
+                    result = verified
+                    if result.isEmpty { source = .none }
+                }
+            }
+        }
+        if result.isEmpty, !flowStates.isEmpty, consecutiveFlowFrames < maxFlowFrames {
+            // 検出全滅 → フローで前回ランドマークを前進させてブリッジする。
+            // 顔検証パス（タイト crop 再検出）は「検出器で見える顔」しか通せないため、
+            // フロー出力には適用しない（検出器が全滅したからこそフローに来ている）。
+            // 誤検出の延命は品質ゲート・上限フレーム・lowCy 番犬の3重で抑える。
+            let imageSize = pixelSize(of: image)
+            var flowFaces: [FaceLandmarkSet] = []
+            var survivors: [FlowState] = []
+            // 同一フレーム内で他の FlowState が既に割り当てた trackedFaces の index は
+            // 除外する（グローバル再探索のみだと、複数顔が近接している場合に最良 IoU の
+            // index が重複してしまい、誤 track の bbox を上書きしうるため）。
+            var claimedTrackedIndices: Set<Int> = []
+            for var state in flowStates {
+                // 面積ゲート: 真顔として妥当な大きさのトラックのみブリッジ対象にする
+                // （s5の体誤検出のような大型bboxはここで seed/advance をスキップして
+                // 従来の「全段失敗」＝ミス扱いに落とす）。
+                guard isFlowBridgeEligible(state.lastLandmarks.boundingBox) else { continue }
+                guard let match = state.tracker.advance(with: image),
+                      let transform = SimilarityTransform.estimate(
+                          from: match.previousPoints.map(\.cgPointValue),
+                          to: match.currentPoints.map(\.cgPointValue)),
+                      (0.7...1.4).contains(transform.scale) else { continue }
+                let moved = transform.apply(to: state.lastLandmarks, imageSize: imageSize)
+                state.lastLandmarks = moved
+                flowFaces.append(moved)
+                survivors.append(state)
+                // 対応する track の bbox も前進させ、次フレームの ROI 再検出が
+                // フロー予測位置を走査できるようにする（実顔再取得の早期化）。
+                let movedBox = moved.boundingBox
+                if let ti = trackedFaces.indices
+                    .filter({ !claimedTrackedIndices.contains($0) })
+                    .max(by: {
+                        iou(trackedFaces[$0].box, movedBox) < iou(trackedFaces[$1].box, movedBox)
+                    }), iou(trackedFaces[ti].box, movedBox) > 0.1 {
+                    trackedFaces[ti].box = movedBox
+                    claimedTrackedIndices.insert(ti)
+                }
+            }
+            flowStates = survivors
+            if !flowFaces.isEmpty {
+                result = flowFaces
+                source = .flow
+                consecutiveFlowFrames += 1
+            }
+        } else if result.isEmpty {
+            flowStates = []
+        }
+        if !result.isEmpty, source != .flow {
+            // 実検出(どのソースでも)に成功したらフローを再シードする。
+            // seed は縮小 ROI の特徴点抽出のみで軽量（〜1ms）なので毎フレーム行う。
+            consecutiveFlowFrames = 0
+            flowStates = result.prefix(maxFlowTracks).compactMap { face in
+                let tracker = OpticalFlowTracker()
+                guard tracker.seed(with: image, faceBox: face.boundingBox) else { return nil }
+                return FlowState(tracker: tracker, lastLandmarks: face)
             }
         }
         recordSource(source)
         return result
+    }
+
+    /// トラックの正規化bboxが、フローブリッジしてよい「顔として妥当な」範囲か。
+    /// 面積 ≤ `maxFlowBridgeArea`（体誤検出の延命防止）**かつ**
+    /// 中心 midY ≤ `maxFlowBridgeCenterY`（弱ソース低位置検出の延命防止）の AND 条件。
+    /// `@testable` からユニットテストで直接境界を検証できるよう internal にしている。
+    func isFlowBridgeEligible(_ normalizedBox: CGRect) -> Bool {
+        normalizedBox.width * normalizedBox.height <= maxFlowBridgeArea
+            && normalizedBox.midY <= maxFlowBridgeCenterY
     }
 
     /// 低 confidence 最終フォールバックの全画面走査（video パス専用）。
@@ -384,6 +503,8 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
         if lastVideoTimestampMs != .min,
            timestampMs <= lastVideoTimestampMs || timestampMs - lastVideoTimestampMs > 1000 {
             trackedFaces.removeAll()
+            flowStates = []
+            consecutiveFlowFrames = 0
         }
         lastVideoTimestampMs = timestampMs
     }
@@ -545,6 +666,12 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
             }
         }
         return mpResults + extras
+    }
+
+    /// UIImage のピクセル寸法（UIImage.size はポイント単位で scale 依存のため CGImage を使う）。
+    private func pixelSize(of image: UIImage) -> CGSize {
+        guard let cg = image.cgImage else { return image.size }
+        return CGSize(width: cg.width, height: cg.height)
     }
 
     private func iou(_ a: CGRect, _ b: CGRect) -> CGFloat {
