@@ -37,15 +37,16 @@ Mask-Me/
 │  ├─ MetalTextureUtilities.swift     # CGImage/CVPixelBuffer ↔ MTLTexture 変換
 │  └─ Shaders/MosaicShader.metal      # ピクセルシェーダー
 ├─ Tests/MosaicCoreTests/             # 追従ロジック・検出率・マスク生成のユニットテスト
-├─ App/                               # アプリターゲット（XcodeGen + CocoaPods）
-│  ├─ project.yml                     # XcodeGen 定義（MaskMe / MaskMeTests）
-│  ├─ Podfile                         # MediaPipeTasksVision
-│  ├─ MaskMe/
-│  │  ├─ MaskMeApp.swift              # @main / NavigationStack
-│  │  ├─ Views/                       # Home / Editor / RecentItems / MediaPicker / TrackingBadge
-│  │  ├─ Model/                       # FaceLandmarking / MediaPipe アダプタ / 司令塔 / 最近の項目
-│  │  └─ Export/                      # Photos 保存 / 動画モザイクエクスポート
-│  └─ MaskMeTests/                    # 実画像での顔検出精度テスト（要 MediaPipe / Simulator）
+├─ project.yml                        # XcodeGen 定義（MaskMe / MaskMeTests / OpticalFlowKit）
+├─ Podfile                            # MediaPipeTasksVision
+├─ MaskMe/                            # アプリターゲット本体
+│  ├─ MaskMeApp.swift                 # @main / NavigationStack
+│  ├─ Views/                          # Home / Editor / RecentItems / MediaPicker / TrackingBadge
+│  ├─ Model/                          # FaceLandmarking / MediaPipe アダプタ / 司令塔 / 最近の項目
+│  └─ Export/                         # Photos 保存 / 動画モザイクエクスポート
+├─ MaskMeTests/                       # 実画像での顔検出精度テスト（要 MediaPipe / Simulator）
+├─ OpticalFlowKit/                    # OpenCV 疎LKオプティカルフローの動的framework（シンボル隔離）
+├─ open.sh                            # xcodegen + pod install + open workspace の一括スクリプト
 └─ .github/workflows/ci.yml           # コア build/test/lint + アプリ build（Simulator）
 ```
 
@@ -58,7 +59,12 @@ Mask-Me/
 ## アプリのビルド・実行
 
 ```bash
-cd App
+./open.sh   # xcodegen generate → pod install → open MaskMe.xcworkspace
+```
+
+または個別に:
+
+```bash
 xcodegen generate          # MaskMe.xcodeproj を生成
 pod install                # MediaPipe を結線（MaskMe.xcworkspace 生成）
 open MaskMe.xcworkspace
@@ -103,11 +109,10 @@ Metal の GPU 実行は実機 / シミュレータ依存のため、ユニット
 ## 実画像での顔検出精度テスト（アプリターゲット）
 
 実際の顔写真 / 動画に対する MediaPipe の検出精度は、アプリターゲットの XCTest
-（`App/MaskMeTests/`）で検証します。MediaPipe pod・モデル・実画像・Simulator が必要なため、
+（`MaskMeTests/`）で検証します。MediaPipe pod・モデル・実画像・Simulator が必要なため、
 **CI では実行せず**ローカル / Simulator で実施します。
 
 ```bash
-cd App
 xcodegen generate
 pod install
 xcodebuild test \
@@ -116,7 +121,7 @@ xcodebuild test \
   -destination 'platform=iOS Simulator,name=iPhone 16'
 ```
 
-- `App/MaskMeTests/Fixtures/` に実画像（`faces/` `nonfaces/`）・`sample_face.mov`・
+- `MaskMeTests/Fixtures/` に実画像（`faces/` `nonfaces/`）・`sample_face.mov`・
   `face_landmarker.task` を配置します（配置方法は同フォルダの `README.md` 参照）。
   プライバシー / 著作権の都合で実画像はリポジトリに含めていません。未配置のテストは
   失敗ではなく `XCTSkip` になります。

@@ -2,19 +2,21 @@ import Foundation
 
 /// 補助顔検出器のバックエンド表現。
 ///
-/// 内部表現としては `DetectionSettings` 内の 3 つの Bool（useVision / useFaceDetector / useYunet）が
+/// 内部表現としては `DetectionSettings` 内の 2 つの Bool（useFaceDetector / useYunet）が
 /// ground truth で、この enum は「テスト・既存 UI からの呼び出し」「Codable 旧フォーマット互換」用に
-/// 残してある。getter は 3 Bool の組み合わせから最も近い enum を返し、setter は 3 Bool に展開する。
+/// 残してある。getter は 2 Bool の組み合わせから最も近い enum を返し、setter は 2 Bool に展開する。
+///
+/// 注: かつて存在した Apple Vision backend (`.vision`) は完全削除した。Vision は実機で
+/// torso・首・肩を顔として拾い体モザイクの原因になった上、Simulator では 0 検出のため
+/// シミュレータで挙動検証ができない（＝実機との乖離を自動テストで捕まえられない）。
 public enum FaceDetectorBackend: String, Codable {
     /// 補助検出なし（MediaPipe 単独）。
     case off
-    /// Apple Vision のみ。実機専用（Simulator では 0 検出）。
-    case vision
     /// MediaPipe Face Detector (BlazeFace) のみ。Simulator でも実機でも動作。
     case faceDetector
     /// YuNet (OpenCV) のみ。Core ML で動作、シミュレータ・実機どちらでも動く。
     case yunet
-    /// Vision + Face Detector + YuNet 並走 union。最高検出率だが処理時間も最大。
+    /// Face Detector + YuNet 並走 union。最高検出率。
     case all
 }
 
@@ -27,36 +29,28 @@ public struct DetectionSettings: Equatable, Codable {
     public var numFaces: Int = 5
     public var minSpan: Double = 0.02
 
-    /// Apple Vision を補助検出器として使う。実機専用（Simulator では 0 検出）。
-    /// 設定 UI には出さず、常時 true がデフォルト。
-    public var useVision: Bool = true
     /// MediaPipe Face Detector (BlazeFace) を補助検出器として使う。
-    /// デフォルト OFF（オプトイン）。ON にすると検出率が上がるが処理も重くなる。
-    public var useFaceDetector: Bool = false
-    /// YuNet (Core ML) を補助検出器として使う。
-    /// デフォルト OFF（オプトイン）。
-    public var useYunet: Bool = false
+    /// デフォルト ON: Vision 削除後の検出率をシミュレータ検証可能な2系統で支える。
+    public var useFaceDetector: Bool = true
+    /// YuNet (Core ML) を補助検出器として使う。デフォルト ON（同上）。
+    public var useYunet: Bool = true
 
-    /// 旧 API 互換。3 Bool の組み合わせを最も近い enum で返し、setter で 3 Bool に展開する。
+    /// 旧 API 互換。2 Bool の組み合わせを最も近い enum で返し、setter で 2 Bool に展開する。
     public var faceDetectorBackend: FaceDetectorBackend {
         get {
-            switch (useVision, useFaceDetector, useYunet) {
-            case (false, false, false): return .off
-            case (true,  false, false): return .vision
-            case (false, true,  false): return .faceDetector
-            case (false, false, true ): return .yunet
-            case (true,  true,  true ): return .all
-            // 混在ケース（V+F, V+Y, F+Y）は enum で名前を持たないので all 扱い
-            default: return .all
+            switch (useFaceDetector, useYunet) {
+            case (false, false): return .off
+            case (true,  false): return .faceDetector
+            case (false, true ): return .yunet
+            case (true,  true ): return .all
             }
         }
         set {
             switch newValue {
-            case .off:          useVision = false; useFaceDetector = false; useYunet = false
-            case .vision:       useVision = true;  useFaceDetector = false; useYunet = false
-            case .faceDetector: useVision = false; useFaceDetector = true;  useYunet = false
-            case .yunet:        useVision = false; useFaceDetector = false; useYunet = true
-            case .all:          useVision = true;  useFaceDetector = true;  useYunet = true
+            case .off:          useFaceDetector = false; useYunet = false
+            case .faceDetector: useFaceDetector = true;  useYunet = false
+            case .yunet:        useFaceDetector = false; useYunet = true
+            case .all:          useFaceDetector = true;  useYunet = true
             }
         }
     }
@@ -67,24 +61,23 @@ public struct DetectionSettings: Equatable, Codable {
         minTrackingConfidence: Float = 0.2,
         numFaces: Int = 5,
         minSpan: Double = 0.02,
-        faceDetectorBackend: FaceDetectorBackend = .vision
+        faceDetectorBackend: FaceDetectorBackend = .all
     ) {
         self.minFaceDetectionConfidence = minFaceDetectionConfidence
         self.minFacePresenceConfidence = minFacePresenceConfidence
         self.minTrackingConfidence = minTrackingConfidence
         self.numFaces = numFaces
         self.minSpan = minSpan
-        self.faceDetectorBackend = faceDetectorBackend  // 3 Bool に展開される
+        self.faceDetectorBackend = faceDetectorBackend  // 2 Bool に展開される
     }
 
-    /// 新 API: 3 Bool を直接指定。
+    /// 新 API: 2 Bool を直接指定。
     public init(
         minFaceDetectionConfidence: Float,
         minFacePresenceConfidence: Float,
         minTrackingConfidence: Float,
         numFaces: Int,
         minSpan: Double,
-        useVision: Bool,
         useFaceDetector: Bool,
         useYunet: Bool
     ) {
@@ -93,7 +86,6 @@ public struct DetectionSettings: Equatable, Codable {
         self.minTrackingConfidence = minTrackingConfidence
         self.numFaces = numFaces
         self.minSpan = minSpan
-        self.useVision = useVision
         self.useFaceDetector = useFaceDetector
         self.useYunet = useYunet
     }
@@ -106,13 +98,10 @@ public struct DetectionSettings: Equatable, Codable {
         case minTrackingConfidence
         case numFaces
         case minSpan
-        case useVision
         case useFaceDetector
         case useYunet
-        // 旧キー：補助検出器バックエンドを enum で保存していた時代の値。
+        // 旧キー: 補助検出器バックエンドを enum で保存していた時代の値。
         case faceDetectorBackend
-        // さらに古い旧キー：useAppleVision: Bool。
-        case useAppleVision
     }
 
     public init(from decoder: Decoder) throws {
@@ -123,21 +112,17 @@ public struct DetectionSettings: Equatable, Codable {
         self.numFaces                   = try c.decodeIfPresent(Int.self, forKey: .numFaces) ?? 5
         self.minSpan                    = try c.decodeIfPresent(Double.self, forKey: .minSpan) ?? 0.02
 
-        // 新フォーマット (3 Bool) → 旧フォーマット (enum) → 最古フォーマット (useAppleVision Bool) の順で試す。
-        if let v = try c.decodeIfPresent(Bool.self, forKey: .useVision) {
-            self.useVision = v
-            self.useFaceDetector = try c.decodeIfPresent(Bool.self, forKey: .useFaceDetector) ?? true
+        // 新フォーマット (2 Bool)。旧フォーマットは enum を raw String として読み、
+        // 削除済みの "vision" を含む未知値はデフォルト（両方 ON）に落とす。
+        if let fd = try c.decodeIfPresent(Bool.self, forKey: .useFaceDetector) {
+            self.useFaceDetector = fd
             self.useYunet = try c.decodeIfPresent(Bool.self, forKey: .useYunet) ?? true
-        } else if let backend = try c.decodeIfPresent(FaceDetectorBackend.self, forKey: .faceDetectorBackend) {
-            self.faceDetectorBackend = backend  // setter が 3 Bool に展開
-        } else if let legacy = try c.decodeIfPresent(Bool.self, forKey: .useAppleVision) {
-            self.faceDetectorBackend = legacy ? .vision : .off
+        } else if let raw = try? c.decodeIfPresent(String.self, forKey: .faceDetectorBackend),
+                  let backend = FaceDetectorBackend(rawValue: raw) {
+            self.faceDetectorBackend = backend  // setter が 2 Bool に展開
         } else {
-            // 何も無ければ旧デフォルト .vision 相当（Vision のみ ON）。
-            // FaceDetector / YuNet は UI からオプトインさせる。
-            self.useVision = true
-            self.useFaceDetector = false
-            self.useYunet = false
+            self.useFaceDetector = true
+            self.useYunet = true
         }
     }
 
@@ -148,7 +133,6 @@ public struct DetectionSettings: Equatable, Codable {
         try c.encode(minTrackingConfidence,      forKey: .minTrackingConfidence)
         try c.encode(numFaces,                   forKey: .numFaces)
         try c.encode(minSpan,                    forKey: .minSpan)
-        try c.encode(useVision,                  forKey: .useVision)
         try c.encode(useFaceDetector,            forKey: .useFaceDetector)
         try c.encode(useYunet,                   forKey: .useYunet)
     }
@@ -196,12 +180,22 @@ final class DetectionSettingsStore: ObservableObject {
         didSet { save() }
     }
     private let key = "detectionSettings"
+    /// Apple Vision 削除 + FaceDetector/YuNet デフォルト ON への一括切り替えマイグレーション。
+    /// 一度だけ既存設定を上書きする（以後ユーザーが OFF にした選択は尊重される）。
+    private let visionRemovalMigrationKey = "detectionSettings.migration.visionRemoved.v2"
 
     init() {
         if let data = UserDefaults.standard.data(forKey: key),
            let decoded = try? JSONDecoder().decode(DetectionSettings.self, from: data) {
-            settings = decoded
+            var s = decoded
+            if !UserDefaults.standard.bool(forKey: visionRemovalMigrationKey) {
+                s.useFaceDetector = true
+                s.useYunet = true
+                UserDefaults.standard.set(true, forKey: visionRemovalMigrationKey)
+            }
+            settings = s
         } else {
+            UserDefaults.standard.set(true, forKey: visionRemovalMigrationKey)
             settings = DetectionSettings()
         }
     }

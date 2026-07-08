@@ -22,7 +22,7 @@ Mask-Me は、顔ランドマークに沿ってブロック状のモザイクを
   (`FaceMaskBuilder` / `MosaicShader.metal` の `blockAverage`)。
 - コアロジックは **MediaPipe に一切依存しない SwiftPM ライブラリ `MosaicCore`** として分離
   されています。MediaPipe は公式 SwiftPM 配布がなく CocoaPods / xcframework のみのため、
-  MediaPipe への依存はアプリターゲット側（`App/`）でのみ発生します。これにより `swift build` /
+  MediaPipe への依存はアプリターゲット側（ルートの `MaskMe/`）でのみ発生します。これにより `swift build` /
   `swift test` だけで高速に CI を回せます。
 - 補助顔検出器として Apple Vision（常時 ON・実機専用）、MediaPipe Face Detector
   (BlazeFace)、YuNet (Core ML) の 3 系統があり、`DetectionSettings` の
@@ -35,11 +35,12 @@ Mask-Me は、顔ランドマークに沿ってブロック状のモザイクを
 Package.swift                 # MosaicCore ライブラリ（MediaPipe 非依存）
 Sources/MosaicCore/           # 描画・追従・検出率ロジック本体
 Tests/MosaicCoreTests/        # MosaicCore のユニットテスト
-App/                          # アプリターゲット（XcodeGen + CocoaPods）
-  project.yml                 # XcodeGen 定義
-  Podfile                     # MediaPipeTasksVision
-  MaskMe/                     # SwiftUI アプリ本体
-  MaskMeTests/                # 実画像・実動画での顔検出精度テスト（要 MediaPipe / Simulator）
+project.yml                   # XcodeGen 定義（MaskMe / MaskMeTests / OpticalFlowKit）
+Podfile                       # MediaPipeTasksVision
+MaskMe/                       # SwiftUI アプリ本体
+MaskMeTests/                  # 実画像・実動画での顔検出精度テスト（要 MediaPipe / Simulator）
+OpticalFlowKit/               # OpenCV 隔離用の動的 framework（MediaPipe 内包の OpenCV 4.13 と非干渉）
+open.sh                       # xcodegen + pod install + open workspace の一括スクリプト
 .github/workflows/ci.yml      # コア build/test/lint + アプリ build（Simulator, MediaPipe無し）
 .github/workflows/dvalid.yml  # 実動画5本 × backend(off/faceDetector/yunet) の検出精度CI
 .claude-handoff.md            # 作業引き継ぎドキュメント（cloud/別マシン向け）
@@ -65,7 +66,12 @@ swiftlint lint --strict
 アプリターゲットのビルド:
 
 ```bash
-cd App
+./open.sh   # xcodegen generate → pod install → open MaskMe.xcworkspace を一括
+```
+
+または個別に:
+
+```bash
 xcodegen generate
 pod install
 open MaskMe.xcworkspace
@@ -74,7 +80,6 @@ open MaskMe.xcworkspace
 アプリターゲットの実画像・実動画テスト（CI では実行されない。ローカル/Simulator 専用）:
 
 ```bash
-cd App
 xcodegen generate
 pod install
 xcodebuild test \

@@ -35,10 +35,21 @@ extension FaceLandmarkSet {
         minSpan: CGFloat,
         eyeRatioRange: ClosedRange<CGFloat>
     ) -> Bool {
+        plausibilityScore(minSpan: minSpan, eyeRatioRange: eyeRatioRange) > 0
+    }
+
+    /// 幾何学的妥当性を 0...1 の連続スコアで返す。0 は完全棄却、1 は正面 478点顔。
+    /// `eyeRatioRange` の下限を下回った境界顔（横顔・小顔）は完全棄却ではなく低スコアで
+    /// 残し、`LandmarkSmoother`/`DetectionBridge`/`TrackingEvaluator` の EMA が均せる。
+    /// 完全に棄却する条件: 面数不足、span/aspect の物理的破綻、目が口より下（顔向き逆）。
+    public func plausibilityScore(
+        minSpan: CGFloat,
+        eyeRatioRange: ClosedRange<CGFloat>
+    ) -> Float {
         let unit = CGSize(width: 1, height: 1)
         let oval = polygon(for: .faceOval, in: unit)
-        guard oval.count >= 3 else { return false }
-        guard points.count > Self.leftEyeOuterIndex else { return false }
+        guard oval.count >= 3 else { return 0 }
+        guard points.count > Self.leftEyeOuterIndex else { return 0 }
 
         var minX = oval[0].x, maxX = oval[0].x
         var minY = oval[0].y, maxY = oval[0].y
@@ -48,27 +59,35 @@ extension FaceLandmarkSet {
         }
         let width = maxX - minX
         let height = maxY - minY
-        guard width > 0, height > 0 else { return false }
+        guard width > 0, height > 0 else { return 0 }
 
         let span = max(width, height)
-        guard span >= minSpan, span <= Plausibility.maxSpan else { return false }
+        guard span >= minSpan, span <= Plausibility.maxSpan else { return 0 }
 
         let aspect = height / width
-        guard Plausibility.aspectRange.contains(aspect) else { return false }
+        guard Plausibility.aspectRange.contains(aspect) else { return 0 }
 
         let rightEye = points[Self.rightEyeOuterIndex].point(in: unit)
         let leftEye = points[Self.leftEyeOuterIndex].point(in: unit)
         let eyeDistance = hypot(leftEye.x - rightEye.x, leftEye.y - rightEye.y)
         let eyeRatio = eyeDistance / width
-        guard eyeRatioRange.contains(eyeRatio) else { return false }
 
-        // Eyes must sit above the mouth (image y grows downward).
+        // Eyes must sit above the mouth (image y grows downward). この幾何は妥協しない。
         let mouth = polygon(for: .lips, in: unit)
-        guard mouth.count >= 3 else { return false }
+        guard mouth.count >= 3 else { return 0 }
         let mouthY = mouth.reduce(CGFloat(0)) { $0 + $1.y } / CGFloat(mouth.count)
         let eyeY = (rightEye.y + leftEye.y) / 2
-        guard eyeY < mouthY else { return false }
+        guard eyeY < mouthY else { return 0 }
 
-        return true
+        // 目間比のソフトマージン: 下限をわずかに割った候補は 0.3〜1.0 のスコアで残し、
+        // 大きく外れた（下限×0.6 未満）候補は完全棄却する。
+        if eyeRatioRange.contains(eyeRatio) {
+            return 1.0
+        }
+        let softLower = eyeRatioRange.lowerBound * 0.6
+        if eyeRatio < softLower { return 0 }
+        // 線形補間: softLower → 0.3、lowerBound → 1.0
+        let t = (eyeRatio - softLower) / (eyeRatioRange.lowerBound - softLower)
+        return Float(max(0.3, min(1.0, 0.3 + 0.7 * t)))
     }
 }

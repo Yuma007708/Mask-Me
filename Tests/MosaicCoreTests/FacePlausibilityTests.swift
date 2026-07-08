@@ -57,6 +57,41 @@ final class FacePlausibilityTests: XCTestCase {
         XCTAssertFalse(FaceLandmarkSet(points: points, confidence: 1).isPlausibleFace)
     }
 
+    /// 正面顔（既定レンジ内）は plausibilityScore が 1.0（フル合格）で返る。
+    func testPlausibilityScoreForFrontalFaceIsOne() {
+        let face = plausibleFace()
+        let score = face.plausibilityScore(
+            minSpan: 0.02,
+            eyeRatioRange: FaceLandmarkSet.Plausibility.eyeWidthRatioRange
+        )
+        XCTAssertEqual(score, 1.0, accuracy: 0.001)
+    }
+
+    /// 目間比が下限をわずかに割った境界顔は、完全棄却ではなくソフトマージンで 0.3〜1.0 の中間値で残る。
+    /// A-3 の連続 confidence 化と組合わせて、横顔・小顔のちらつきを EMA が均せるようにするため。
+    func testPlausibilityScoreSoftMargin() {
+        var points = plausibleFace().points
+        // 目間比 ~0.32（下限 0.40 未満、softLower=0.24 超）を作る。
+        // plausibleFace の oval width ≈ 0.42 なので eyeDistance ≈ 0.32*0.42 ≈ 0.134
+        points[FaceLandmarkSet.rightEyeOuterIndex] = FaceLandmark(x: 0.433, y: 0.42)
+        points[FaceLandmarkSet.leftEyeOuterIndex] = FaceLandmark(x: 0.567, y: 0.42)
+        let set = FaceLandmarkSet(points: points, confidence: 1)
+        let score = set.plausibilityScore(minSpan: 0.02, eyeRatioRange: 0.40...1.0)
+        XCTAssertGreaterThan(score, 0.0)
+        XCTAssertLessThan(score, 1.0)
+    }
+
+    /// 目間比が softLower を大きく下回るケースは完全棄却（体誤フィット等）。
+    func testPlausibilityScoreHardRejectBelowSoftLower() {
+        var points = plausibleFace().points
+        // 目間比 ~0.05 = 極端に狭い（softLower=0.24 未満）
+        points[FaceLandmarkSet.rightEyeOuterIndex] = FaceLandmark(x: 0.494, y: 0.42)
+        points[FaceLandmarkSet.leftEyeOuterIndex] = FaceLandmark(x: 0.506, y: 0.42)
+        let set = FaceLandmarkSet(points: points, confidence: 1)
+        let score = set.plausibilityScore(minSpan: 0.02, eyeRatioRange: 0.40...1.0)
+        XCTAssertEqual(score, 0.0, accuracy: 0.001)
+    }
+
     func testExtremeAspectRejected() {
         // A tall thin "body"-like box: width tiny vs height.
         var points = [FaceLandmark](

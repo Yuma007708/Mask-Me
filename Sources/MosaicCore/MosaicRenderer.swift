@@ -49,6 +49,25 @@ public enum MosaicRendererError: Error, Equatable {
     case commandQueueUnavailable
 }
 
+/// シェーダーライブラリを取得する。
+///
+/// iOS（Xcode ビルド）は `.metal` を precompiled な `default.metallib` にしてバンドルへ含めるため
+/// `makeDefaultLibrary(bundle:)` で取れる。一方 SwiftPM の `.process("*.metal")` は**ソースを
+/// コンパイルせず生ファイルのままコピー**するので macOS の `swift test` では default ライブラリが
+/// 無い。その場合はバンドル同梱の `.metal` ソースを**実行時コンパイル**してフォールバックする
+/// （macOS ネイティブでのレンダラー計測・テストを可能にする堅牢化。iOS 挙動は不変＝precompiled 経路）。
+func loadMosaicShaderLibrary(device: MTLDevice) -> MTLLibrary? {
+    if let precompiled = try? device.makeDefaultLibrary(bundle: .module) {
+        return precompiled
+    }
+    guard let url = Bundle.module.url(forResource: "MosaicShader", withExtension: "metal"),
+          let source = try? String(contentsOf: url, encoding: .utf8),
+          let compiled = try? device.makeLibrary(source: source, options: nil) else {
+        return nil
+    }
+    return compiled
+}
+
 /// Drives the whole effect for a single frame: derive the contour mask from
 /// landmarks, run the from-scratch Metal pixelation kernel, and publish a
 /// smoothed ``TrackingStatus``.
@@ -106,7 +125,7 @@ public final class MosaicRenderer: NSObject {
         guard let device = device else { throw MosaicRendererError.noDevice }
         self.device = device
 
-        guard let library = try? device.makeDefaultLibrary(bundle: .module) else {
+        guard let library = loadMosaicShaderLibrary(device: device) else {
             throw MosaicRendererError.libraryUnavailable
         }
         guard let function = library.makeFunction(name: "mosaicKernel") else {

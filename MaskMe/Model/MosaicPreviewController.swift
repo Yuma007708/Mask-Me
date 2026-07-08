@@ -102,6 +102,20 @@ final class MosaicPreviewController {
         renderCurrentFrame()
     }
 
+    /// タイムライン・スクラブ用: 直前の未完了シークをキャンセルして最新要求のみ処理する。
+    /// ドラッグ中に大量に発火する `seek(to:)` を直列化するとキューが詰まって
+    /// プレビュー画像の反応が遅れるため、常に最新1件のみに絞る。
+    private var pendingSeekTask: Task<Void, Never>?
+
+    func seekLatest(to position: Double) {
+        pendingSeekTask?.cancel()
+        pendingSeekTask = Task { [weak self] in
+            guard !Task.isCancelled else { return }
+            await self?.seek(to: position)
+        }
+    }
+
+
     /// コントロール（blockSize など）が変化したときに現在フレームを再描画する。
     func invalidate() {
         renderCurrentFrame()
@@ -175,6 +189,13 @@ final class MosaicPreviewController {
         // 描画中のフレームの実際の時刻（理想時刻ではなく）で landmarks を引く。
         // これにより「顔の動きにモザイクが一拍遅れる」現象を解消する。
         let timeSec = actualItemTime.isValid ? actualItemTime.seconds : currentTime.seconds
+        // 事前スキャン廃止: 再生・シークで表示中のこのフレームに顔検出を相乗りさせ、
+        // detectionCache を埋める。表示スレッドを塞がないよう、検出すべきときだけ
+        // 縮小 CGImage を作ってモデルへ渡す（モデル側でバックグラウンド検出）。
+        if model.shouldDetectPreviewFrame(at: timeSec),
+           let detImage = detectionCGImage(from: pixelBuffer) {
+            model.submitPreviewFrameForDetection(detImage, at: timeSec)
+        }
         // 顔タブが OFF のときは顔ランドマークを使わない。
         // 検出キャッシュ欠落時の freeze はしない。lookupFaces 側で両側マッチング補間が
         // 連続する顔だけ返すようにしているため、ここで freeze するとアウト→イン時に
@@ -225,6 +246,18 @@ final class MosaicPreviewController {
         if duration > 0 {
             model.playbackPosition = max(0, min(timeSec / duration, 1))
         }
+    }
+
+    /// ライブ検出用に pixelBuffer を最大 480px 幅へ縮小した CGImage を作る。
+    /// 検出精度は 480px で十分で、フル解像度より MediaPipe が速く回る。
+    /// throttle 済みのフレーム（同時1枚）だけ変換されるので表示スレッドへの負荷は小さい。
+    private func detectionCGImage(from pixelBuffer: CVPixelBuffer) -> CGImage? {
+        let width = CVPixelBufferGetWidth(pixelBuffer)
+        let targetWidth = 480.0
+        let scale = min(targetWidth / Double(width), 1.0)
+        let ci = CIImage(cvPixelBuffer: pixelBuffer)
+            .transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+        return ciContext.createCGImage(ci, from: ci.extent)
     }
 
     deinit {

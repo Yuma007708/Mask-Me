@@ -7,8 +7,9 @@ options:
 
 packages:
   MosaicCore:
-    # The MediaPipe-free core lives one directory up as a SwiftPM package.
-    path: ../
+    # The MediaPipe-free core lives at the repo root as a SwiftPM package
+    # (Sources/MosaicCore, Package.swift).
+    path: .
   OpenCV:
     # 疎LKオプティカルフロー（goodFeaturesToTrack + calcOpticalFlowPyrLK）専用。
     # 公式CocoaPods 'OpenCV' は4.3.0(2020)で停止しておりarm64シミュレータ非対応のため
@@ -92,7 +93,7 @@ targets:
 
   # Unit-test target for real-image face-detection accuracy. Requires the
   # MediaPipe pod + face_landmarker.task model + fixture images, so it runs on a
-  # Simulator / device — not in the pod-free CI build. See App/MaskMeTests/Fixtures.
+  # Simulator / device — not in the pod-free CI build. See MaskMeTests/Fixtures.
   MaskMeTests:
     type: bundle.unit-test
     platform: iOS

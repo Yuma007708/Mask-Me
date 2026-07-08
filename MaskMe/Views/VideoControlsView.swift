@@ -6,18 +6,24 @@ struct VideoControlsView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // シークバー
+            // サムネイル付きタイムライン（スクラブ + In/Out トリム）
+            VideoTimelineView(model: model)
+
+            // 時刻表示（トリム範囲の尺と現在時刻）
             HStack(spacing: 8) {
                 Text(timeString(from: model.playbackPosition * model.videoDuration))
                     .font(.caption2.monospacedDigit())
                     .foregroundStyle(.secondary)
                     .frame(width: 42, alignment: .leading)
 
-                Slider(value: Binding(
-                    get: { model.playbackPosition },
-                    set: { model.seekTo(position: $0) }
-                ), in: 0...1)
-                .tint(.white)
+                Spacer()
+
+                // トリム範囲の尺を表示（開始 → 終了）
+                Text(trimSummary)
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.yellow)
+
+                Spacer()
 
                 Text(timeString(from: model.videoDuration))
                     .font(.caption2.monospacedDigit())
@@ -25,7 +31,6 @@ struct VideoControlsView: View {
                     .frame(width: 42, alignment: .trailing)
             }
             .padding(.horizontal, 16)
-            .padding(.top, 6)
             .padding(.bottom, 4)
 
             // 再生ボタン + 再検出ボタン
@@ -63,5 +68,14 @@ struct VideoControlsView: View {
         guard seconds.isFinite, seconds >= 0 else { return "0:00" }
         let s = Int(seconds)
         return String(format: "%d:%02d", s / 60, s % 60)
+    }
+
+    /// トリム範囲の要約表示（例: "0:03 - 0:12"）。全体が選択されているときは非表示。
+    private var trimSummary: String {
+        let isFull = model.trimRange.lowerBound <= 0.001 && model.trimRange.upperBound >= 0.999
+        guard !isFull else { return "" }
+        let s = timeString(from: model.trimRange.lowerBound * model.videoDuration)
+        let e = timeString(from: model.trimRange.upperBound * model.videoDuration)
+        return "\(s) - \(e)"
     }
 }

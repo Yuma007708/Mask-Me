@@ -16,6 +16,8 @@ struct EditorView: View {
     @SceneStorage("photoEditingActive") private var photoEditingActive = false
 
     @State private var showDiscardConfirm = false
+    /// エクスポート時の速度／品質選択ダイアログ表示フラグ。
+    @State private var showSpeedDialog = false
     /// 動画下書きの更新先 ID（同一セッションは上書き保存）。
     @State private var videoDraftID: UUID?
 
@@ -71,6 +73,21 @@ struct EditorView: View {
                 dismiss()
             }
             Button("編集を続ける", role: .cancel) {}
+        }
+        .confirmationDialog(
+            "加工速度を選択",
+            isPresented: $showSpeedDialog,
+            titleVisibility: .visible
+        ) {
+            ForEach(ExportSpeed.allCases, id: \.self) { speed in
+                Button(speed.displayName) {
+                    model.exportSpeed = speed
+                    Task { await runAction() }
+                }
+            }
+            Button("キャンセル", role: .cancel) {}
+        } message: {
+            Text("速いほど処理時間が短くなります。速い動きが多い動画は「高品質」推奨。")
         }
         .alert("保存しました", isPresented: $model.didSave) {
             Button("OK", role: .cancel) {}
@@ -200,7 +217,12 @@ struct EditorView: View {
         }
         ToolbarItem(placement: .topBarTrailing) {
             Button(model.mode == .photo ? "保存" : "エクスポート") {
-                Task { await runAction() }
+                // 動画は速度段を選んでから加工。写真は即保存。
+                if model.mode == .video {
+                    showSpeedDialog = true
+                } else {
+                    Task { await runAction() }
+                }
             }
             .disabled(model.previewImage == nil || model.exportProgress != nil)
         }
