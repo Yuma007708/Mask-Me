@@ -23,6 +23,12 @@ final class EndToEndExportTests: XCTestCase {
     private let totalFrames = 9000     // 5分 @30fps ちょうど（外挿なし）
 
     func testFiveMinuteEndToEndProcessingWallClock() throws {
+        // 実時間スループット計測テスト。GitHub Actions ランナーは GPU が準仮想化
+        // (AppleM2ScalerParavirtDriver 不在) で実機の数分の一の速度しか出ず、
+        // 300 秒タイムアウト超過 → AVAssetWriter の session 未開始 append で
+        // signal 6 クラッシュに至るため、CI では計測しない。
+        try XCTSkipIf(ProcessInfo.processInfo.environment["CI"] != nil,
+                      "CI ランナーでは実時間スループットを計測しない")
         guard let device = MTLCreateSystemDefaultDevice() else {
             throw XCTSkip("Metal デバイスが無い環境ではスキップ")
         }
