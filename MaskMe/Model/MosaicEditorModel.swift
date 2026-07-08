@@ -415,7 +415,6 @@ public final class MosaicEditorModel: ObservableObject {
         previewController?.seekLatest(to: position)
     }
 
-
     // MARK: - 手動再検出（動画: 現在シーク位置で再検出）
 
     public func redetect(at position: Double) async {
@@ -562,8 +561,23 @@ public final class MosaicEditorModel: ObservableObject {
     private var liveMatchCounts: [Int] = []
     private var liveSampleCount = 0
 
-    private func liveBucket(_ timeSec: Double) -> Double {
+    func liveBucket(_ timeSec: Double) -> Double {
         (timeSec * liveBucketFPS).rounded() / liveBucketFPS
+    }
+
+    /// プリスキャン（フル解像度・VIDEO モード）の 1 フレーム分の結果を検出キャッシュへ
+    /// 記録する。MainActor 上で呼ぶこと。
+    ///
+    /// - キーはライブ検出と同じ 15fps バケット（`liveBucket`）に正規化する。
+    ///   プリスキャンループの `t += 1/15` 累積値をそのままキーにすると、丸めで得た
+    ///   バケット値と最下位ビットで食い違い、ライブ検出が先に書いた低解像度エントリ
+    ///   （誤検知含む）を上書きできずプレビュー・エクスポート両方に残り続ける。
+    /// - 空結果も上書き記録する。フル解像度パイプラインの「顔なし」判定でライブ検出
+    ///   （480px 簡易経路）の誤検知を消すため。空エントリは DetectionBridge が
+    ///   無視するので追従率には影響せず、nearestCachedFaces のホールド抑止
+    ///   （体への貼り付き防止）には効く。
+    func storePreScanResult(_ faces: [FaceLandmarkSet], at rawTime: Double) {
+        detectionCache[liveBucket(rawTime)] = faces
     }
 
     /// テスト専用: 「この時刻をスキャンしたが顔は無かった」状態を再現する。
@@ -726,10 +740,7 @@ public final class MosaicEditorModel: ObservableObject {
             let timeForCache = t
             let matchCountsCopy = matchCounts
             let updated = await MainActor.run { [weak self, img] () -> [Int] in
-                // 空結果はキャッシュしない（直前の有効検出を再利用させる）
-                if !facesForCache.isEmpty {
-                    self?.detectionCache[timeForCache] = facesForCache
-                }
+                self?.storePreScanResult(facesForCache, at: timeForCache)
                 guard let self else { return matchCountsCopy }
                 // 初期フレーム検出が失敗して detectedFaces が空のまま残っている場合、
                 // プリスキャンで最初に見つかった顔を補完する（安全網）。

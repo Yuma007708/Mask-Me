@@ -24,10 +24,14 @@ Mask-Me は、顔ランドマークに沿ってブロック状のモザイクを
   されています。MediaPipe は公式 SwiftPM 配布がなく CocoaPods / xcframework のみのため、
   MediaPipe への依存はアプリターゲット側（ルートの `MaskMe/`）でのみ発生します。これにより `swift build` /
   `swift test` だけで高速に CI を回せます。
-- 補助顔検出器として Apple Vision（常時 ON・実機専用）、MediaPipe Face Detector
-  (BlazeFace)、YuNet (Core ML) の 3 系統があり、`DetectionSettings` の
-  `useVision` / `useFaceDetector` / `useYunet` の 3 Bool で個別に ON/OFF できます
-  （詳細は README.md 参照）。
+- 補助顔検出器として MediaPipe Face Detector (BlazeFace) と YuNet (Core ML) の
+  2 系統があり、`DetectionSettings` の `useFaceDetector` / `useYunet` の 2 Bool で
+  個別に ON/OFF できます（Apple Vision は実機での体誤検知・Simulator での 0 検出の
+  ため削除済み。詳細は README.md 参照）。
+- 再生中はライブ検出（480px 縮小 + IMAGE モード）が `detectionCache` を先行して
+  埋め、プリスキャン（フル解像度 + VIDEO モード）が後から同じ 15fps バケットキーを
+  上書きします。キー整合と空結果の扱いは `MosaicEditorModel.storePreScanResult` の
+  doc コメントを参照。
 
 ## リポジトリ構成（要点）
 
@@ -93,16 +97,10 @@ xcodebuild test \
 フロー `.github/workflows/dvalid.yml`（5動画 × 3 backend = 最大15ジョブ並列、Google Drive から
 サンプル動画を取得）で行い、これは push では自動実行されず `workflow_dispatch` で手動起動する。
 
-## 現在のブランチ状況（fix/video-face-detection）
+## 現在の状況
 
-動画の顔検出精度チューニング作業中。直近の `dvalid.yml` CI Run（#28496967052）では
-**`s1/off`・`s3/yunet`・`s5/off` の3ジョブが失敗**しており、原因調査待ちの状態です。
-
-`.claude-handoff.md` の記録によると、`s1`/`s3` の `off`・`yunet` backend は動画長 92秒以上 +
-補助検出器が MediaPipe FaceLandmarker 共有以外という組み合わせで、テストプロセスがフレーム
-ループ終盤でクラッシュする構造的な flaky が確認されています（`.faceDetector` backend や短尺
-動画では再現しない）。対策候補（scanner の定期再生成、フレーム間隔の見直し、テストの分割など）
-は `.claude-handoff.md` の「今後の対策候補」「残作業」セクションを参照してください。
+最新状況は `.claude-handoff.md` を参照してください（このセクションはすぐ古くなるため、
+詳細な CI Run 番号や残作業は handoff 側にのみ記録します）。
 
 作業を始める前に、まず `.claude-handoff.md` の最新状況（CI Run結果・残作業・アクションリスト）
 を確認してから着手してください。
