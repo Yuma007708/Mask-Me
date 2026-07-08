@@ -82,11 +82,11 @@ final class SampleFalsePositiveTests: XCTestCase {
                     actualTime: nil
                 ) else { return }
                 totalFrames += 1
-                // 実機ライブ検出と同じく 480px 幅に縮小してから検出する。
+                // 実機ライブ検出と同じ幅（liveDetectionTargetWidth）に縮小してから検出する。
                 // フル解像度で検出するとテストは実機と別条件を測ることになり、
                 // 「シミュレータで緑・実機で誤検知」の乖離を再現できない。
                 // `MosaicPreviewController.detectionCGImage(from:)` と対応。
-                let img = UIImage(cgImage: Self.downscaleTo480(cg))
+                let img = UIImage(cgImage: Self.downscaleForLiveDetection(cg))
                 let faces = scanner.allLandmarks(in: img, timestampMs: Int(t * 1000))
                 if !faces.isEmpty { framesWithDetection += 1 }
                 if faces.count > 1 { multiCount += 1 }
@@ -120,11 +120,12 @@ final class SampleFalsePositiveTests: XCTestCase {
                           "\(url.lastPathComponent): 面積40%超のbboxが多い（体全体を顔として拾っている疑い）")
     }
 
-    /// 実機ライブ検出と同じく最大 480px 幅へ縮小した CGImage を返す。
+    /// 実機ライブ検出と同じ `MosaicEditorModel.liveDetectionTargetWidth` px 幅へ
+    /// 縮小した CGImage を返す。
     /// `MosaicPreviewController.detectionCGImage(from:)` と同じスケール規則。
     private static let ciContext = CIContext()
-    static func downscaleTo480(_ cg: CGImage) -> CGImage {
-        let target = 480.0
+    static func downscaleForLiveDetection(_ cg: CGImage) -> CGImage {
+        let target = MosaicEditorModel.liveDetectionTargetWidth
         let scale = min(target / Double(cg.width), 1.0)
         guard scale < 0.99 else { return cg }
         let ci = CIImage(cgImage: cg)

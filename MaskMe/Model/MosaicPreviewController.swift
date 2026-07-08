@@ -115,7 +115,6 @@ final class MosaicPreviewController {
         }
     }
 
-
     /// コントロール（blockSize など）が変化したときに現在フレームを再描画する。
     func invalidate() {
         renderCurrentFrame()
@@ -248,12 +247,12 @@ final class MosaicPreviewController {
         }
     }
 
-    /// ライブ検出用に pixelBuffer を最大 480px 幅へ縮小した CGImage を作る。
-    /// 検出精度は 480px で十分で、フル解像度より MediaPipe が速く回る。
+    /// ライブ検出用に pixelBuffer を最大 `MosaicEditorModel.liveDetectionTargetWidth` px
+    /// 幅へ縮小した CGImage を作る。フル解像度より MediaPipe が速く回る。
     /// throttle 済みのフレーム（同時1枚）だけ変換されるので表示スレッドへの負荷は小さい。
     private func detectionCGImage(from pixelBuffer: CVPixelBuffer) -> CGImage? {
         let width = CVPixelBufferGetWidth(pixelBuffer)
-        let targetWidth = 480.0
+        let targetWidth = MosaicEditorModel.liveDetectionTargetWidth
         let scale = min(targetWidth / Double(width), 1.0)
         let ci = CIImage(cvPixelBuffer: pixelBuffer)
             .transformed(by: CGAffineTransform(scaleX: scale, y: scale))

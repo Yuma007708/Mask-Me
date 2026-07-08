@@ -28,7 +28,8 @@ Mask-Me は、顔ランドマークに沿ってブロック状のモザイクを
   2 系統があり、`DetectionSettings` の `useFaceDetector` / `useYunet` の 2 Bool で
   個別に ON/OFF できます（Apple Vision は実機での体誤検知・Simulator での 0 検出の
   ため削除済み。詳細は README.md 参照）。
-- 再生中はライブ検出（480px 縮小 + IMAGE モード）が `detectionCache` を先行して
+- 再生中はライブ検出（`MosaicEditorModel.liveDetectionTargetWidth`=640px 縮小 +
+  IMAGE モード）が `detectionCache` を先行して
   埋め、プリスキャン（フル解像度 + VIDEO モード）が後から同じ 15fps バケットキーを
   上書きします。キー整合と空結果の扱いは `MosaicEditorModel.storePreScanResult` の
   doc コメントを参照。

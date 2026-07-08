@@ -269,14 +269,23 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
 
     public func allLandmarks(in image: UIImage) -> [FaceLandmarkSet] {
         let (mp, mpSource) = mpDetectImageWithEnhance(image)
-        guard bboxDetector != nil else {
+        var result = mp
+        var source = mp.isEmpty ? FaceDetectionSource.none : mpSource
+        if bboxDetector != nil {
+            result = augmentWithBBoxDetector(image: image, mpResults: mp, useImageMode: true)
             // MP が生検出しても妥当性フィルタで全棄却されると空になるため、
             // 「最初の顔を提供した」ソースは空でないときだけ記録する。
-            recordSource(mp.isEmpty ? .none : mpSource)
-            return mp
+            source = mp.isEmpty ? (result.isEmpty ? .none : .bbox) : mpSource
         }
-        let result = augmentWithBBoxDetector(image: image, mpResults: mp, useImageMode: true)
-        recordSource(mp.isEmpty ? (result.isEmpty ? .none : .bbox) : mpSource)
+        // 全段（MP + enhance 3 レベル + 補助 bbox）が全滅したフレームのみ、
+        // conf=0.05 の全画面再走査で救済する（+1 推論はこの失敗フレーム限定）。
+        // 逆光・低コントラストでデフォルト閾値を割る顔をライブプレビューでも拾う。
+        // VIDEO モード経路が :315 で行う lowConf 救済の IMAGE 版。
+        if result.isEmpty {
+            result = lowConfDetect(image)
+            if !result.isEmpty { source = .lowConf }
+        }
+        recordSource(source)
         return result
     }
 

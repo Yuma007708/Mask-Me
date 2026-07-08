@@ -1026,12 +1026,21 @@ public final class MosaicEditorModel: ObservableObject {
         return UIImage(cgImage: cg)
     }
 
-    /// 実機ライブ検出と同じ 480px 幅の縮小 CGImage を返す。
+    /// ライブ検出・初期スキャンで使う検出入力の目標幅（px）。
+    /// `MosaicPreviewController.detectionCGImage(from:)` と検証テスト
+    /// （DValidLivePathTests / SampleFalsePositiveTests）もこの値を参照し、
+    /// 実機・シミュレータ・テストが常に同一解像度で検出するよう一元化する。
+    /// 480 → 640: 逆光・低コントラストの小顔が 480px ではモデル入力への内部縮小で
+    /// 潰れて検出下限を割るため（DValidLivePathTests の backlight セット実測で
+    /// liveRate 0〜14% の動画があった）、推論回数を増やさずに底上げする。
+    static let liveDetectionTargetWidth = 640.0
+
+    /// 実機ライブ検出と同じ `liveDetectionTargetWidth` px 幅の縮小 CGImage を返す。
     /// `MosaicPreviewController.detectionCGImage(from:)` と同じスケール規則。
     private static let detectionCIContext = CIContext()
     static func downscaleForDetection(_ image: UIImage) -> UIImage {
         guard let cg = image.cgImage else { return image }
-        let target = 480.0
+        let target = liveDetectionTargetWidth
         let scale = min(target / Double(cg.width), 1.0)
         guard scale < 0.99 else { return image }
         let ci = CIImage(cgImage: cg)
