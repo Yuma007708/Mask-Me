@@ -113,16 +113,14 @@ struct SettingsView: View {
                     .fixedSize()
             }
 
-            // 補助顔検出器の選択。
-            // Apple Vision は常時 ON（実機のみ動作・設定 UI には出さない）。
-            // FaceDetector と YuNet は個別トグルで切替。
+            // 補助顔検出器の選択。FaceDetector と YuNet の個別トグル（デフォルト両方 ON）。
             // Pro 機能：`EntitlementProvider` の isPro が false の時はトグルをロックする。
             VStack(alignment: .leading, spacing: 6) {
                 HStack {
                     Label("補助検出器", systemImage: "wand.and.stars")
                         .layoutPriority(1)
                     Spacer()
-                    TipButton(text: "MediaPipe が取り逃した顔を別の検出器で見つけ、その領域を MediaPipe で再検出して補完します。Apple Vision は常時 ON（実機のみ動作）。Face Detector (BlazeFace) と YuNet (OpenCV) は ON にすると検出率が上がりますが、処理時間も増えます。")
+                    TipButton(text: "MediaPipe が取り逃した顔を別の検出器で見つけ、その領域を MediaPipe で再検出して補完します。OFF にすると処理は軽くなりますが検出率が下がります。")
                 }
                 AuxDetectorToggle(
                     title: "MediaPipe Face Detector",

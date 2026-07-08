@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 struct MainTabView: View {
     @State private var selectedTab: Tab = .edit
@@ -52,11 +53,15 @@ private struct AppTabBar: View {
     @ViewBuilder
     private func tabButton(icon: String, label: String, tab: MainTabView.Tab) -> some View {
         let isSelected = selected == tab
+        // 一部のシンボル（例: square.and.pencil）には .fill 版が存在しないため、
+        // 実在するときだけ .fill に切り替える。存在しない名前を渡すと赤ログが出る。
+        let filled = icon + ".fill"
+        let symbolName = (isSelected && UIImage(systemName: filled) != nil) ? filled : icon
         Button {
             selected = tab
         } label: {
             VStack(spacing: 3) {
-                Image(systemName: isSelected ? icon + ".fill" : icon)
+                Image(systemName: symbolName)
                     .font(.system(size: 22))
                 Text(label)
                     .font(.caption2)

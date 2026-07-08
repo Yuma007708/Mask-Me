@@ -87,9 +87,21 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
     private struct TrackedFace {
         var box: CGRect
         var missCount: Int
+        /// 位置・寸法の等速度 Kalman。前フレーム観測から次フレーム位置を予測し、
+        /// ROI を「速度連動」で先回りさせる。速い頭部運動・パン中でも ROI が顔から
+        /// 外れず、tiled 全滅リカバリ（10-45f 遅延）を短縮する。
+        var kalman: KalmanBoxTracker
     }
     private var trackedFaces: [TrackedFace] = []
     private var lastVideoTimestampMs: Int = .min
+
+    /// 検出した bbox 列から TrackedFace を再構築する。実検出があった時点で
+    /// Kalman を初期化して次フレーム以降の予測に備える。
+    private func rebuildTracks(from boxes: [CGRect]) {
+        trackedFaces = boxes.map { box in
+            TrackedFace(box: box, missCount: 0, kalman: KalmanBoxTracker(initialBox: box))
+        }
+    }
 
     // MARK: - オプティカルフロー・ブリッジ（video モード専用）
     //
@@ -204,9 +216,8 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
         // をフィットしたが 0.35 を僅かに上回って通過」していたケースを排除する。
         self.plausibilityEyeRatioRange = 0.40...1.0
         self.landmarker = try FaceLandmarker(options: options)
-        // useVision / useFaceDetector / useYunet の組み合わせから補助検出器を構築する。
+        // useFaceDetector / useYunet の組み合わせから補助検出器を構築する。
         self.bboxDetector = Self.makeBBoxDetector(
-            useVision: settings.useVision,
             useFaceDetector: settings.useFaceDetector,
             useYunet: settings.useYunet
         )
@@ -229,12 +240,12 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
     }
 
     private static func makeBBoxDetector(
-        useVision: Bool,
         useFaceDetector: Bool,
         useYunet: Bool
     ) -> FaceBBoxDetecting? {
+        // Apple Vision は削除済み: 実機で torso・首・肩を顔 bbox として拾い体モザイクの
+        // 原因になった上、Simulator では 0 検出でシミュレータ検証が不可能だった。
         var detectors: [FaceBBoxDetecting] = []
-        if useVision         { detectors.append(AppleVisionFaceDetector()) }
         if useFaceDetector   { detectors.append(MediaPipeFaceBBoxDetector()) }
         if useYunet          { detectors.append(YuNetFaceDetector()) }
         switch detectors.count {
@@ -297,7 +308,7 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
                 result = redetectFromTrackedBoxes(image: image)
                 source = result.isEmpty ? .none : .roi
             } else {
-                trackedFaces = result.map { TrackedFace(box: $0.boundingBox, missCount: 0) }
+                rebuildTracks(from: result.map { $0.boundingBox })
             }
             if result.isEmpty {
                 // それでもゼロなら、低 confidence の全画面走査を最後にもう一度だけ。
@@ -305,7 +316,7 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
                 result = lowConfDetect(image)
                 source = result.isEmpty ? .none : .lowConf
                 if !result.isEmpty {
-                    trackedFaces = result.map { TrackedFace(box: $0.boundingBox, missCount: 0) }
+                    rebuildTracks(from: result.map { $0.boundingBox })
                 }
             }
             if result.isEmpty, trackedFaces.allSatisfy({ $0.missCount >= tileKickInMisses }) {
@@ -318,7 +329,7 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
                 result = tiledDetect(image)
                 source = result.isEmpty ? .none : .tiled
                 if !result.isEmpty {
-                    trackedFaces = result.map { TrackedFace(box: $0.boundingBox, missCount: 0) }
+                    rebuildTracks(from: result.map { $0.boundingBox })
                 }
             }
             if !result.isEmpty {
@@ -415,8 +426,9 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
               let mpImage = try? MPImage(uiImage: image),
               let result = try? lm.detect(image: mpImage),
               !result.faceLandmarks.isEmpty else { return [] }
-        return convertAll(result).filter {
-            $0.isPlausibleFace(minSpan: plausibilityMinSpan, eyeRatioRange: 0.45...1.0)
+        return result.faceLandmarks.compactMap { face in
+            let pts = face.map { FaceLandmark(x: $0.x, y: $0.y, z: $0.z) }
+            return makeLandmarkSet(points: pts, eyeRatioRange: 0.45...1.0)
         }
     }
 
@@ -449,14 +461,19 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
                       let result = try? cropLandmarker.detect(image: mpImage),
                       let first = result.faceLandmarks.first else { continue }
                 let points = first.map { FaceLandmark(x: $0.x, y: $0.y, z: $0.z) }
-                let confidence: Float = points.count >= FaceLandmarkSet.fullMeshCount ? 1.0 : 0.6
-                candidate = FaceLandmarkSet(points: points, confidence: confidence)
-                    .remapped(into: tile)
-                break
+                // remapped 後の座標系で妥当性を評価する必要があるので、makeLandmarkSet は
+                // 一時 tile 座標では geom を過小評価するため remap 後に判定する。
+                let raw = FaceLandmarkSet(
+                    points: points,
+                    confidence: Float(min(1.0, Double(points.count) / Double(FaceLandmarkSet.fullMeshCount)))
+                ).remapped(into: tile)
+                if let vetted = makeLandmarkSet(points: raw.points, eyeRatioRange: 0.45...1.0) {
+                    candidate = vetted
+                    break
+                }
             }
             guard let remapped = candidate else { continue }
-            guard remapped.isPlausibleFace(minSpan: plausibilityMinSpan, eyeRatioRange: 0.45...1.0),
-                  !found.contains(where: { iou($0.boundingBox, remapped.boundingBox) > 0.3 })
+            guard !found.contains(where: { iou($0.boundingBox, remapped.boundingBox) > 0.3 })
             else { continue }
             found.append(remapped)
         }
@@ -492,8 +509,8 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
                   let result = try? cropLandmarker.detect(image: mpImage),
                   let first = result.faceLandmarks.first else { return false }
             let points = first.map { FaceLandmark(x: $0.x, y: $0.y, z: $0.z) }
-            let confidence: Float = points.count >= FaceLandmarkSet.fullMeshCount ? 1.0 : 0.6
-            let redetected = FaceLandmarkSet(points: points, confidence: confidence)
+            let meshFraction = Float(min(1.0, Double(points.count) / Double(FaceLandmarkSet.fullMeshCount)))
+            let redetected = FaceLandmarkSet(points: points, confidence: meshFraction)
                 .remapped(into: roi)
             return iou(redetected.boundingBox, box) > 0.3
         }
@@ -512,16 +529,44 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
     /// 前フレームで検出した顔の bbox を広げた ROI を IMG モードで再走査する。
     /// 採用条件は「妥当な顔であること」に加えて「前フレームと同じ顔とみなせる連続性」
     /// （IoU > 0.1 かつ面積比 0.3〜3.0）。誤検出が track を乗っ取って居座るのを防ぐ。
+    /// canonical 正面顔メッシュ（468点、frontalUV）を bbox にアフィンで貼り付ける。
+    /// 補助検出器が bbox は拾えたが MP がメッシュ取得に失敗したフレームで、
+    /// 「近似メッシュ + 低 confidence」で残す最終フォールバック。
+    /// TrackingEvaluator の lockThreshold=0.5 は越えないので tracking 状態は
+    /// 生成しないが、`LandmarkSmoother` は保持できるので次フレームまでの
+    /// ちらつき軽減に効く。
+    private func canonicalMeshFitted(to normalizedBox: CGRect,
+                                     confidence: Float = 0.4) -> FaceLandmarkSet {
+        let uv = FaceMeshTopology.frontalUV
+        let count = FaceMeshTopology.vertexCount
+        var pts: [FaceLandmark] = []
+        pts.reserveCapacity(count)
+        let bx = Float(normalizedBox.minX), by = Float(normalizedBox.minY)
+        let bw = Float(normalizedBox.width), bh = Float(normalizedBox.height)
+        for i in 0..<count {
+            let u = uv[i * 2]
+            let v = uv[i * 2 + 1]
+            pts.append(FaceLandmark(x: bx + u * bw, y: by + v * bh, z: 0))
+        }
+        return FaceLandmarkSet(points: pts, confidence: confidence)
+    }
+
     private func redetectFromTrackedBoxes(image: UIImage) -> [FaceLandmarkSet] {
         guard let cropLandmarker = landmarkerForCrop, !trackedFaces.isEmpty else { return [] }
         var results: [FaceLandmarkSet] = []
         for index in trackedFaces.indices {
             let oldBox = trackedFaces[index].box
-            let factor = min(
-                roiExpansion + roiExpansionPerMiss * CGFloat(trackedFaces[index].missCount),
-                roiExpansionMax
-            )
-            let roi = expandedClamped(oldBox, factor: factor)
+            // A-1: Kalman を1ステップ進めた予測位置を ROI 中心にする。速い頭部運動でも
+            // ROI が顔から外れないので、tiled 全滅リカバリの 10-45f 遅延が短縮される。
+            trackedFaces[index].kalman.predict(dt: 1.0)
+            let predictedBox = trackedFaces[index].kalman.predictedBox
+            let speed = trackedFaces[index].kalman.speedMagnitude
+            // 速度連動の ROI 拡大: speed=0 で基本値、速度が上がるほど拡大して先取り。
+            // 検出ミスが続いた場合の従来の漸増も併用（速度がない状態で顔だけ動く場合の保険）。
+            let missBoost = roiExpansionPerMiss * CGFloat(trackedFaces[index].missCount)
+            let speedBoost = min(1.5, speed * 15.0)  // speed 0.1（画面10%/f）で +1.5
+            let factor = min(roiExpansion + missBoost + speedBoost, roiExpansionMax)
+            let roi = expandedClamped(predictedBox, factor: factor)
             guard roi.width > 0, roi.height > 0,
                   let cropped = cropImage(image, normalizedRect: roi) else {
                 trackedFaces[index].missCount += 1
@@ -545,23 +590,25 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
                 trackedFaces[index].missCount += 1
                 continue
             }
-            let confidence: Float = points.count >= FaceLandmarkSet.fullMeshCount ? 1.0 : 0.6
-            let remapped = FaceLandmarkSet(points: points, confidence: confidence)
-                .remapped(into: roi)
+            let meshFraction = Float(min(1.0, Double(points.count) / Double(FaceLandmarkSet.fullMeshCount)))
+            let raw = FaceLandmarkSet(points: points, confidence: meshFraction).remapped(into: roi)
+            guard let remapped = makeLandmarkSet(points: raw.points,
+                                                 eyeRatioRange: plausibilityEyeRatioRange) else {
+                trackedFaces[index].missCount += 1
+                continue
+            }
             let newBox = remapped.boundingBox
             let areaRatio = oldBox.width * oldBox.height > 0
                 ? (newBox.width * newBox.height) / (oldBox.width * oldBox.height)
                 : 0
-            guard remapped.isPlausibleFace(
-                      minSpan: plausibilityMinSpan,
-                      eyeRatioRange: plausibilityEyeRatioRange
-                  ),
-                  iou(newBox, oldBox) > 0.1,
+            guard iou(newBox, oldBox) > 0.1,
                   (0.3...3.0).contains(areaRatio) else {
                 trackedFaces[index].missCount += 1
                 continue
             }
-            trackedFaces[index] = TrackedFace(box: newBox, missCount: 0)
+            trackedFaces[index].box = newBox
+            trackedFaces[index].missCount = 0
+            trackedFaces[index].kalman.update(observation: newBox)
             results.append(remapped)
         }
         trackedFaces.removeAll { $0.missCount >= maxTrackMisses }
@@ -618,7 +665,7 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
 
     // MARK: - 補助 bbox 検出器による補完
 
-    /// MP の検出結果に対し、補助検出器（Apple Vision / Core ML / 並走）で見つかった bbox のうち
+    /// MP の検出結果に対し、補助検出器（BlazeFace / YuNet / 並走）で見つかった bbox のうち
     /// MP と重ならないものを ROI として MP IMG モードに再検出させ、得られた 478 ランドマークを
     /// 元画像座標に逆変換して追加する。取れなかった bbox は捨てる（合成メッシュは作らない＝品質第一）。
     private func augmentWithBBoxDetector(
@@ -630,15 +677,17 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
         let rawBoxes = bboxDetector.detectFaceBoundingBoxes(in: image)
         if rawBoxes.isEmpty { return mpResults }
         // 補助検出器の生 bbox を「明らかに顔ではない形状」で前段ガードする。
-        // (画面の 4% 未満 or アスペクト比が顔から大きく外れる) を捨てて、ROI 再検出のコストも節約する。
-        let visionBoxes = rawBoxes.filter { box in
-            guard box.width >= 0.04, box.height >= 0.04 else { return false }
+        // torso / 首・胸元・肩・髪など顔でない領域の bbox を弾き、ROI 再検出のコストも節約する。
+        // - 6% 未満は多くの誤検知（腕・首・耳など）を含むので棄却
+        // - w/h 0.6〜1.4 で torso/neck のような縦長/横長を除外
+        let candidateBoxes = rawBoxes.filter { box in
+            guard box.width >= 0.06, box.height >= 0.06 else { return false }
             let ratio = box.width / box.height
-            return ratio >= 0.5 && ratio <= 1.5
+            return ratio >= 0.6 && ratio <= 1.4
         }
-        if visionBoxes.isEmpty { return mpResults }
+        if candidateBoxes.isEmpty { return mpResults }
         let mpBoxes = mpResults.map { $0.boundingBox }
-        let novelBoxes = visionBoxes.filter { vb in
+        let novelBoxes = candidateBoxes.filter { vb in
             !mpBoxes.contains { iou($0, vb) > 0.3 }
         }
         if novelBoxes.isEmpty { return mpResults }
@@ -649,21 +698,36 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
 
         var extras: [FaceLandmarkSet] = []
         for box in novelBoxes {
-            guard let cropped = cropImage(image, normalizedRect: box),
-                  let mpImage = try? MPImage(uiImage: cropped),
-                  let result = try? cropLandmarker.detect(image: mpImage),
-                  let face = result.faceLandmarks.first else { continue }
-            let points = face.map { FaceLandmark(x: $0.x, y: $0.y, z: $0.z) }
-            let confidence: Float = points.count >= FaceLandmarkSet.fullMeshCount ? 1.0 : 0.6
-            let raw = FaceLandmarkSet(points: points, confidence: confidence)
-            let remapped = raw.remapped(into: box)
-            // 妥当性フィルタを通す（裸の体などを誤検出しても排除されるよう、本体と同じ条件で判定）。
-            if remapped.isPlausibleFace(
-                minSpan: plausibilityMinSpan,
-                eyeRatioRange: plausibilityEyeRatioRange
-            ) {
-                extras.append(remapped)
+            if let cropped = cropImage(image, normalizedRect: box),
+               let mpImage = try? MPImage(uiImage: upscaledIfSmall(cropped)),
+               let result = try? cropLandmarker.detect(image: mpImage),
+               let face = result.faceLandmarks.first {
+                let points = face.map { FaceLandmark(x: $0.x, y: $0.y, z: $0.z) }
+                let meshFraction = Float(min(1.0, Double(points.count) / Double(FaceLandmarkSet.fullMeshCount)))
+                let raw = FaceLandmarkSet(points: points, confidence: meshFraction).remapped(into: box)
+                // 補助検出器発の候補にはソフトマージンを使わない厳格な妥当性チェックを行う。
+                // アップスケールした体・首・肩の crop に MP が顔メッシュをハルシネートすると、
+                // ソフトマージン（境界横顔用）を通り抜けて体モザイクになる。
+                // 面数完全 × 目間比 0.45 以上を要求 (isPlausibleFace の元来の閾値相当)。
+                guard raw.isPlausibleFace(minSpan: plausibilityMinSpan,
+                                          eyeRatioRange: 0.45...1.0),
+                      let vetted = makeLandmarkSet(points: raw.points,
+                                                   eyeRatioRange: 0.45...1.0),
+                      vetted.confidence >= 0.6 else {
+                    continue
+                }
+                // 加えて、remap 後の bbox が縦横比で顔から外れていたら棄却
+                // （torso 上に MP がメッシュを描いたケースを二重防御）。
+                let vb = vetted.boundingBox
+                let vratio = vb.width / max(vb.height, 0.001)
+                guard vratio >= 0.6, vratio <= 1.4 else { continue }
+                extras.append(vetted)
             }
+            // A-2 の canonical mesh フォールバックは削除。補助検出器（YuNet / Vision /
+            // MP FaceDetector）は体・服・手のような顔ではない領域を bbox で拾うことがあり、
+            // MediaPipe がメッシュ抽出を拒否した bbox に無理に canonical mesh を貼ると
+            // 体にモザイクが乗る誤検知になる。横顔・逆光の穴埋めは Kalman ROI 予測 (A-1)
+            // + lookupFaces の直近ホールドフォールバックで拾う。
         }
         return mpResults + extras
     }
@@ -783,11 +847,30 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
     private func convertAll(_ result: FaceLandmarkerResult) -> [FaceLandmarkSet] {
         result.faceLandmarks.compactMap { face in
             let points = face.map { FaceLandmark(x: $0.x, y: $0.y, z: $0.z) }
-            let confidence: Float = points.count >= FaceLandmarkSet.fullMeshCount ? 1.0 : 0.6
-            let set = FaceLandmarkSet(points: points, confidence: confidence)
-            return set.isPlausibleFace(minSpan: plausibilityMinSpan,
-                                       eyeRatioRange: plausibilityEyeRatioRange) ? set : nil
+            return makeLandmarkSet(points: points, eyeRatioRange: plausibilityEyeRatioRange)
         }
+    }
+
+    /// 検出後処理を1箇所に集約: メッシュ完全性 × 妥当性スコア × 面数比 で
+    /// `confidence` を 0..1 の連続値化する。ROI/tiled/verifySuspicious/bbox augment の
+    /// 各パスから共通で呼ぶ。スコア 0 は棄却で `nil`。
+    fileprivate func makeLandmarkSet(
+        points: [FaceLandmark],
+        eyeRatioRange: ClosedRange<CGFloat>
+    ) -> FaceLandmarkSet? {
+        // 面数比（0.5〜1.0）で「部分メッシュはやや低い confidence」を表現する。
+        let meshCompleteness = Float(min(1.0, Double(points.count) / Double(FaceLandmarkSet.fullMeshCount)))
+        let base = FaceLandmarkSet(points: points, confidence: meshCompleteness)
+        let geom = base.plausibilityScore(
+            minSpan: plausibilityMinSpan,
+            eyeRatioRange: eyeRatioRange
+        )
+        guard geom > 0 else { return nil }
+        // 部分メッシュは 0.5、フルメッシュは 1.0 を上限にする。境界横顔は geom≈0.3〜1.0 で
+        // TrackingEvaluator の lockThreshold=0.5 は 0.5*0.5=0.25 で下回るため、
+        // 面数完全 × geom≥0.71 か、部分メッシュ × geom=1.0 が実質の tracking ロック条件になる。
+        let confidence = max(0.1, min(1.0, meshCompleteness * (0.5 + 0.5 * geom)))
+        return FaceLandmarkSet(points: points, confidence: confidence)
     }
 }
 #endif
