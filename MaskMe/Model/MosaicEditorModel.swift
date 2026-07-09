@@ -298,7 +298,9 @@ public final class MosaicEditorModel: ObservableObject {
             let newFaces = found.map { lm -> FaceTarget in
                 let remapped = lm.remapped(into: normalizedRect)
                 let thumb = generateThumbnail(for: remapped, from: img)
-                return FaceTarget(id: UUID(), landmarks: remapped, thumbnail: thumb, isSelected: false)
+                // ユーザーが矩形を描いた意図は「この顔にモザイクを掛けたい」なので
+                // 即選択する（false だとサムネをもう一度タップするまで何も起きない）。
+                return FaceTarget(id: UUID(), landmarks: remapped, thumbnail: thumb, isSelected: true)
             }
             detectedFaces += newFaces
         } else {
@@ -328,7 +330,8 @@ public final class MosaicEditorModel: ObservableObject {
         if let (landmarks, foundFrame) = result {
             let thumbSource = referenceImage ?? foundFrame
             let thumb = generateThumbnail(for: landmarks, from: thumbSource)
-            detectedFaces.append(FaceTarget(id: UUID(), landmarks: landmarks, thumbnail: thumb, isSelected: false))
+            // 矩形を描いた意図に合わせて即選択（上の resolveRegion 直検出と同じ理由）。
+            detectedFaces.append(FaceTarget(id: UUID(), landmarks: landmarks, thumbnail: thumb, isSelected: true))
         } else {
             // どのフレームでも検出できなかった: 固定矩形マスクにフォールバック
             appendManualRect(rect)
@@ -424,20 +427,52 @@ public final class MosaicEditorModel: ObservableObject {
 
         let scanner = makeFaceLandmarker(forVideo: false, settings: detectionSettings)
         let found = scanner.allLandmarks(in: frame)
-        detectionCache[t] = found
+        // キーはライブ検出と同じ 15fps バケットに正規化する（storePreScanResult の
+        // doc コメント参照。生 t のままだとライブの空エントリを上書きできない）。
+        storePreScanResult(found, at: t)
 
         if !found.isEmpty {
-            detectedFaces = found.map { lm in
-                FaceTarget(id: UUID(), landmarks: lm,
-                           thumbnail: generateThumbnail(for: lm, from: frame),
-                           isSelected: false)
-            }
+            // 旧: 全員 isSelected: false で置き換えていた。モザイクが外れた時に
+            // ユーザーが押すボタンで選択が全消去され「以降一切モザイクがかからない」
+            // 実機報告の直接原因だった。選択状態は重心マッチで引き継ぎ、誰も選択
+            // されない結果になる場合は全選択にフォールバックする（このボタンを押す
+            // 意図は常に「顔にモザイクを掛けたい」なので、消える方向に倒さない）。
+            detectedFaces = carryingOverSelection(
+                found.map { lm in
+                    FaceTarget(id: UUID(), landmarks: lm,
+                               thumbnail: generateThumbnail(for: lm, from: frame),
+                               isSelected: false)
+                },
+                previousSelected: detectedFaces.filter(\.isSelected)
+            )
             sourceImage = frame
             sourceTexture = makeTexture(from: frame)
             updateBackgroundMask(from: frame)
             renderPreview()
             previewController?.invalidate()
         }
+    }
+
+    /// redetect 用の選択引き継ぎ。新しい顔候補に旧選択状態を重心マッチ（<0.5）で
+    /// 引き継ぎ、誰も選択されない結果になる場合は全選択にフォールバックする。
+    /// 「再検出」を押す意図は常に「顔にモザイクを掛けたい」なので、選択が空になって
+    /// 以降モザイクが一切掛からなくなる方向には決して倒さない（フェイルクローズ）。
+    func carryingOverSelection(
+        _ newFaces: [FaceTarget],
+        previousSelected: [FaceTarget]
+    ) -> [FaceTarget] {
+        var result = newFaces
+        for i in result.indices {
+            let fc = normalizedCentroid(of: result[i].landmarks)
+            result[i].isSelected = previousSelected.contains { sel in
+                let sc = normalizedCentroid(of: sel.landmarks)
+                return hypot(fc.x - sc.x, fc.y - sc.y) < 0.5
+            }
+        }
+        if !result.contains(where: \.isSelected) {
+            for i in result.indices { result[i].isSelected = true }
+        }
+        return result
     }
 
     // MARK: - レンダリング
@@ -639,8 +674,10 @@ public final class MosaicEditorModel: ObservableObject {
         }
     }
 
+    /// internal: シナリオテスト（フレームアウト→イン・後ろ向き→正面・冒頭顔なし等）が
+    /// ライブ検出の1フレーム分を直接注入して選択層まで含めて検証するための可視性。
     @MainActor
-    private func storeLiveDetection(_ faces: [FaceLandmarkSet], at t: Double, source: UIImage) {
+    func storeLiveDetection(_ faces: [FaceLandmarkSet], at t: Double, source: UIImage) {
         liveDetectionInFlight = false
         // 空の結果も保存する。「スキャン済みで顔なし」という事実が残らないと、
         // lookupFaces のホールドフォールバックが古い顔位置をこのフレームに描き続けて
@@ -654,11 +691,14 @@ public final class MosaicEditorModel: ObservableObject {
         guard !faces.isEmpty else { return }
 
         // 先頭フレーム検出が失敗して顔候補が空だった場合の安全網。
+        // load(videoURL:) の初期スキャンと同じ自動選択規則を適用する: 顔が 1 つなら
+        // タップ不要で即モザイク。isSelected: false のままだと「冒頭に顔が写らない
+        // 動画（後ろ向きスタート等）では最後まで一切モザイクが掛からない」になる。
         if detectedFaces.isEmpty {
-            detectedFaces = faces.map { lm in
+            detectedFaces = faces.enumerated().map { idx, lm in
                 FaceTarget(id: UUID(), landmarks: lm,
                            thumbnail: generateThumbnail(for: lm, from: source),
-                           isSelected: false)
+                           isSelected: faces.count == 1 && idx == 0)
             }
         }
 
@@ -667,11 +707,22 @@ public final class MosaicEditorModel: ObservableObject {
         while liveMatchCounts.count < detectedFaces.count { liveMatchCounts.append(0) }
         for (i, target) in detectedFaces.enumerated() {
             let tc = normalizedCentroid(of: target.landmarks)
-            if faces.contains(where: { face in
-                let fc = normalizedCentroid(of: face)
-                return hypot(fc.x - tc.x, fc.y - tc.y) < 0.5
+            if let matched = faces.min(by: { a, b in
+                let ac = normalizedCentroid(of: a), bc = normalizedCentroid(of: b)
+                return hypot(ac.x - tc.x, ac.y - tc.y) < hypot(bc.x - tc.x, bc.y - tc.y)
             }) {
-                liveMatchCounts[i] += 1
+                let mc = normalizedCentroid(of: matched)
+                // 単一ターゲット × 単一検出のときは距離条件を課さない（同一人物とみなす）。
+                // フレームアウト→反対側から再インすると距離 0.5 を超え、位置追従だけでは
+                // 永久に再マッチできないため、この再捕捉規則が無いと「一度外れたら戻らない」。
+                let isSoleFacePair = detectedFaces.count == 1 && faces.count == 1
+                if isSoleFacePair || hypot(mc.x - tc.x, mc.y - tc.y) < 0.5 {
+                    liveMatchCounts[i] += 1
+                    // ターゲット位置を最新の検出位置へ追従させる。顔追加時の初期位置の
+                    // まま固定すると、selectedLandmarks の重心マッチングが「移動した顔・
+                    // フレームアウト→別位置で再インした顔」と永久にマッチしなくなる。
+                    detectedFaces[i].landmarks = matched
+                }
             }
             detectedFaces[i].detectionRate =
                 Double(liveMatchCounts[i]) / Double(liveSampleCount) * 100
@@ -769,10 +820,11 @@ public final class MosaicEditorModel: ObservableObject {
                 // 初期フレーム検出が失敗して detectedFaces が空のまま残っている場合、
                 // プリスキャンで最初に見つかった顔を補完する（安全網）。
                 if !facesForCache.isEmpty && self.detectedFaces.isEmpty {
-                    self.detectedFaces = facesForCache.map { lm in
+                    // storeLiveDetection の安全網と同じ自動選択規則（単一顔なら即モザイク）。
+                    self.detectedFaces = facesForCache.enumerated().map { idx, lm in
                         FaceTarget(id: UUID(), landmarks: lm,
                                    thumbnail: self.generateThumbnail(for: lm, from: img),
-                                   isSelected: false)
+                                   isSelected: facesForCache.count == 1 && idx == 0)
                     }
                 }
                 var counts = matchCountsCopy
@@ -955,11 +1007,15 @@ public final class MosaicEditorModel: ObservableObject {
         guard let renderer, let videoAsset else { return }
         exportProgress = 0
         let exporter = VideoMosaicExporter(renderer: renderer, landmarker: landmarker)
-        let selectedIDs = Set(detectedFaces.filter(\.isSelected).map(\.id))
+        let selected = detectedFaces.filter(\.isSelected)
+        // 全顔選択（単一顔の自動選択を含む）なら選択フィルタを完全バイパスする
+        // （exporter は空配列を「全顔に適用」と解釈する）。追跡マッチングの誤棄却で
+        // 書き出しからモザイクが消える余地を残さないフェイルクローズ。
+        let targetsForExport = selected.count == detectedFaces.count ? [] : selected
         do {
             let url = try await exporter.export(
                 asset: videoAsset,
-                selectedFaceTargets: detectedFaces.filter { selectedIDs.contains($0.id) },
+                selectedFaceTargets: targetsForExport,
                 manualRegions: manualRegions,
                 detectionCache: detectionCache,
                 faceEnabled: faceMosaicOn,
