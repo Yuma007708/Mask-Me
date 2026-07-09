@@ -69,4 +69,41 @@ final class DetectionCacheSyncTests: XCTestCase {
         XCTAssertTrue(model.lookupFaces(at: bucketTime + 0.3).isEmpty,
                       "近傍ホールドが消したはずの誤検知を復活させている")
     }
+
+    /// 瞬き・モーションブラーで 1〜2 バケットだけ検出が落ちたとき、再生 1 周目
+    /// （未来側の検出が無く DetectionBridge が効かない状態）でもモザイクが
+    /// 消えないこと。実機報告の「瞬きでモザイクが外れる」の回帰テスト。
+    func test_blinkDropoutIsBridgedOnFirstPlaythrough() {
+        let model = makeModel()
+        let t0 = model.liveBucket(1.0)
+        let step = 1.0 / 15.0
+
+        // t0 で顔検出 → 直後 2 バケットが瞬きで「スキャン済み・顔なし」
+        model.storePreScanResult([fakeFace(cx: 0.5, cy: 0.3)], at: t0)
+        model.recordScannedEmptyForTesting(at: t0 + step)
+        model.recordScannedEmptyForTesting(at: t0 + 2 * step)
+
+        XCTAssertFalse(model.lookupFaces(at: t0 + step).isEmpty,
+                       "瞬きの単発検出落ちでモザイクが消えている")
+        XCTAssertFalse(model.lookupFaces(at: t0 + 2 * step).isEmpty,
+                       "瞬き 2 バケット目でモザイクが消えている")
+    }
+
+    /// 瞬きホールドは短時間限定であること。顔が本当にフレームアウトした長い
+    /// 顔なし区間では従来どおり空を返し、体・背景への貼り付きを起こさない。
+    func test_blinkHoldDoesNotStickAfterFaceLeavesFrame() {
+        let model = makeModel()
+        let t0 = model.liveBucket(1.0)
+        let step = 1.0 / 15.0
+
+        model.storePreScanResult([fakeFace(cx: 0.5, cy: 0.3)], at: t0)
+        // 0.067s 〜 1.0s まで顔なしが続く（フレームアウト想定）
+        for i in 1...15 {
+            model.recordScannedEmptyForTesting(at: t0 + Double(i) * step)
+        }
+
+        XCTAssertTrue(model.lookupFaces(at: t0 + 0.5).isEmpty,
+                      "ホールド窓（0.25s）を超えても古い顔位置を描き続けている")
+        XCTAssertTrue(model.lookupFaces(at: t0 + 1.0).isEmpty)
+    }
 }

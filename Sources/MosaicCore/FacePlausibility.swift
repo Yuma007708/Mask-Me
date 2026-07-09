@@ -19,6 +19,38 @@ extension FaceLandmarkSet {
         public static let aspectRange: ClosedRange<CGFloat> = 0.4...3.0
         /// Inter-ocular distance / face width must fall in this range.
         public static let eyeWidthRatioRange: ClosedRange<CGFloat> = 0.10...0.95  // 斜め向きの顔を許容するよう緩和
+        /// ピクセル換算の顔 bbox 縦横比 (h/w) の上限。実顔の oval はピクセル座標で
+        /// h/w ≈ 1.1〜1.4 に収まり、これを超える縦長フィットは首・胸・体への
+        /// 誤フィット（low-confidence 走査で頻発）とみなして棄却する。
+        /// DValid ライブ経路検証（bright/dim/backlight/beach 20本）の bodyFP 判定と同値。
+        public static let maxPixelAspect: CGFloat = 1.4
+    }
+
+    /// 顔 oval bbox のピクセル換算縦横比 (h/w) を返す。正規化座標の縦横比には
+    /// 動画自体のアスペクト比が混入する（16:9 横長動画では正方形の顔が h/w≈1.78
+    /// になる）ため、体誤検知の判定は必ずこのピクセル換算値で行うこと。
+    /// oval が退化している場合は nil。
+    public func pixelAspectRatio(in imageSize: CGSize) -> CGFloat? {
+        guard imageSize.width > 0, imageSize.height > 0 else { return nil }
+        let oval = polygon(for: .faceOval, in: imageSize)
+        guard oval.count >= 3 else { return nil }
+        var minX = oval[0].x, maxX = oval[0].x
+        var minY = oval[0].y, maxY = oval[0].y
+        for point in oval.dropFirst() {
+            minX = min(minX, point.x); maxX = max(maxX, point.x)
+            minY = min(minY, point.y); maxY = max(maxY, point.y)
+        }
+        let width = maxX - minX
+        let height = maxY - minY
+        guard width > 0 else { return nil }
+        return height / width
+    }
+
+    /// 低 confidence 救済経路専用の体形状ゲート。ピクセル換算 h/w が
+    /// `Plausibility.maxPixelAspect` を超える縦長フィットを「体」と判定する。
+    public func isBodyLikeShape(in imageSize: CGSize) -> Bool {
+        guard let aspect = pixelAspectRatio(in: imageSize) else { return true }
+        return aspect > Plausibility.maxPixelAspect
     }
 
     /// `true` when the landmarks form a geometrically plausible face.

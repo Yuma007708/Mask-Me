@@ -437,7 +437,9 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
               !result.faceLandmarks.isEmpty else { return [] }
         return result.faceLandmarks.compactMap { face in
             let pts = face.map { FaceLandmark(x: $0.x, y: $0.y, z: $0.z) }
-            return makeLandmarkSet(points: pts, eyeRatioRange: 0.45...1.0)
+            guard let set = makeLandmarkSet(points: pts, eyeRatioRange: 0.45...1.0),
+                  !set.isBodyLikeShape(in: image.size) else { return nil }
+            return set
         }
     }
 
@@ -476,7 +478,8 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
                     points: points,
                     confidence: Float(min(1.0, Double(points.count) / Double(FaceLandmarkSet.fullMeshCount)))
                 ).remapped(into: tile)
-                if let vetted = makeLandmarkSet(points: raw.points, eyeRatioRange: 0.45...1.0) {
+                if let vetted = makeLandmarkSet(points: raw.points, eyeRatioRange: 0.45...1.0),
+                   !vetted.isBodyLikeShape(in: image.size) {
                     candidate = vetted
                     break
                 }

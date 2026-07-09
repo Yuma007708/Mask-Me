@@ -110,4 +110,47 @@ final class FacePlausibilityTests: XCTestCase {
         }
         XCTAssertFalse(FaceLandmarkSet(points: points, confidence: 1).isPlausibleFace)
     }
+
+    /// plausibleFace の oval を縦に stretchY 倍した顔（正規化 h/w = stretchY）を作る。
+    private func stretchedFace(stretchY: Float) -> FaceLandmarkSet {
+        var points = [FaceLandmark](
+            repeating: FaceLandmark(x: 0.5, y: 0.5),
+            count: FaceLandmarkSet.fullMeshCount
+        )
+        for (offset, index) in FaceRegion.faceOvalIndices.enumerated() {
+            let theta = Float(offset) / Float(FaceRegion.faceOvalIndices.count) * 2 * .pi
+            points[index] = FaceLandmark(
+                x: 0.5 + 0.15 * cos(theta),
+                y: 0.5 + 0.15 * stretchY * sin(theta)
+            )
+        }
+        return FaceLandmarkSet(points: points, confidence: 1)
+    }
+
+    func testPixelAspectRatioUndoesVideoAspect() {
+        // 正規化で正方形の顔は、16:9 横長動画では縦横比が正しく 1.0 に換算される
+        // （正規化のままだと h/w=1.78 に見えて全件 body 扱いになる旧バグの回帰確認）。
+        let square = stretchedFace(stretchY: 1.0)
+        let aspect = square.pixelAspectRatio(in: CGSize(width: 1920, height: 1080))
+        XCTAssertEqual(Double(aspect ?? 0), 1080.0 / 1920.0, accuracy: 0.01)
+        XCTAssertFalse(square.isBodyLikeShape(in: CGSize(width: 1920, height: 1080)))
+    }
+
+    func testBodyLikeTallFitRejected() {
+        // ピクセル換算 h/w = 1.6 の縦長フィット（首・胸への誤フィット形状）は body 判定。
+        let tall = stretchedFace(stretchY: 1.6)
+        let unit = CGSize(width: 1000, height: 1000)
+        XCTAssertTrue(tall.isBodyLikeShape(in: unit))
+        // 実顔の上限近く（1.3）は通る。
+        XCTAssertFalse(stretchedFace(stretchY: 1.3).isBodyLikeShape(in: unit))
+    }
+
+    func testDegenerateOvalIsBodyLike() {
+        let collapsed = FaceLandmarkSet(
+            points: [FaceLandmark](repeating: FaceLandmark(x: 0.5, y: 0.5),
+                                   count: FaceLandmarkSet.fullMeshCount),
+            confidence: 1
+        )
+        XCTAssertTrue(collapsed.isBodyLikeShape(in: CGSize(width: 100, height: 100)))
+    }
 }

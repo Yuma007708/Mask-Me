@@ -492,7 +492,31 @@ public final class MosaicEditorModel: ObservableObject {
     func lookupFaces(at time: Double) -> [FaceLandmarkSet] {
         let bridged = DetectionBridge(interpolates: true).faces(in: detectionCache, at: time)
         if !bridged.isEmpty { return bridged }
-        return nearestCachedFaces(at: time, window: 0.75)
+        let nearest = nearestCachedFaces(at: time, window: 0.75)
+        if !nearest.isEmpty { return nearest }
+        // 最寄りバケットが「スキャン済みで顔なし」でも、瞬き・モーションブラーによる
+        // 1〜数バケットだけの検出落ちの可能性がある。再生1周目は未来側の検出がまだ
+        // 無く DetectionBridge の両側補間が効かないため、blinkHoldWindow 以内の
+        // 非空バケットを片側ホールドして瞬間的なモザイク消失を防ぐ。
+        // 顔が本当に居ない区間では窓内に非空バケットが存在しないので空が返り、
+        // 体への貼り付き（nearestCachedFaces doc 参照）は最大 blinkHoldWindow 秒で止まる。
+        return nearestNonEmptyCachedFaces(at: time, window: blinkHoldWindow)
+    }
+
+    /// 瞬きブリッジのホールド幅（秒）。瞬き＋モーションブラーの検出落ちは
+    /// 15fps バケットで 1〜3 個（≦0.2s）に収まる実測に基づく。
+    private let blinkHoldWindow = 0.25
+
+    /// `nearestCachedFaces` と異なり空エントリ（スキャン済み顔なし）を飛ばして、
+    /// `window` 秒以内で最も近い「顔あり」バケットを返す。瞬きブリッジ専用。
+    private func nearestNonEmptyCachedFaces(at time: Double, window: Double) -> [FaceLandmarkSet] {
+        var best: (dist: Double, faces: [FaceLandmarkSet])?
+        for (t, faces) in detectionCache where !faces.isEmpty {
+            let d = abs(t - time)
+            if d > window { continue }
+            if best == nil || d < best!.dist { best = (d, faces) }
+        }
+        return best?.faces ?? []
     }
 
     /// `detectionCache` のうち時刻 `time` から `window` 秒以内で最も近い
