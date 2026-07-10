@@ -726,6 +726,9 @@ public final class MosaicEditorModel: ObservableObject {
         liveDetectionInFlight = false
         detectionCache[t] = []
         liveFlowCache[t] = detection.faces
+        #if DEBUG
+        print("[MMLIVE] t=\(String(format: "%.2f", t)) flow faces=\(detection.faces.count)")
+        #endif
         // 描画の重心マッチングが追跡位置と乖離しないよう位置だけ追従させる
         // （検出率 liveMatchCounts / liveSampleCount には算入しない）。
         updateFacePositions(with: detection.faces)
@@ -756,6 +759,13 @@ public final class MosaicEditorModel: ObservableObject {
     @MainActor
     func storeLiveDetection(_ faces: [FaceLandmarkSet], at t: Double, source: UIImage) {
         liveDetectionInFlight = false
+        #if DEBUG
+        // 実機デバッグ用: ライブ検出が「どの時刻に・何件」乗ったかの証跡。
+        // 「途中スタートでモザイクなし」等の報告時に、検出が走っていないのか
+        // （このログ自体が出ない）、走ったが空なのか（faces=0）を切り分ける。
+        print("[MMLIVE] t=\(String(format: "%.2f", t)) faces=\(faces.count) "
+              + "targets=\(detectedFaces.count) sel=\(detectedFaces.filter(\.isSelected).count)")
+        #endif
         // 空の結果も保存する。「スキャン済みで顔なし」という事実が残らないと、
         // lookupFaces のホールドフォールバックが古い顔位置をこのフレームに描き続けて
         // 「体にモザイクが乗る／モザイクがずれる」誤描画になる。また、空を記録する

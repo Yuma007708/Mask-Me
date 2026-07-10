@@ -48,6 +48,113 @@ final class DValidLiveModelTests: XCTestCase {
         }
     }
 
+    /// 実機報告「プレビューを途中から始めるとモザイクが掛からない」の再現計測。
+    /// 実機と同じ流れを踏む: load(videoURL:) で冒頭シード（初期スキャン + 自動選択）
+    /// → 中盤へシーク（notifyLiveSeek で追跡リセット）→ 中盤以降だけをライブ検出
+    /// → 中盤以降の selectedLandmarks 被覆率を測る。先頭からのスキャン履歴は無し。
+    @MainActor
+    func test_LiveModelPath_StartingMidVideo() async throws {
+        guard let dir = sampleDir else {
+            throw XCTSkip("SAMPLE_VIDEO_DIR 未設定")
+        }
+        let url = URL(fileURLWithPath: "\(dir)/s1.mov")
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            throw XCTSkip("s1.mov なし")
+        }
+        let asset = AVAsset(url: url)
+        let duration = try await asset.load(.duration).seconds
+        let gen = AVAssetImageGenerator(asset: asset)
+        gen.appliesPreferredTrackTransform = true
+        gen.requestedTimeToleranceBefore = CMTime(seconds: 1.0 / Self.bucketFPS, preferredTimescale: 600)
+        gen.requestedTimeToleranceAfter = CMTime(seconds: 1.0 / Self.bucketFPS, preferredTimescale: 600)
+
+        let scanner = makeFaceLandmarker(forVideo: false, settings: DetectionSettings())
+        let model = MosaicEditorModel(mode: .video, recents: RecentItemsStore())
+        // 実機と同じ初期状態: 冒頭の初期スキャンで detectedFaces をシード（自動選択）
+        model.load(videoURL: url)
+        XCTAssertFalse(model.detectedFaces.isEmpty, "初期スキャンで顔がシードされるはず")
+        XCTAssertTrue(model.detectedFaces.contains(where: \.isSelected), "単一顔は自動選択されるはず")
+
+        // 中盤へシーク → そこから再生（先頭からのライブ検出履歴なし）
+        let start = duration / 2
+        model.notifyLiveSeek()
+        scanner.resetLiveTracking()
+
+        var frames = 0
+        var hits = 0
+        let interval = 1.0 / Self.bucketFPS
+        var t = start
+        while t <= duration {
+            autoreleasepool {
+                guard let cg = try? gen.copyCGImage(
+                    at: CMTime(seconds: t, preferredTimescale: 600), actualTime: nil
+                ) else { return }
+                let img = UIImage(cgImage: downscaleForLiveDetection(cg))
+                let detection = scanner.liveLandmarks(in: img, atMediaSeconds: t)
+                model.storeLiveDetection(detection, at: model.liveBucket(t), source: img)
+                frames += 1
+                if !model.selectedLandmarks(at: t).isEmpty { hits += 1 }
+            }
+            t += interval
+        }
+        let coverage = frames > 0 ? Double(hits) / Double(frames) : 0
+        fputs("""
+        [DVALMODEL] {"video":"s1-midstart","frames":\(frames),\
+        "modelCoverage":\(String(format: "%.4f", coverage))}
+        """ + "\n", stderr)
+        XCTAssertGreaterThanOrEqual(coverage, gate,
+                                    "途中スタートで選択層込みのモザイク被覆率が基準未満")
+    }
+
+    /// 実機報告「途中スタートでモザイクなし」の統合再現: モデル層ではなく
+    /// **本物の MosaicPreviewController + AVPlayer** を実時間で駆動する。
+    /// 中盤へシーク → 再生 3 秒 → シーク先以降のバケットにライブ検出が乗り、
+    /// selectedLandmarks が引けることを確認する。
+    @MainActor
+    func test_PreviewController_MidStartPlayback_AppliesMosaic() async throws {
+        guard let dir = sampleDir else { throw XCTSkip("SAMPLE_VIDEO_DIR 未設定") }
+        let url = URL(fileURLWithPath: "\(dir)/s1.mov")
+        guard FileManager.default.fileExists(atPath: url.path) else { throw XCTSkip("s1.mov なし") }
+
+        let model = MosaicEditorModel(mode: .video, recents: RecentItemsStore())
+        model.load(videoURL: url)
+        let controller = try XCTUnwrap(model.previewController,
+                                       "renderer 生成失敗（Simulator の Metal が必要）")
+        // duration の非同期ロード完了を待つ（seek(to:) のガードに必要）
+        var waited = 0.0
+        while controller.duration <= 0, waited < 5.0 {
+            try await Task.sleep(nanoseconds: 100_000_000)
+            waited += 0.1
+        }
+        XCTAssertGreaterThan(controller.duration, 0)
+        let duration = controller.duration
+
+        // 途中スタート: 実機のタイムライン・ドラッグを再現（seekToLatest の連打で
+        // 0→50% までスクラブ。ドラッグ中の連続発火 + 直前シークのキャンセルを通す）
+        for i in 1...25 {
+            model.seekToLatest(position: 0.5 * Double(i) / 25.0)
+            try await Task.sleep(nanoseconds: 30_000_000)
+        }
+        try await Task.sleep(nanoseconds: 500_000_000)
+        model.togglePlayback()
+        try await Task.sleep(nanoseconds: 3_000_000_000)
+        model.togglePlayback()
+
+        // シーク先以降のバケットにライブ検出が乗っているか（実検出+flow の合算）
+        let midStart = duration * 0.5 - 0.1
+        let scannedMid = model.detectionCache.keys.filter { $0 >= midStart }.count
+        let facesMid = model.detectionCache.filter { $0.key >= midStart && !$0.value.isEmpty }.count
+        fputs("[MIDSTART] duration=\(duration) scannedMid=\(scannedMid) facesMid=\(facesMid) " +
+              "pos=\(model.playbackPosition) detected=\(model.detectedFaces.count) " +
+              "selected=\(model.detectedFaces.filter(\.isSelected).count)\n", stderr)
+        XCTAssertGreaterThan(scannedMid, 0, "途中スタート後にライブ検出が1件も走っていない")
+        XCTAssertGreaterThan(facesMid, 0, "途中スタート後の検出が全て空（顔を拾えていない）")
+        // ユーザーが目にする層: 現在再生位置でモザイクが引けること
+        let tNow = model.playbackPosition * duration
+        XCTAssertFalse(model.selectedLandmarks(at: tNow).isEmpty,
+                       "途中スタート再生中の現在位置でモザイクが掛かっていない")
+    }
+
     /// 実機のライブ再生と同じ流れ: 各バケットのフレームを 640px に縮小 → IMAGE モード
     /// 検出 → storeLiveDetection（選択層シード・追跡込み）→ 全バケットで
     /// selectedLandmarks を引いて被覆率を出す。

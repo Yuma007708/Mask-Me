@@ -34,6 +34,8 @@ final class MosaicPreviewController {
     private let landmarkSmoother = LandmarkSmoother()
 
     private(set) var duration: Double = 0
+    /// DEBUG 診断用: copyPixelBuffer が nil を返した累計（間引きログの分母）。
+    private var pixelBufferMissCount = 0
 
     init(renderer: MosaicRenderer, url: URL, model: MosaicEditorModel) {
         self.renderer = renderer
@@ -163,6 +165,15 @@ final class MosaicPreviewController {
             forItemTime: currentTime,
             itemTimeForDisplay: &actualItemTime
         ) else {
+            #if DEBUG
+            // 実機デバッグ用: 出力がフレームを返さないとプレビュー更新もライブ検出も
+            // 止まる（映像フリーズ/モザイク不掲載の一次原因になりうる）。連発するので間引く。
+            pixelBufferMissCount += 1
+            if pixelBufferMissCount % 30 == 1 {
+                print("[MMLIVE] copyPixelBuffer=nil count=\(pixelBufferMissCount) "
+                      + "t=\(String(format: "%.2f", currentTime.seconds))")
+            }
+            #endif
             return
         }
 
