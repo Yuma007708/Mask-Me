@@ -27,6 +27,12 @@ final class DValidLiveModelTests: XCTestCase {
         ProcessInfo.processInfo.environment["SAMPLE_VIDEO_DIR"]
     }
 
+    /// 被覆率ゲート。新セット導入時はまず現状ベースラインで回帰防止し、
+    /// 改修後に 0.90 へ引き上げる運用のため env で可変にしている。
+    private var gate: Double {
+        ProcessInfo.processInfo.environment["DVAL_GATE"].flatMap(Double.init) ?? 0.90
+    }
+
     @MainActor
     func test_LiveModelPath_AllSamples() async throws {
         guard let dir = sampleDir else {
@@ -37,7 +43,7 @@ final class DValidLiveModelTests: XCTestCase {
             guard FileManager.default.fileExists(atPath: url.path) else { continue }
             let coverage = try await measureModelPath(name: name, url: url)
             XCTAssertGreaterThanOrEqual(
-                coverage, 0.90,
+                coverage, gate,
                 "\(name): 選択層込みのモザイク被覆率が基準未満")
         }
     }
@@ -58,6 +64,7 @@ final class DValidLiveModelTests: XCTestCase {
         let model = MosaicEditorModel(mode: .video, recents: RecentItemsStore())
 
         var frames = 0
+        var flowFrames = 0
         let interval = 1.0 / Self.bucketFPS
         var t = 0.0
         while t <= duration {
@@ -66,8 +73,10 @@ final class DValidLiveModelTests: XCTestCase {
                     at: CMTime(seconds: t, preferredTimescale: 600), actualTime: nil
                 ) else { return }
                 let img = UIImage(cgImage: downscaleForLiveDetection(cg))
-                let faces = scanner.allLandmarks(in: img)
-                model.storeLiveDetection(faces, at: model.liveBucket(t), source: img)
+                // 実機と同じライブ経路: IMAGE 検出 + テンポラル ROI 再検出 + フロー橋渡し
+                let detection = scanner.liveLandmarks(in: img, atMediaSeconds: t)
+                if detection.bridgedByFlow { flowFrames += 1 }
+                model.storeLiveDetection(detection, at: model.liveBucket(t), source: img)
                 // 複数顔動画は自動選択されない（ユーザーがサムネで選ぶ仕様）ため、
                 // 「全員選択した」ユーザー操作を再現する。単一顔は自動選択のまま。
                 if !model.detectedFaces.isEmpty,
@@ -86,10 +95,13 @@ final class DValidLiveModelTests: XCTestCase {
         }
         let coverage = frames > 0 ? Double(hits) / Double(frames) : 0
         let selectedCount = model.detectedFaces.filter(\.isSelected).count
+        // どのレバー（ROI 再検出 / フロー橋渡し）が何フレーム救ったかの帰属。
+        let stats = (scanner as? MediaPipeFaceLandmarkerAdapter)?.sourceStats
         let json = """
         [DVALMODEL] {"video":"\(name)","frames":\(frames),\
         "modelCoverage":\(String(format: "%.4f", coverage)),\
-        "faces":\(model.detectedFaces.count),"selected":\(selectedCount)}
+        "faces":\(model.detectedFaces.count),"selected":\(selectedCount),\
+        "roiFrames":\(stats?.roiFrames ?? 0),"flowFrames":\(flowFrames)}
         """
         fputs(json + "\n", stderr)
         return coverage

@@ -98,6 +98,8 @@ final class MosaicPreviewController {
         framesUntilResegment = 0
         // シーク先では前位置の EMA 状態も意味を持たない
         landmarkSmoother.reset()
+        // ライブ検出の追跡状態（ROI track / フロー）もシーク先では別時系列になる
+        model?.notifyLiveSeek()
         await player.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero)
         renderCurrentFrame()
     }

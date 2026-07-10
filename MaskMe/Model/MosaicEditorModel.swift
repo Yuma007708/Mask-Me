@@ -527,6 +527,11 @@ public final class MosaicEditorModel: ObservableObject {
     func lookupFaces(at time: Double) -> [FaceLandmarkSet] {
         let bridged = DetectionBridge(interpolates: true).faces(in: detectionCache, at: time)
         if !bridged.isEmpty { return bridged }
+        // フロー橋渡し結果: 実検出の両側補間が成立しないバケットを追跡位置で埋める。
+        // 実検出ホールド（nearest）より追従位置が新しいので先に引く。窓は±1バケット強
+        // だけ（フローは毎バケット供給されるので、それ以上離れたら供給が途絶えた区間）。
+        let flow = nearestFlowFaces(at: time)
+        if !flow.isEmpty { return flow }
         let nearest = nearestCachedFaces(at: time, window: 0.75)
         if !nearest.isEmpty { return nearest }
         // 最寄りバケットが「スキャン済みで顔なし」でも、瞬き・モーションブラーによる
@@ -541,6 +546,23 @@ public final class MosaicEditorModel: ObservableObject {
     /// 瞬きブリッジのホールド幅（秒）。瞬き＋モーションブラーの検出落ちは
     /// 15fps バケットで 1〜3 個（≦0.2s）に収まる実測に基づく。
     private let blinkHoldWindow = 0.25
+
+    /// フロー橋渡し由来のライブ結果。実検出ではないため `detectionCache` とは分離する:
+    /// エクスポート（VideoMosaicExporter）はキャッシュヒットで自前検出をスキップする
+    /// ので、フロー由来を detectionCache に混ぜると書き出し品質を汚染する。
+    /// 参照するのはプレビューの `lookupFaces` のみ。動画切替（resetLiveDetection）で破棄。
+    private(set) var liveFlowCache: [Double: [FaceLandmarkSet]] = [:]
+
+    /// `liveFlowCache` のうち `time` から±1バケット強（0.1s）以内で最も近い顔リスト。
+    private func nearestFlowFaces(at time: Double) -> [FaceLandmarkSet] {
+        var best: (dist: Double, faces: [FaceLandmarkSet])?
+        for (t, faces) in liveFlowCache where !faces.isEmpty {
+            let d = abs(t - time)
+            if d > 1.5 / liveBucketFPS { continue }
+            if best == nil || d < best!.dist { best = (d, faces) }
+        }
+        return best?.faces ?? []
+    }
 
     /// `nearestCachedFaces` と異なり空エントリ（スキャン済み顔なし）を飛ばして、
     /// `window` 秒以内で最も近い「顔あり」バケットを返す。瞬きブリッジ専用。
@@ -650,6 +672,11 @@ public final class MosaicEditorModel: ObservableObject {
         liveMatchCounts = []
         liveSampleCount = 0
         liveDetectionInFlight = false
+        liveFlowCache.removeAll()
+        // 別動画の時系列を追跡しないよう、scanner 側の track / flow 状態も破棄する
+        liveDetectionQueue.async { [liveScanner] in
+            liveScanner.resetLiveTracking()
+        }
     }
 
     /// プレビューがこの時刻のフレームを検出すべきか（表示スレッドから安価に判定する）。
@@ -667,9 +694,59 @@ public final class MosaicEditorModel: ObservableObject {
         let bucket = liveBucket(timeSec)
         liveDetectionQueue.async { [weak self, liveScanner] in
             let img = UIImage(cgImage: cgImage)
-            let faces = liveScanner.allLandmarks(in: img)
+            // liveLandmarks は IMAGE 検出に加えてテンポラル ROI 再検出・フロー橋渡しで
+            // 横顔・急な頭部回転を追跡する（バケットではなく生の timeSec を渡す:
+            // 丸めると adapter 側のシーク不連続検知が鈍る）。
+            let detection = liveScanner.liveLandmarks(in: img, atMediaSeconds: timeSec)
             Task { @MainActor in
-                self?.storeLiveDetection(faces, at: bucket, source: img)
+                self?.storeLiveDetection(detection, at: bucket, source: img)
+            }
+        }
+    }
+
+    /// シーク時にライブ追跡状態（ROI track / フロー）を破棄する。adapter 側の
+    /// 時刻不連続の自動検知に対する明示リセットの二段構え。追跡状態は検出キュー上で
+    /// しか触らない invariant を守るため、キュー経由で直列に実行する。
+    func notifyLiveSeek() {
+        liveDetectionQueue.async { [liveScanner] in
+            liveScanner.resetLiveTracking()
+        }
+    }
+
+    /// ライブ検出 1 フレーム分の結果を記録する。フロー橋渡し由来（bridgedByFlow）は
+    /// 「実検出は無かった」事実を detectionCache に空で残しつつ、追跡位置を
+    /// `liveFlowCache` に別置きする（エクスポート非汚染・検出率バッジ非算入・
+    /// nearestCachedFaces の体貼り付き防止の意味論をすべて維持するため）。
+    @MainActor
+    func storeLiveDetection(_ detection: LiveDetectionResult, at t: Double, source: UIImage) {
+        guard detection.bridgedByFlow else {
+            storeLiveDetection(detection.faces, at: t, source: source)
+            return
+        }
+        liveDetectionInFlight = false
+        detectionCache[t] = []
+        liveFlowCache[t] = detection.faces
+        // 描画の重心マッチングが追跡位置と乖離しないよう位置だけ追従させる
+        // （検出率 liveMatchCounts / liveSampleCount には算入しない）。
+        updateFacePositions(with: detection.faces)
+        previewController?.invalidate()
+    }
+
+    /// `detectedFaces` の位置を検出/追跡結果へ追従させる（検出率には触らない）。
+    /// マッチング規則は storeLiveDetection の検出率ループと同一。
+    @MainActor
+    private func updateFacePositions(with faces: [FaceLandmarkSet]) {
+        guard !faces.isEmpty else { return }
+        for (i, target) in detectedFaces.enumerated() {
+            let tc = normalizedCentroid(of: target.landmarks)
+            guard let matched = faces.min(by: { a, b in
+                let ac = normalizedCentroid(of: a), bc = normalizedCentroid(of: b)
+                return hypot(ac.x - tc.x, ac.y - tc.y) < hypot(bc.x - tc.x, bc.y - tc.y)
+            }) else { continue }
+            let mc = normalizedCentroid(of: matched)
+            let isSoleFacePair = detectedFaces.count == 1 && faces.count == 1
+            if isSoleFacePair || hypot(mc.x - tc.x, mc.y - tc.y) < 0.5 {
+                detectedFaces[i].landmarks = matched
             }
         }
     }

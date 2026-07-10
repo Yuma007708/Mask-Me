@@ -33,6 +33,12 @@ Mask-Me は、顔ランドマークに沿ってブロック状のモザイクを
   埋め、プリスキャン（フル解像度 + VIDEO モード）が後から同じ 15fps バケットキーを
   上書きします。キー整合と空結果の扱いは `MosaicEditorModel.storePreScanResult` の
   doc コメントを参照。
+- ライブ検出は `MediaPipeFaceLandmarkerAdapter.liveLandmarks(in:atMediaSeconds:)` 経由で、
+  エクスポートと同じテンポラル追跡（Kalman 予測 ROI 再検出 + オプティカルフロー橋渡し）
+  を IMAGE モードのまま使います（横顔・急な頭部回転対策）。シークによる時系列の巻き戻りは
+  メディア時刻の不連続検知＋`notifyLiveSeek` の明示リセットで処理します。フロー由来の
+  結果は実検出ではないため `detectionCache` に入れず `liveFlowCache` に別置きします
+  （エクスポートはキャッシュヒットで検出をスキップするため混ぜると品質汚染になる）。
 
 ## リポジトリ構成（要点）
 

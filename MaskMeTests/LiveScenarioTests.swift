@@ -173,4 +173,80 @@ final class LiveScenarioTests: XCTestCase {
         let landmarks = model.selectedLandmarks(at: 5.0 * step)
         XCTAssertTrue(landmarks.isEmpty, "非選択の顔へモザイクが飛び移っている")
     }
+
+    // MARK: - フロー橋渡し（横顔・急な頭部回転で検出が全滅した区間の追跡補完）
+
+    /// フロー橋渡し1フレーム分を実機と同じ経路で注入する。
+    private func feedFlow(_ model: MosaicEditorModel, faces: [FaceLandmarkSet], at t: Double) {
+        model.storeLiveDetection(
+            LiveDetectionResult(faces: faces, bridgedByFlow: true),
+            at: model.liveBucket(t), source: UIImage())
+    }
+
+    /// フロー由来の顔は detectionCache（エクスポートが参照する実検出の記録）に入らず、
+    /// プレビューの lookupFaces だけがその位置を返すこと。混入するとエクスポートが
+    /// 「検出済み」と誤認して自前検出をスキップし、書き出し品質が汚染される。
+    func test_flowBridgedFaces_doNotEnterDetectionCache() {
+        let model = makeModel()
+        feed(model, faces: [fakeFace(cx: 0.5, cy: 0.4)], at: 0.0)
+        // 横顔化: 実検出が全滅し、フローが位置を供給
+        feedFlow(model, faces: [fakeFace(cx: 0.55, cy: 0.4)], at: step)
+        XCTAssertEqual(model.detectionCache[model.liveBucket(step)], [],
+                       "フロー由来が実検出キャッシュに混入している（エクスポート汚染）")
+        let looked = model.lookupFaces(at: step)
+        XCTAssertFalse(looked.isEmpty, "プレビューがフロー位置を引けていない")
+        let c = model.normalizedCentroid(of: looked[0])
+        XCTAssertEqual(Double(c.x), 0.55, accuracy: 0.01,
+                       "ホールドされた古い位置ではなくフローの追跡位置を返すべき")
+        // 選択層まで含めてモザイクが出ること
+        XCTAssertFalse(model.selectedLandmarks(at: step).isEmpty)
+    }
+
+    /// フロー橋渡しフレームは検出率バッジ（detectionRate）に算入されないこと。
+    /// 追跡による補完は「検出できた」証拠ではないため、%が水増しされると
+    /// ユーザーが検出品質を過信する。
+    func test_flowBridgedFrames_excludedFromDetectionRate() {
+        let model = makeModel()
+        feed(model, faces: [fakeFace(cx: 0.5, cy: 0.4)], at: 0.0)
+        let rateAfterRealHit = model.detectedFaces[0].detectionRate
+        for i in 1...5 {
+            feedFlow(model, faces: [fakeFace(cx: 0.5, cy: 0.4)], at: Double(i) * step)
+        }
+        XCTAssertEqual(model.detectedFaces[0].detectionRate, rateAfterRealHit,
+                       "フロー橋渡しフレームが検出率に算入されている")
+    }
+
+    /// フロー供給が途絶えた後の時刻に、古いフロー位置が返り続けないこと
+    /// （lookupFaces のフロー窓は±1バケット強のみ。貼り付き防止）。
+    func test_staleFlowPosition_doesNotStickBeyondWindow() {
+        let model = makeModel()
+        feed(model, faces: [fakeFace(cx: 0.5, cy: 0.4)], at: 0.0)
+        feedFlow(model, faces: [fakeFace(cx: 0.55, cy: 0.4)], at: step)
+        // 以降は実検出もフローも無い（スキャン済み顔なし）
+        for i in 2...22 { feed(model, faces: [], at: Double(i) * step) }
+        XCTAssertTrue(model.selectedLandmarks(at: 20.0 * step).isEmpty,
+                      "フロー供給が途絶えた区間に古いフロー位置が貼り付いている")
+    }
+
+    /// フロー追跡中も detectedFaces の位置は追従し、フロー明けの実検出と
+    /// 重心マッチングが成立すること（追従が止まると、フロー中に大きく移動した顔が
+    /// 復帰フレームで距離 0.5 を超えマッチ不能になる）。
+    func test_flowBridging_updatesFacePositionForRematch() {
+        let model = makeModel()
+        feed(model, faces: [fakeFace(cx: 0.2, cy: 0.2), fakeFace(cx: 0.8, cy: 0.8)], at: 0.0)
+        model.toggleFace(model.detectedFaces[0].id)
+        // 選択顔がフローで段階的に移動（計 0.6: 静的マッチングなら不成立の距離）
+        var x = 0.2
+        for i in 1...4 {
+            x += 0.15
+            feedFlow(model, faces: [fakeFace(cx: x, cy: 0.2)], at: Double(i) * step)
+        }
+        // フロー明けに実検出が復帰
+        let t = 5.0 * step
+        feed(model, faces: [fakeFace(cx: 0.8, cy: 0.2), fakeFace(cx: 0.8, cy: 0.8)], at: t)
+        let landmarks = model.selectedLandmarks(at: t)
+        XCTAssertEqual(landmarks.count, 1, "フロー明けの実検出で選択顔を再マッチできていない")
+        let c = model.normalizedCentroid(of: landmarks[0])
+        XCTAssertEqual(Double(c.y), 0.2, accuracy: 0.01, "非選択顔に飛び移っている")
+    }
 }

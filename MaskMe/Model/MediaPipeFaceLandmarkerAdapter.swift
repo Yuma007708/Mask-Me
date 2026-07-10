@@ -63,11 +63,25 @@ public struct FaceDetectionSourceStats {
 /// framework-agnostic `FaceLandmarkSet` consumed by `MosaicRenderer`.
 public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
     private let landmarker: FaceLandmarker
-    /// VID モードのとき、bbox を ROI として食わせる専用の IMG モード landmarker。
-    /// VID は1ストリームに専用なので別インスタンスが要る。用途は2つ:
+    /// bbox を ROI として食わせる専用の IMG モード landmarker。用途は2つ:
     /// (1) 補助検出器が見つけた新規 bbox の再検出、(2) テンポラル ROI 再検出
-    /// （前フレームで検出した顔の周辺の再走査）。runningMode == .video なら常時生成。
-    private let landmarkerForCrop: FaceLandmarker?
+    /// （前フレームで検出した顔の周辺の再走査）。VID モードは1ストリーム専用なので
+    /// 別インスタンスが必須。IMG モードでも `liveLandmarks`（ライブプレビューの
+    /// テンポラル追跡）が使うため、初回アクセス時に遅延生成する（写真編集など
+    /// ROI 不要の用途ではコストゼロのまま）。
+    private lazy var landmarkerForCrop: FaceLandmarker? = {
+        let options = FaceLandmarkerOptions()
+        options.baseOptions.modelAssetPath = modelPath
+        options.runningMode = .image
+        options.numFaces = 1  // ROI 内には基本 1 顔
+        options.minFaceDetectionConfidence = cropConfidence
+        options.minFacePresenceConfidence  = cropPresenceConfidence
+        options.minTrackingConfidence      = cropTrackingConfidence
+        return try? FaceLandmarker(options: options)
+    }()
+    private let cropConfidence: Float
+    private let cropPresenceConfidence: Float
+    private let cropTrackingConfidence: Float
     private let ciContext = CIContext(options: [.useSoftwareRenderer: false])
     private let plausibilityMinSpan: CGFloat
     private let plausibilityEyeRatioRange: ClosedRange<CGFloat>
@@ -153,6 +167,10 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
     /// テストで決定論的に駆動するためのフラグ。false（デフォルト）のときはプロダ
     /// クション経路に一切影響しない。DEBUG ビルド専用（Release には含まれない）。
     public var simulateDetectionFailureForTesting = false
+
+    /// テスト専用: ライブ追跡状態の観測点。`liveLandmarks` の時刻不連続リセット
+    /// （シーク検知）が trackedFaces を破棄したことを外形から検証するために使う。
+    var liveTrackCountForTesting: Int { trackedFaces.count }
     #endif
 
     /// 通常パイプライン + テンポラル ROI が全滅したフレーム専用の最終フォールバック。
@@ -221,22 +239,12 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
             useFaceDetector: settings.useFaceDetector,
             useYunet: settings.useYunet
         )
-        // VID モードなら ROI 再検出用に IMG モードの landmarker を常時持つ
-        // （補助検出器の新規 bbox 再検出と、テンポラル ROI 再検出の両方で使う。
-        // 補助検出器なしの構成でもテンポラル追跡は動かしたい）。
-        // IMG モード本体では同じ landmarker をそのまま使えるので追加不要。
-        if runningMode == .video {
-            let imgOptions = FaceLandmarkerOptions()
-            imgOptions.baseOptions.modelAssetPath = modelPath
-            imgOptions.runningMode = .image
-            imgOptions.numFaces = 1  // ROI 内には基本 1 顔
-            imgOptions.minFaceDetectionConfidence = clampConfidence(settings.minFaceDetectionConfidence)
-            imgOptions.minFacePresenceConfidence  = clampConfidence(settings.minFacePresenceConfidence)
-            imgOptions.minTrackingConfidence      = clampConfidence(settings.minTrackingConfidence)
-            self.landmarkerForCrop = try? FaceLandmarker(options: imgOptions)
-        } else {
-            self.landmarkerForCrop = nil
-        }
+        // ROI 再検出用 IMG モード landmarker の生成パラメータ（landmarkerForCrop が
+        // 初回アクセス時に遅延生成する）。VID モードのエクスポート/プリスキャンに加え、
+        // IMG モードのライブプレビュー追跡（liveLandmarks）でも使う。
+        self.cropConfidence = clampConfidence(settings.minFaceDetectionConfidence)
+        self.cropPresenceConfidence = clampConfidence(settings.minFacePresenceConfidence)
+        self.cropTrackingConfidence = clampConfidence(settings.minTrackingConfidence)
     }
 
     private static func makeBBoxDetector(
@@ -342,58 +350,12 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
                 }
             }
             if !result.isEmpty {
-                let verified = verifySuspiciousFaces(result, in: image)
-                if verified.count != result.count {
-                    let droppedBoxes = result.map(\.boundingBox).filter { box in
-                        !verified.contains { $0.boundingBox == box }
-                    }
-                    // 棄却した候補の track だけを外科的に殺す（ROI 延命が体 track を
-                    // 引きずるのを防ぐ）。他 track の missCount 状態は保持する。
-                    trackedFaces.removeAll { tf in droppedBoxes.contains { iou(tf.box, $0) > 0.5 } }
-                    result = verified
-                    if result.isEmpty { source = .none }
-                }
+                result = verifyAndPruneTracks(result, in: image)
+                if result.isEmpty { source = .none }
             }
         }
         if result.isEmpty, !flowStates.isEmpty, consecutiveFlowFrames < maxFlowFrames {
-            // 検出全滅 → フローで前回ランドマークを前進させてブリッジする。
-            // 顔検証パス（タイト crop 再検出）は「検出器で見える顔」しか通せないため、
-            // フロー出力には適用しない（検出器が全滅したからこそフローに来ている）。
-            // 誤検出の延命は品質ゲート・上限フレーム・lowCy 番犬の3重で抑える。
-            let imageSize = pixelSize(of: image)
-            var flowFaces: [FaceLandmarkSet] = []
-            var survivors: [FlowState] = []
-            // 同一フレーム内で他の FlowState が既に割り当てた trackedFaces の index は
-            // 除外する（グローバル再探索のみだと、複数顔が近接している場合に最良 IoU の
-            // index が重複してしまい、誤 track の bbox を上書きしうるため）。
-            var claimedTrackedIndices: Set<Int> = []
-            for var state in flowStates {
-                // 面積ゲート: 真顔として妥当な大きさのトラックのみブリッジ対象にする
-                // （s5の体誤検出のような大型bboxはここで seed/advance をスキップして
-                // 従来の「全段失敗」＝ミス扱いに落とす）。
-                guard isFlowBridgeEligible(state.lastLandmarks.boundingBox) else { continue }
-                guard let match = state.tracker.advance(with: image),
-                      let transform = SimilarityTransform.estimate(
-                          from: match.previousPoints.map(\.cgPointValue),
-                          to: match.currentPoints.map(\.cgPointValue)),
-                      (0.7...1.4).contains(transform.scale) else { continue }
-                let moved = transform.apply(to: state.lastLandmarks, imageSize: imageSize)
-                state.lastLandmarks = moved
-                flowFaces.append(moved)
-                survivors.append(state)
-                // 対応する track の bbox も前進させ、次フレームの ROI 再検出が
-                // フロー予測位置を走査できるようにする（実顔再取得の早期化）。
-                let movedBox = moved.boundingBox
-                if let ti = trackedFaces.indices
-                    .filter({ !claimedTrackedIndices.contains($0) })
-                    .max(by: {
-                        iou(trackedFaces[$0].box, movedBox) < iou(trackedFaces[$1].box, movedBox)
-                    }), iou(trackedFaces[ti].box, movedBox) > 0.1 {
-                    trackedFaces[ti].box = movedBox
-                    claimedTrackedIndices.insert(ti)
-                }
-            }
-            flowStates = survivors
+            let flowFaces = advanceFlowBridge(image: image)
             if !flowFaces.isEmpty {
                 result = flowFaces
                 source = .flow
@@ -403,17 +365,183 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
             flowStates = []
         }
         if !result.isEmpty, source != .flow {
-            // 実検出(どのソースでも)に成功したらフローを再シードする。
-            // seed は縮小 ROI の特徴点抽出のみで軽量（〜1ms）なので毎フレーム行う。
-            consecutiveFlowFrames = 0
-            flowStates = result.prefix(maxFlowTracks).compactMap { face in
-                let tracker = OpticalFlowTracker()
-                guard tracker.seed(with: image, faceBox: face.boundingBox) else { return nil }
-                return FlowState(tracker: tracker, lastLandmarks: face)
-            }
+            reseedFlow(from: result, image: image)
         }
         recordSource(source)
         return result
+    }
+
+    /// 最終採用直前の体誤フィット検証。棄却された候補に対応する track だけを外科的に
+    /// 殺し（ROI 延命が体 track を引きずるのを防ぐ）、検証通過分を返す。
+    /// 他 track の missCount 状態は保持する。
+    private func verifyAndPruneTracks(_ result: [FaceLandmarkSet], in image: UIImage) -> [FaceLandmarkSet] {
+        let verified = verifySuspiciousFaces(result, in: image)
+        guard verified.count != result.count else { return result }
+        let droppedBoxes = result.map(\.boundingBox).filter { box in
+            !verified.contains { $0.boundingBox == box }
+        }
+        trackedFaces.removeAll { tf in droppedBoxes.contains { iou(tf.box, $0) > 0.5 } }
+        return verified
+    }
+
+    /// 検出全滅フレームをフローで橋渡しする本体。前回ランドマークを疎 LK の
+    /// 相似変換で前進させ、生き残った FlowState だけを保持して顔リストを返す。
+    /// 顔検証パス（タイト crop 再検出）は「検出器で見える顔」しか通せないため、
+    /// フロー出力には適用しない（検出器が全滅したからこそフローに来ている）。
+    /// 誤検出の延命は品質ゲート・上限（VIDEO はフレーム数 / ライブはメディア秒）・
+    /// lowCy 番犬の3重で抑える。連続上限のカウンタ管理は呼び出し側の責務。
+    private func advanceFlowBridge(image: UIImage) -> [FaceLandmarkSet] {
+        let imageSize = pixelSize(of: image)
+        var flowFaces: [FaceLandmarkSet] = []
+        var survivors: [FlowState] = []
+        // 同一フレーム内で他の FlowState が既に割り当てた trackedFaces の index は
+        // 除外する（グローバル再探索のみだと、複数顔が近接している場合に最良 IoU の
+        // index が重複してしまい、誤 track の bbox を上書きしうるため）。
+        var claimedTrackedIndices: Set<Int> = []
+        for var state in flowStates {
+            // 面積ゲート: 真顔として妥当な大きさのトラックのみブリッジ対象にする
+            // （s5の体誤検出のような大型bboxはここで seed/advance をスキップして
+            // 従来の「全段失敗」＝ミス扱いに落とす）。
+            guard isFlowBridgeEligible(state.lastLandmarks.boundingBox) else { continue }
+            guard let match = state.tracker.advance(with: image),
+                  let transform = SimilarityTransform.estimate(
+                      from: match.previousPoints.map(\.cgPointValue),
+                      to: match.currentPoints.map(\.cgPointValue)),
+                  (0.7...1.4).contains(transform.scale) else { continue }
+            let moved = transform.apply(to: state.lastLandmarks, imageSize: imageSize)
+            state.lastLandmarks = moved
+            flowFaces.append(moved)
+            survivors.append(state)
+            // 対応する track の bbox も前進させ、次フレームの ROI 再検出が
+            // フロー予測位置を走査できるようにする（実顔再取得の早期化）。
+            let movedBox = moved.boundingBox
+            if let ti = trackedFaces.indices
+                .filter({ !claimedTrackedIndices.contains($0) })
+                .max(by: {
+                    iou(trackedFaces[$0].box, movedBox) < iou(trackedFaces[$1].box, movedBox)
+                }), iou(trackedFaces[ti].box, movedBox) > 0.1 {
+                trackedFaces[ti].box = movedBox
+                claimedTrackedIndices.insert(ti)
+            }
+        }
+        flowStates = survivors
+        return flowFaces
+    }
+
+    /// 実検出(どのソースでも)に成功したらフローを再シードする。
+    /// seed は縮小 ROI の特徴点抽出のみで軽量（〜1ms）なので毎フレーム行う。
+    private func reseedFlow(from result: [FaceLandmarkSet], image: UIImage) {
+        consecutiveFlowFrames = 0
+        flowStates = result.prefix(maxFlowTracks).compactMap { face in
+            let tracker = OpticalFlowTracker()
+            guard tracker.seed(with: image, faceBox: face.boundingBox) else { return nil }
+            return FlowState(tracker: tracker, lastLandmarks: face)
+        }
+    }
+
+    // MARK: - ライブプレビュー経路（IMAGE モード + テンポラル追跡）
+    //
+    // エクスポート（VIDEO モード）の ROI 再検出・フロー橋渡しをライブプレビューへ移植した
+    // エントリポイント。ライブは AVPlayer のシークで時系列が巻き戻るため VIDEO モードの
+    // 単調タイムスタンプ制約に乗れない。IMAGE モード検出のまま、追跡状態のリセットだけを
+    // メディア時刻の不連続検知で自前管理する。
+    // invariant: ライブ用インスタンスは MosaicEditorModel の liveDetectionQueue が
+    // 直列に使う（in-flight 1 枚ガード）。並行呼び出しは想定しない。
+
+    /// 前回 `liveLandmarks` を処理したメディア時刻。nil はリセット直後。
+    private var lastLiveSeconds: Double?
+    /// 前回「実検出」（フロー以外のソース）に成功したメディア時刻。フロー橋渡しの
+    /// 連続上限判定に使う。nil は実検出がまだ無い状態（フロー不可）。
+    private var lastRealLiveDetectionSeconds: Double?
+    /// ライブのフロー橋渡し連続上限（メディア秒）。VIDEO 経路の maxFlowFrames=30
+    /// （15fps で 2 秒）と同じ意味だが、ライブは検出 in-flight ガードでバケットが
+    /// 飛ぶことがありフレーム数カウントだと実時間が伸びてドリフト許容が甘くなるため、
+    /// メディア時刻ベースで数える。
+    private let maxFlowBridgeSeconds = 2.0
+
+    public func resetLiveTracking() {
+        trackedFaces.removeAll()
+        flowStates = []
+        consecutiveFlowFrames = 0
+        lastLiveSeconds = nil
+        lastRealLiveDetectionSeconds = nil
+    }
+
+    /// メディア時刻の不連続（巻き戻り or 1 秒超の前方ジャンプ）で追跡状態を破棄する。
+    /// 巻き戻りの許容誤差は半バケット（15fps 検出間隔の半分）。
+    /// `MosaicPreviewController.seek(to:)` からの明示リセットが漏れる経路
+    /// （ループ再生の先頭復帰・AVPlayer 内部の時刻飛び）への保険。
+    private func resetLiveTracksIfNeeded(mediaSeconds t: Double) {
+        if let last = lastLiveSeconds,
+           t < last - 0.5 / 15.0 || t - last > 1.0 {
+            resetLiveTracking()
+        }
+        lastLiveSeconds = t
+    }
+
+    public func liveLandmarks(in image: UIImage, atMediaSeconds t: Double) -> LiveDetectionResult {
+        resetLiveTracksIfNeeded(mediaSeconds: t)
+        var result: [FaceLandmarkSet]
+        var source: FaceDetectionSource
+        #if DEBUG
+        let skipDetectionForTesting = simulateDetectionFailureForTesting
+        #else
+        let skipDetectionForTesting = false
+        #endif
+        if skipDetectionForTesting {
+            result = []
+            source = .none
+        } else {
+            let (mp, mpSource) = mpDetectImageWithEnhance(image)
+            if bboxDetector != nil {
+                result = augmentWithBBoxDetector(image: image, mpResults: mp, useImageMode: true)
+                source = mp.isEmpty ? (result.isEmpty ? .none : .bbox) : mpSource
+            } else {
+                result = mp
+                source = mp.isEmpty ? .none : mpSource
+            }
+            if result.isEmpty {
+                // 全画面パイプライン全滅 → 前フレームの顔位置周辺だけを再走査する。
+                // 全画面 640px 縮小では潰れる横顔・小顔も、拡大 crop + upscaledIfSmall
+                // なら拾えることが多い（エクスポート経路と同じテンポラル ROI 再検出）。
+                result = redetectFromTrackedBoxes(image: image)
+                source = result.isEmpty ? .none : .roi
+            } else {
+                rebuildTracks(from: result.map(\.boundingBox))
+            }
+            if result.isEmpty {
+                result = lowConfDetect(image)
+                source = result.isEmpty ? .none : .lowConf
+                if !result.isEmpty { rebuildTracks(from: result.map(\.boundingBox)) }
+            }
+            // tiledDetect はライブでは呼ばない: 最大 15 推論/フレームが直列 1 枚ガードの
+            // 検出キューを数百 ms 塞ぎ、バケット飛びが連鎖する。長期ロストは blinkHold
+            // 切れでモザイク非表示に落ちるフェイルセーフと、次の実検出復帰に任せる。
+            if !result.isEmpty {
+                result = verifyAndPruneTracks(result, in: image)
+                if result.isEmpty { source = .none }
+            }
+        }
+        // 検出全滅 → フロー橋渡し（VIDEO 経路と同じ状態機械。上限だけメディア秒換算）。
+        var bridgedByFlow = false
+        if result.isEmpty, !flowStates.isEmpty,
+           let lastReal = lastRealLiveDetectionSeconds,
+           t - lastReal <= maxFlowBridgeSeconds {
+            let flowFaces = advanceFlowBridge(image: image)
+            if !flowFaces.isEmpty {
+                result = flowFaces
+                source = .flow
+                bridgedByFlow = true
+            }
+        } else if result.isEmpty {
+            flowStates = []
+        }
+        if !result.isEmpty, !bridgedByFlow {
+            lastRealLiveDetectionSeconds = t
+            reseedFlow(from: result, image: image)
+        }
+        recordSource(source)
+        return LiveDetectionResult(faces: result, bridgedByFlow: bridgedByFlow)
     }
 
     /// トラックの正規化bboxが、フローブリッジしてよい「顔として妥当な」範囲か。
