@@ -50,6 +50,10 @@ final class CameraMosaicPipeline {
 
     private var startSeconds: Double?
     private var configuredFPS = 30
+    #if DEBUG
+    /// 実機診断用: フレーム寸法が変わったときだけログを出す（縦長=回転適用済みの確認）。
+    private var lastLoggedFrameSize = CGSize.zero
+    #endif
 
     /// プレビュー描画の最大幅（MosaicPreviewController と同じ 720px）。
     private static let previewMaxWidth = 720.0
@@ -128,6 +132,15 @@ final class CameraMosaicPipeline {
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer),
               let cache = textureCache else { return }
         let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+        #if DEBUG
+        let frameSize = CGSize(width: CVPixelBufferGetWidth(pixelBuffer),
+                               height: CVPixelBufferGetHeight(pixelBuffer))
+        if frameSize != lastLoggedFrameSize {
+            lastLoggedFrameSize = frameSize
+            // 縦長（h > w）でなければコネクションの回転が効いていない
+            print("[MMCAM] frame=\(Int(frameSize.width))x\(Int(frameSize.height))")
+        }
+        #endif
         if startSeconds == nil { startSeconds = pts.seconds }
         let t = pts.seconds - (startSeconds ?? 0)
 

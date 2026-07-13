@@ -56,7 +56,14 @@ final class CameraCaptureController: NSObject {
         sessionQueue.async { [self] in
             self.settings = settings
             let ok = configureSession(position: position)
-            if ok { session.startRunning() }
+            if ok {
+                // コネクションの回転・ミラー設定はコミット後に必ず再適用する
+                // （入力差し替えで再生成されたコネクションには構成中の設定が乗らない。
+                // 実機報告: フロント切替後にプレビューが 90 度ずれる）。
+                configureVideoConnection()
+                applyFrameRate()
+                session.startRunning()
+            }
             DispatchQueue.main.async { completion(ok) }
         }
     }
@@ -81,9 +88,12 @@ final class CameraCaptureController: NSObject {
                 // 新デバイスが取れなければ元に戻す
                 session.addInput(fallback)
             }
+            session.commitConfiguration()
+            // 入力差し替えで再生成されたコネクションはデフォルト向き（センサー横長）に
+            // 戻るため、回転・ミラーは **コミット後** に適用する。コミット前に設定すると
+            // フロント切替後のフレームが 90 度ずれる（実機報告）。
             configureVideoConnection()
             applyFrameRate()
-            session.commitConfiguration()
             DispatchQueue.main.async { [position] in completion(position) }
         }
     }
@@ -147,8 +157,15 @@ final class CameraCaptureController: NSObject {
     }
 
     /// 映像コネクションをポートレート回転・非ミラーに揃える（クラスコメントの規約）。
+    /// 入力を差し替えるとコネクションが再生成されて設定が既定に戻るため、
+    /// **commitConfiguration の後** に呼ぶこと。
     private func configureVideoConnection() {
-        guard let connection = videoOutput.connection(with: .video) else { return }
+        guard let connection = videoOutput.connection(with: .video) else {
+            #if DEBUG
+            print("[MMCAM] video connection なし（回転を適用できない）")
+            #endif
+            return
+        }
         if #available(iOS 17.0, *) {
             if connection.isVideoRotationAngleSupported(90) {
                 connection.videoRotationAngle = 90
@@ -160,6 +177,12 @@ final class CameraCaptureController: NSObject {
             connection.automaticallyAdjustsVideoMirroring = false
             connection.isVideoMirrored = false
         }
+        #if DEBUG
+        if #available(iOS 17.0, *) {
+            print("[MMCAM] position=\(position) rotation=\(connection.videoRotationAngle) "
+                  + "mirrored=\(connection.isVideoMirrored)")
+        }
+        #endif
     }
 
     private func applyFrameRate() {
