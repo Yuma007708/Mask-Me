@@ -50,6 +50,12 @@ final class CameraMosaicPipeline {
 
     private var startSeconds: Double?
     private var configuredFPS = 30
+    /// 横長バッファを縦長へ回転する自前フォールバック用のバッファプール。
+    /// コネクションの `videoRotationAngle` はカメラ/フォーマットによって非対応が
+    /// ありうる（実機報告: フロントだけ 90 度ずれる）ため、デバイス差に依存しない
+    /// 最終防衛としてパイプライン側でも向きを保証する。
+    private var portraitPool: CVPixelBufferPool?
+    private var portraitPoolSize = CGSize.zero
     #if DEBUG
     /// 実機診断用: フレーム寸法が変わったときだけログを出す（縦長=回転適用済みの確認）。
     private var lastLoggedFrameSize = CGSize.zero
@@ -129,16 +135,19 @@ final class CameraMosaicPipeline {
     // MARK: - フレーム処理（映像キャプチャキュー）
 
     func process(sampleBuffer: CMSampleBuffer) {
-        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer),
+        guard let rawBuffer = CMSampleBufferGetImageBuffer(sampleBuffer),
               let cache = textureCache else { return }
+        // コネクションの回転が効かなかったフレームはここで縦長に正規化する
+        let pixelBuffer = normalizedPortraitBuffer(rawBuffer)
         let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
         #if DEBUG
         let frameSize = CGSize(width: CVPixelBufferGetWidth(pixelBuffer),
                                height: CVPixelBufferGetHeight(pixelBuffer))
         if frameSize != lastLoggedFrameSize {
             lastLoggedFrameSize = frameSize
-            // 縦長（h > w）でなければコネクションの回転が効いていない
-            print("[MMCAM] frame=\(Int(frameSize.width))x\(Int(frameSize.height))")
+            let rotated = rawBuffer !== pixelBuffer
+            print("[MMCAM] frame=\(Int(frameSize.width))x\(Int(frameSize.height)) "
+                  + "rotationFallback=\(rotated)")
         }
         #endif
         if startSeconds == nil { startSeconds = pts.seconds }
@@ -297,6 +306,38 @@ final class CameraMosaicPipeline {
     }
 
     // MARK: - 変換ヘルパー
+
+    /// 横長（センサー素通し）のバッファを 90° 時計回りに回転して縦長へ正規化する。
+    /// 縦長で届いたフレーム（コネクション回転が効いている通常ケース）は素通し。
+    /// iPhone の前面・背面ともセンサーは同じ横置きで、ポートレート正立は 90° CW
+    /// （旧 API の videoOrientation=.portrait と同じ物理回転。ミラーは別概念で、
+    /// 本パイプラインは常に非ミラーを前提とする）。
+    private func normalizedPortraitBuffer(_ buffer: CVPixelBuffer) -> CVPixelBuffer {
+        let width = CVPixelBufferGetWidth(buffer)
+        let height = CVPixelBufferGetHeight(buffer)
+        guard width > height else { return buffer }
+
+        let outSize = CGSize(width: height, height: width)
+        if portraitPool == nil || portraitPoolSize != outSize {
+            let attrs: [String: Any] = [
+                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+                kCVPixelBufferWidthKey as String: Int(outSize.width),
+                kCVPixelBufferHeightKey as String: Int(outSize.height),
+                kCVPixelBufferMetalCompatibilityKey as String: true,
+                kCVPixelBufferIOSurfacePropertiesKey as String: [:]
+            ]
+            var pool: CVPixelBufferPool?
+            CVPixelBufferPoolCreate(kCFAllocatorDefault, nil, attrs as CFDictionary, &pool)
+            portraitPool = pool
+            portraitPoolSize = outSize
+        }
+        guard let pool = portraitPool, let out = makePixelBuffer(from: pool) else {
+            return buffer
+        }
+        let rotated = CIImage(cvPixelBuffer: buffer).oriented(.right)
+        ciContext.render(rotated, to: out)
+        return out
+    }
 
     private func downscaledCGImage(from pixelBuffer: CVPixelBuffer,
                                    maxWidth: Double) -> CGImage? {

@@ -107,9 +107,25 @@ final class CameraCaptureTests: XCTestCase {
         XCTAssertEqual(image.size.height * image.scale, size.height)
     }
 
+    /// 横長（コネクション回転が効かなかった）フレームはパイプラインが 90° 回転して
+    /// 縦長に正規化すること（実機報告: フロントカメラだけ 90 度ずれる、の回帰テスト）。
+    func test_pipeline_normalizesLandscapeFramesToPortrait() async throws {
+        let pipeline = try XCTUnwrap(CameraMosaicPipeline(settings: DetectionSettings()))
+        let landscape = CGSize(width: 1280, height: 720)
+        let sample = try makeSampleBuffer(fill: 90, pts: .zero, size: landscape)
+        let photo = await withCheckedContinuation { (cont: CheckedContinuation<UIImage?, Never>) in
+            pipeline.capturePhoto { cont.resume(returning: $0) }
+            pipeline.process(sampleBuffer: sample)
+        }
+        let image = try XCTUnwrap(photo, "写真が生成されていない")
+        XCTAssertEqual(image.size.width * image.scale, landscape.height, "縦長に回転されるはず")
+        XCTAssertEqual(image.size.height * image.scale, landscape.width, "縦長に回転されるはず")
+    }
+
     // MARK: - ヘルパー
 
-    private func makePixelBuffer(fill: UInt8) throws -> CVPixelBuffer {
+    private func makePixelBuffer(fill: UInt8, size: CGSize? = nil) throws -> CVPixelBuffer {
+        let size = size ?? self.size
         var buffer: CVPixelBuffer?
         let attrs: [String: Any] = [
             kCVPixelBufferMetalCompatibilityKey as String: true
@@ -129,8 +145,9 @@ final class CameraCaptureTests: XCTestCase {
         return buffer
     }
 
-    private func makeSampleBuffer(fill: UInt8, pts: CMTime) throws -> CMSampleBuffer {
-        let pixelBuffer = try makePixelBuffer(fill: fill)
+    private func makeSampleBuffer(fill: UInt8, pts: CMTime,
+                                  size: CGSize? = nil) throws -> CMSampleBuffer {
+        let pixelBuffer = try makePixelBuffer(fill: fill, size: size)
         var formatDesc: CMVideoFormatDescription?
         CMVideoFormatDescriptionCreateForImageBuffer(
             allocator: kCFAllocatorDefault, imageBuffer: pixelBuffer,
