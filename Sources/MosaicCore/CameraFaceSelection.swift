@@ -60,7 +60,15 @@ public struct CameraFaceSelection {
     /// OFF トラックはマッチした検出位置へ追従し、未マッチが続くと破棄される。
     /// フレームは時刻順に流すこと。
     public mutating func facesToMask(from faces: [FaceLandmarkSet]) -> [FaceLandmarkSet] {
-        guard !unmasked.isEmpty else { return faces }
+        let masked = maskedIndices(from: faces)
+        return masked.map { faces[$0] }
+    }
+
+    /// `facesToMask` の添字版。フロー前進層（`LiveFacePropagator`）が「検出間で
+    /// 前進させた顔のうちどれを描くか」を添字で参照するために使う。
+    /// トラックの追従・ロスト算入という状態更新は `facesToMask` と同一。
+    public mutating func maskedIndices(from faces: [FaceLandmarkSet]) -> [Int] {
+        guard !unmasked.isEmpty else { return Array(faces.indices) }
 
         let assigned = assignTracks(to: faces)
         var matchedTracks = Set<Int>()
@@ -83,9 +91,7 @@ public struct CameraFaceSelection {
             unmasked.removeAll { $0.missCount > Self.lostFrameTolerance }
         }
 
-        return faces.enumerated()
-            .filter { !excludedFaces.contains($0.offset) }
-            .map(\.element)
+        return faces.indices.filter { !excludedFaces.contains($0) }
     }
 
     /// タップ位置に対応する顔の添字。bbox を少し広げた矩形で判定し、

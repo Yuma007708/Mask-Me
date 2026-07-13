@@ -80,4 +80,45 @@ final class SimilarityTransformTests: XCTestCase {
         XCTAssertEqual(out.width, 0.4, accuracy: 0.0001)
         XCTAssertEqual(out.height, 0.4, accuracy: 0.0001)
     }
+
+    // MARK: - composed
+
+    func test_identity_leavesPointsUnchanged() {
+        let p = CGPoint(x: 12.5, y: -3.75)
+        XCTAssertEqual(SimilarityTransform.identity.applyPoint(p), p)
+    }
+
+    func test_composed_withIdentity_isUnchanged() {
+        let t = SimilarityTransform(scale: 1.2, rotation: .pi / 6, tx: 5, ty: -3)
+        XCTAssertEqual(t.composed(with: .identity), t)
+        let viaIdentity = SimilarityTransform.identity.composed(with: t)
+        XCTAssertEqual(viaIdentity.scale, t.scale, accuracy: 1e-9)
+        XCTAssertEqual(viaIdentity.rotation, t.rotation, accuracy: 1e-9)
+        XCTAssertEqual(viaIdentity.tx, t.tx, accuracy: 1e-9)
+        XCTAssertEqual(viaIdentity.ty, t.ty, accuracy: 1e-9)
+    }
+
+    func test_composed_equalsSequentialApplication() {
+        // 合成変換の 1 回適用 = t1 → t2 の逐次適用（累積補正の正しさの根拠）
+        let t1 = SimilarityTransform(scale: 1.1, rotation: 0.2, tx: 8, ty: -4)
+        let t2 = SimilarityTransform(scale: 0.9, rotation: -0.35, tx: -3, ty: 12)
+        let composed = t1.composed(with: t2)
+        for p in [CGPoint(x: 0, y: 0), CGPoint(x: 100, y: 50), CGPoint(x: -20, y: 75)] {
+            let sequential = t2.applyPoint(t1.applyPoint(p))
+            let direct = composed.applyPoint(p)
+            XCTAssertEqual(direct.x, sequential.x, accuracy: 1e-6)
+            XCTAssertEqual(direct.y, sequential.y, accuracy: 1e-6)
+        }
+    }
+
+    func test_composed_isAssociative() {
+        let t1 = SimilarityTransform(scale: 1.05, rotation: 0.1, tx: 2, ty: 3)
+        let t2 = SimilarityTransform(scale: 0.95, rotation: -0.2, tx: -5, ty: 1)
+        let t3 = SimilarityTransform(scale: 1.15, rotation: 0.3, tx: 7, ty: -6)
+        let left = t1.composed(with: t2).composed(with: t3)
+        let right = t1.composed(with: t2.composed(with: t3))
+        let p = CGPoint(x: 42, y: -17)
+        XCTAssertEqual(left.applyPoint(p).x, right.applyPoint(p).x, accuracy: 1e-6)
+        XCTAssertEqual(left.applyPoint(p).y, right.applyPoint(p).y, accuracy: 1e-6)
+    }
 }

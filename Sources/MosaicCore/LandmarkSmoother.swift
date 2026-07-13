@@ -35,9 +35,13 @@ public final class LandmarkSmoother {
         let smoothed = faces.map { face -> FaceLandmarkSet in
             guard let prev = face.counterpart(in: previous),
                   prev.points.count == face.points.count else { return face }
-            if centroidDistance(prev, face) > snapDistance { return face }
-            // EMA: prev * (1 - alpha) + face * alpha
-            return prev.interpolated(to: face, alpha: alpha)
+            let dist = centroidDistance(prev, face)
+            if dist > snapDistance { return face }
+            // 速度適応 EMA: 移動が大きいほど新観測の重みを上げ、速い動きでの
+            // 追従遅れ（モザイクが顔から外れる）を防ぐ。dist=0 で基準 alpha、
+            // dist=snapDistance で 1.0 となり、スナップ素通しと連続につながる。
+            let adaptive = alpha + (1 - alpha) * (dist / snapDistance)
+            return prev.interpolated(to: face, alpha: adaptive)
         }
         previous = smoothed
         return smoothed

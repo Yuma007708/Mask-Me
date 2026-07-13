@@ -20,6 +20,19 @@ public struct SimilarityTransform: Sendable, Equatable {
         self.ty = ty
     }
 
+    /// 恒等変換（何も動かさない）。フレーム間変換の累積の初期値に使う。
+    public static let identity = SimilarityTransform(scale: 1, rotation: 0, tx: 0, ty: 0)
+
+    /// 自分を先に、`next` を後に適用する合成変換 `next ∘ self` を返す。
+    /// 「検出開始フレーム → 現フレーム」のフレーム間変換の畳み込みに使う
+    /// （scale は乗算、rotation は加算、並進は自分の並進を next で写して厳密合成）。
+    public func composed(with next: SimilarityTransform) -> SimilarityTransform {
+        let t = next.applyPoint(CGPoint(x: tx, y: ty))
+        return SimilarityTransform(scale: scale * next.scale,
+                                   rotation: rotation + next.rotation,
+                                   tx: t.x, ty: t.y)
+    }
+
     /// 対応点ペアから相似変換を推定する。
     /// - 6 ペア未満は nil（自由度 4 に対し余裕を要求）。
     /// - 1 回フィット → 残差が max(2px, 中央値の 2 倍) を超える点を除去 → 再フィット。
