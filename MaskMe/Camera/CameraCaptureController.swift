@@ -37,6 +37,9 @@ final class CameraCaptureController: NSObject {
     private var videoDeviceInput: AVCaptureDeviceInput?
     private(set) var position: Position = .back
     private var settings = CaptureSettings()
+    /// センサー実装向きの機種差を吸収する回転計算係（iOS 17+）。
+    /// 参照を保持しないと値の更新が止まるためプロパティで持つ。
+    private var rotationCoordinator: AnyObject?
 
     // MARK: - 権限
 
@@ -167,10 +170,16 @@ final class CameraCaptureController: NSObject {
             return
         }
         if #available(iOS 17.0, *) {
-            if connection.isVideoRotationAngleSupported(90) {
-                connection.videoRotationAngle = 90
+            // videoRotationAngle は **絶対角** で、ポートレート正立に必要な値は
+            // センサーの実装向きに依存する（実機報告: A19 世代のフロントは 90 だと
+            // 上下逆さま = 正解は 270。背面は 90）。固定値ではなく
+            // RotationCoordinator に機種差を吸収させる。
+            let angle = portraitRotationAngle()
+            if connection.isVideoRotationAngleSupported(angle) {
+                connection.videoRotationAngle = angle
             }
         } else if connection.isVideoOrientationSupported {
+            // 旧 API はカメラごとの実装向きを内部で吸収する
             connection.videoOrientation = .portrait
         }
         if connection.isVideoMirroringSupported {
@@ -183,6 +192,19 @@ final class CameraCaptureController: NSObject {
                   + "mirrored=\(connection.isVideoMirrored)")
         }
         #endif
+    }
+
+    /// 現在の映像デバイスでポートレート正立となる回転角。
+    /// アプリは Portrait 固定なので、端末を横に持って起動した等で水平系（0/180）が
+    /// 返った場合はポートレート系の既定 90 に丸める。
+    @available(iOS 17.0, *)
+    private func portraitRotationAngle() -> CGFloat {
+        guard let device = videoDeviceInput?.device else { return 90 }
+        let coordinator = AVCaptureDevice.RotationCoordinator(
+            device: device, previewLayer: nil)
+        rotationCoordinator = coordinator
+        let angle = coordinator.videoRotationAngleForHorizonLevelCapture
+        return (angle == 90 || angle == 270) ? angle : 90
     }
 
     private func applyFrameRate() {
