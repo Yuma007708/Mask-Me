@@ -109,8 +109,14 @@ public final class LiveFacePropagator {
 
     /// 顔 `index` がフロー失敗中（外挿または凍結）か。マージン増・凸包降格用。
     public func isExtrapolating(at index: Int) -> Bool {
-        guard tracks.indices.contains(index) else { return false }
-        return tracks[index].extrapolatingFrames > 0
+        extrapolationFrames(at: index) > 0
+    }
+
+    /// 顔 `index` のフロー失敗連続フレーム数（0 = フロー健全）。
+    /// 外挿が長引くほどマスクマージンを漸増させるために使う。
+    public func extrapolationFrames(at index: Int) -> Int {
+        guard tracks.indices.contains(index) else { return 0 }
+        return tracks[index].extrapolatingFrames
     }
 
     // MARK: - 毎フレーム前進

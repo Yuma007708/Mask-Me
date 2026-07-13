@@ -28,15 +28,15 @@ constexpr double kMinSurvivorRatio = 0.40;
 /// フル解像度の Mat/CGContext は確保しない: 先に縮小後サイズ (dw,dh) を計算し、
 /// その縮小サイズの Mat/CGContext へ CGContextDrawImage で直接縮小描画する
 /// （cv::resize は使わない。CG の補間は kCGInterpolationMedium）。
-cv::Mat grayMat(UIImage *image, double &scaleOut) {
+cv::Mat grayMat(UIImage *image, double &scaleOut, double maxLongSide = kMaxLongSide) {
     CGImageRef cg = image.CGImage;
     if (!cg) { scaleOut = 1.0; return cv::Mat(); }
     const size_t w = CGImageGetWidth(cg), h = CGImageGetHeight(cg);
     const double longSide = std::max(w, h);
     scaleOut = 1.0;
     size_t dw = w, dh = h;
-    if (longSide > kMaxLongSide) {
-        scaleOut = longSide / kMaxLongSide;
+    if (longSide > maxLongSide) {
+        scaleOut = longSide / maxLongSide;
         dw = (size_t)std::lround(w / scaleOut);
         dh = (size_t)std::lround(h / scaleOut);
     }
@@ -56,6 +56,25 @@ cv::Mat grayMat(UIImage *image, double &scaleOut) {
 }
 }  // namespace
 
+@implementation MMGrayFrame {
+    @package
+    cv::Mat _gray;   // 縮小グレースケール
+    double _scale;   // フルフレームpx = 縮小px × _scale
+}
+
++ (nullable MMGrayFrame *)frameWithImage:(UIImage *)image
+                             maxLongSide:(double)maxLongSide {
+    double scale = 1.0;
+    cv::Mat gray = grayMat(image, scale, maxLongSide);
+    if (gray.empty()) { return nil; }
+    MMGrayFrame *frame = [[MMGrayFrame alloc] init];
+    frame->_gray = gray;
+    frame->_scale = scale;
+    return frame;
+}
+
+@end
+
 @implementation OpticalFlowTracker {
     cv::Mat _prevGray;                  // 縮小グレースケールの前フレーム
     std::vector<cv::Point2f> _points;   // 前フレームの特徴点（縮小px）
@@ -72,6 +91,14 @@ cv::Mat grayMat(UIImage *image, double &scaleOut) {
 - (BOOL)seedWithImage:(UIImage *)image faceBox:(CGRect)faceBox {
     double scale = 1.0;
     cv::Mat gray = grayMat(image, scale);
+    return [self seedWithGray:gray scale:scale faceBox:faceBox];
+}
+
+- (BOOL)seedWithGrayFrame:(MMGrayFrame *)frame faceBox:(CGRect)faceBox {
+    return [self seedWithGray:frame->_gray scale:frame->_scale faceBox:faceBox];
+}
+
+- (BOOL)seedWithGray:(const cv::Mat &)gray scale:(double)scale faceBox:(CGRect)faceBox {
     if (gray.empty()) { [self reset]; return NO; }
     // 正規化 faceBox → 縮小px の ROI（画像内にクランプ）
     cv::Rect roi((int)std::lround(faceBox.origin.x * gray.cols),
@@ -100,9 +127,17 @@ cv::Mat grayMat(UIImage *image, double &scaleOut) {
 }
 
 - (nullable MMFlowMatch *)advanceWithImage:(UIImage *)image {
-    if (_prevGray.empty() || _points.empty()) { return nil; }
     double scale = 1.0;
     cv::Mat gray = grayMat(image, scale);
+    return [self advanceWithGray:gray scale:scale];
+}
+
+- (nullable MMFlowMatch *)advanceWithGrayFrame:(MMGrayFrame *)frame {
+    return [self advanceWithGray:frame->_gray scale:frame->_scale];
+}
+
+- (nullable MMFlowMatch *)advanceWithGray:(const cv::Mat &)gray scale:(double)scale {
+    if (_prevGray.empty() || _points.empty()) { return nil; }
     if (gray.empty() || gray.size() != _prevGray.size()) { [self reset]; return nil; }
 
     std::vector<cv::Point2f> next, back;

@@ -27,17 +27,22 @@ final class CameraMosaicPipeline {
 
     private let renderer: MosaicRenderer
     private let scanner: FaceLandmarking
-    private let smoother = LandmarkSmoother()
     private let ciContext: CIContext
     private var textureCache: CVMetalTextureCache?
     private let detectionQueue = DispatchQueue(label: "com.maskme.camera.detection")
 
+    /// 毎フレーム前進層（stateLock 内でのみ触る）。検出(10Hz)間のフレームを
+    /// フロー変換で前進させ、モザイクを顔に貼り付かせ続ける。
+    private let propagator = LiveFacePropagator()
+    /// フロートラッカー束（videoQueue 専有。ロック不要）。
+    private let advancer = CameraFlowAdvancer()
+
     private let stateLock = NSLock()
     private var selection = CameraFaceSelection()
-    /// 直近の検出顔（タップ判定用の全顔）。
-    private var lastFaces: [FaceLandmarkSet] = []
-    /// 描画対象（オプトアウト除外後）。検出が新しく来たときだけ更新する。
-    private var maskedFaces: [FaceLandmarkSet] = []
+    /// 描画対象の顔添字（`propagator.faces` 基準）。検出合流・タップ時に更新。
+    private var maskedIdx: [Int] = []
+    /// 検出合流後、次フレームでフロートラッカーを蒔き直すフラグ。
+    private var pendingReseed = false
     private var detectionInFlight = false
     private var lastDetectionSeconds = -Double.greatestFiniteMagnitude
     private var lastNonEmptySeconds = -Double.greatestFiniteMagnitude
@@ -91,11 +96,13 @@ final class CameraMosaicPipeline {
     }
 
     /// タップ位置（正規化・非ミラー座標）の顔の ON/OFF を切り替える。
+    /// 判定対象は前進済みの現フレーム推定なので、動いている顔にも正しく当たる。
     /// - Returns: 切替後の状態（true=ON に戻した / false=OFF にした）、顔なしは nil。
     func toggleFace(atNormalized point: CGPoint) -> Bool? {
         withLock {
-            let result = selection.toggle(at: point, in: lastFaces)
-            maskedFaces = selection.facesToMask(from: lastFaces)
+            let faces = propagator.faces
+            let result = selection.toggle(at: point, in: faces)
+            maskedIdx = selection.maskedIndices(from: faces)
             return result
         }
     }
@@ -121,13 +128,15 @@ final class CameraMosaicPipeline {
     }
 
     /// カメラ切替・画面終了時に追跡と選択を初期化する（時系列が変わるため）。
+    /// フロートラッカー（videoQueue 専有）はここでは触らず、pendingReseed で
+    /// 次フレームに空の蒔き直しをさせて破棄する。
     func resetTracking() {
         detectionQueue.async { [scanner] in scanner.resetLiveTracking() }
         withLock {
-            smoother.reset()
             selection.reset()
-            lastFaces = []
-            maskedFaces = []
+            propagator.reset()
+            maskedIdx = []
+            pendingReseed = true
             lastNonEmptySeconds = -Double.greatestFiniteMagnitude
         }
     }
@@ -153,10 +162,31 @@ final class CameraMosaicPipeline {
         if startSeconds == nil { startSeconds = pts.seconds }
         let t = pts.seconds - (startSeconds ?? 0)
 
-        maybeDetect(pixelBuffer: pixelBuffer, at: t)
+        // 検出スロットル判定を先に行い、縮小画像（検出とフローで共有）は
+        // どちらかが必要なフレームだけ生成する。
+        let shouldDetect = claimDetectionSlot(at: t)
+        let needsFlow = withLock { !propagator.isEmpty || pendingReseed }
+        var scaledCG: CGImage?
+        if shouldDetect || needsFlow {
+            scaledCG = downscaledCGImage(
+                from: pixelBuffer, maxWidth: MosaicEditorModel.liveDetectionTargetWidth)
+        }
+
+        // 毎フレームのフロー前進（検出発行より先: begin 時点 = このフレーム）
+        if needsFlow, let cg = scaledCG {
+            advanceFlow(cg: cg)
+        }
+        if shouldDetect {
+            if let cg = scaledCG {
+                dispatchDetection(cg: cg, at: t)
+            } else {
+                withLock { detectionInFlight = false }
+            }
+        }
 
         struct FrameJob {
             let faces: [FaceLandmarkSet]
+            let options: [MosaicRenderer.FaceRenderOption]
             let block: Float
             let recorder: CameraRecorder?
             let photoCompletion: ((UIImage?) -> Void)?
@@ -172,23 +202,48 @@ final class CameraMosaicPipeline {
             }
             let cb = photoCompletion
             photoCompletion = nil
-            // 描画直前の EMA（プレビュー再生と同じちらつき吸収）
-            return FrameJob(faces: smoother.smooth(maskedFaces), block: blockSize,
+            // 前進済みの現フレーム推定から描画対象（オプトアウト除外後）を抜き出し、
+            // 速度・外挿状態に応じたマスクマージンを顔ごとに算出する
+            let all = propagator.faces
+            var faces: [FaceLandmarkSet] = []
+            var options: [MosaicRenderer.FaceRenderOption] = []
+            for index in maskedIdx where all.indices.contains(index) {
+                faces.append(all[index])
+                options.append(renderOption(forTrackAt: index))
+            }
+            return FrameJob(faces: faces, options: options, block: blockSize,
                             recorder: recorder, photoCompletion: cb)
         }
         renderer.params = MosaicParams(block: job.block)
 
         if let activeRecorder = job.recorder {
             renderRecordingFrame(
-                pixelBuffer: pixelBuffer, pts: pts, faces: job.faces,
+                pixelBuffer: pixelBuffer, pts: pts, faces: job.faces, options: job.options,
                 recorder: activeRecorder, photoCompletion: job.photoCompletion, cache: cache)
         } else if let photoCb = job.photoCompletion {
-            renderPhotoFrame(pixelBuffer: pixelBuffer, faces: job.faces,
+            renderPhotoFrame(pixelBuffer: pixelBuffer, faces: job.faces, options: job.options,
                              completion: photoCb, cache: cache)
         } else {
-            renderPreviewOnlyFrame(pixelBuffer: pixelBuffer, faces: job.faces)
+            renderPreviewOnlyFrame(pixelBuffer: pixelBuffer, faces: job.faces,
+                                   options: job.options)
         }
     }
+
+    /// トラックの速度・外挿状態から顔ごとの描画オプションを作る（stateLock 内で呼ぶ）。
+    /// - 速い顔ほど凸包マージンを広げる（1 フレーム分の残差ラグを吸収）。
+    /// - フロー外挿中は不確かさに応じてさらに漸増し、余白ゼロのメッシュ経路は
+    ///   余白のある凸包マスクへ降格する（原本レス設計の露出防止を最優先）。
+    private func renderOption(forTrackAt index: Int) -> MosaicRenderer.FaceRenderOption {
+        let extrapolating = propagator.extrapolationFrames(at: index)
+        let dilation = Self.baseDilation
+            + min(0.06, propagator.speed(at: index) * 1.5)
+            + min(0.06, CGFloat(extrapolating) * 0.015)
+        return MosaicRenderer.FaceRenderOption(
+            dilation: dilation, forceConvexHull: extrapolating > 0)
+    }
+
+    /// 静止時の凸包マージン（FaceMaskBuilder の既定と同じ顔幅 4%）。
+    private static let baseDilation: CGFloat = 0.04
 
     /// マイク音声（音声キャプチャキュー）。録画中のみレコーダーへ流す。
     func processAudio(sampleBuffer: CMSampleBuffer) {
@@ -196,10 +251,57 @@ final class CameraMosaicPipeline {
         activeRecorder?.appendAudio(sampleBuffer)
     }
 
-    // MARK: - 検出
+    // MARK: - フロー前進（毎フレーム・videoQueue）
 
-    private func maybeDetect(pixelBuffer: CVPixelBuffer, at t: Double) {
-        let shouldDetect = withLock { () -> Bool in
+    /// 全トラックを現フレームへ前進させ、検出合流直後なら補正済み bbox で
+    /// フロートラッカーを蒔き直す。`cg` は検出と同じ縮小画像
+    /// （observations の座標系はこの縮小 px。propagator へ同じサイズを渡す）。
+    private func advanceFlow(cg: CGImage) {
+        #if DEBUG
+        let started = CFAbsoluteTimeGetCurrent()
+        #endif
+        // cg は既に縮小済みなので MMGrayFrame では再縮小しない（長辺そのまま）
+        guard let frame = MMGrayFrame(
+            image: UIImage(cgImage: cg),
+            maxLongSide: Double(max(cg.width, cg.height))) else { return }
+        let observations = advancer.advance(frame: frame)
+        let size = CGSize(width: cg.width, height: cg.height)
+        let reseedBoxes = withLock { () -> [CGRect]? in
+            propagator.advance(observations: observations, imageSize: size)
+            guard pendingReseed else { return nil }
+            pendingReseed = false
+            return propagator.boundingBoxes
+        }
+        if let reseedBoxes {
+            advancer.reseed(frame: frame, faceBoxes: reseedBoxes)
+        }
+        #if DEBUG
+        logFlowCost(CFAbsoluteTimeGetCurrent() - started)
+        #endif
+    }
+
+    #if DEBUG
+    private var flowCostSum = 0.0
+    private var flowCostCount = 0
+    /// 実機診断用: フロー前進の平均所要時間を約 5 秒ごとに出す。
+    private func logFlowCost(_ elapsed: Double) {
+        flowCostSum += elapsed
+        flowCostCount += 1
+        if flowCostCount >= 150 {
+            let avgMs = flowCostSum / Double(flowCostCount) * 1000
+            print(String(format: "[MMCAM] flowAdvance avg=%.2fms faces=%d",
+                         avgMs, withLock { propagator.count }))
+            flowCostSum = 0
+            flowCostCount = 0
+        }
+    }
+    #endif
+
+    // MARK: - 検出（10Hz・detectionQueue）
+
+    /// 検出スロットルの判定と in-flight ガードの獲得。
+    private func claimDetectionSlot(at t: Double) -> Bool {
+        withLock {
             guard !detectionInFlight, t - lastDetectionSeconds >= detectionInterval else {
                 return false
             }
@@ -207,21 +309,23 @@ final class CameraMosaicPipeline {
             lastDetectionSeconds = t
             return true
         }
-        guard shouldDetect else { return }
-        guard let cg = downscaledCGImage(
-            from: pixelBuffer, maxWidth: MosaicEditorModel.liveDetectionTargetWidth) else {
-            withLock { detectionInFlight = false }
-            return
-        }
+    }
+
+    private func dispatchDetection(cg: CGImage, at t: Double) {
+        // 以降のフレーム間変換が累積され、完了時に「古い検出結果」を現フレームへ補正する
+        let token = withLock { propagator.beginDetection() }
         detectionQueue.async { [weak self] in
             guard let self else { return }
             let result = self.scanner.liveLandmarks(in: UIImage(cgImage: cg), atMediaSeconds: t)
+            let detectionSize = CGSize(width: cg.width, height: cg.height)
             var counts: (detected: Int, unmasked: Int) = (0, 0)
             self.withLock {
                 if !result.faces.isEmpty {
-                    self.lastFaces = result.faces
+                    self.propagator.completeDetection(
+                        token: token, faces: result.faces, imageSize: detectionSize)
                     self.lastNonEmptySeconds = t
-                    self.maskedFaces = self.selection.facesToMask(from: result.faces)
+                    self.maskedIdx = self.selection.maskedIndices(from: self.propagator.faces)
+                    self.pendingReseed = true
                 } else {
                     // 検出全滅（フロー橋渡しの上限切れ含む）。録画中は最後の位置を
                     // 保持しつづける（不可逆な焼き込みでの露出を最優先で防ぐ）。
@@ -229,12 +333,13 @@ final class CameraMosaicPipeline {
                     let hold = self.recorder != nil
                         || (t - self.lastNonEmptySeconds) < Self.lostGraceSeconds
                     if !hold {
-                        self.lastFaces = []
-                        self.maskedFaces = []
+                        self.propagator.reset()
+                        self.maskedIdx = []
+                        self.pendingReseed = true   // 次フレームで空の蒔き直し
                     }
                 }
                 self.detectionInFlight = false
-                counts = (self.lastFaces.count, self.selection.unmaskedCount)
+                counts = (self.propagator.count, self.selection.unmaskedCount)
             }
             self.onFaceCountChange?(counts.detected, counts.unmasked)
         }
@@ -248,6 +353,7 @@ final class CameraMosaicPipeline {
         pixelBuffer: CVPixelBuffer,
         pts: CMTime,
         faces: [FaceLandmarkSet],
+        options: [MosaicRenderer.FaceRenderOption],
         recorder: CameraRecorder,
         photoCompletion: ((UIImage?) -> Void)?,
         cache: CVMetalTextureCache
@@ -261,7 +367,7 @@ final class CameraMosaicPipeline {
             return
         }
         renderer.render(input: inputTexture, into: outputTexture,
-                        landmarkSets: faces, waitForCompletion: true)
+                        landmarkSets: faces, faceOptions: options, waitForCompletion: true)
         recorder.appendVideo(outBuffer, at: pts)
         publishPreview(from: outBuffer)
         if let photoCompletion {
@@ -275,11 +381,13 @@ final class CameraMosaicPipeline {
     private func renderPhotoFrame(
         pixelBuffer: CVPixelBuffer,
         faces: [FaceLandmarkSet],
+        options: [MosaicRenderer.FaceRenderOption],
         completion: (UIImage?) -> Void,
         cache: CVMetalTextureCache
     ) {
         guard let inputTexture = MetalTextureUtilities.texture(from: pixelBuffer, cache: cache),
-              let result = renderer.renderToNewTexture(input: inputTexture, landmarkSets: faces),
+              let result = renderer.renderToNewTexture(
+                  input: inputTexture, landmarkSets: faces, faceOptions: options),
               let cg = MetalTextureUtilities.cgImage(from: result.texture) else {
             completion(nil)
             return
@@ -289,11 +397,14 @@ final class CameraMosaicPipeline {
     }
 
     /// 待機中: 720px に縮小してから描画する（プレビュー再生と同じ負荷削減）。
-    private func renderPreviewOnlyFrame(pixelBuffer: CVPixelBuffer, faces: [FaceLandmarkSet]) {
+    private func renderPreviewOnlyFrame(pixelBuffer: CVPixelBuffer,
+                                        faces: [FaceLandmarkSet],
+                                        options: [MosaicRenderer.FaceRenderOption]) {
         guard let cg = downscaledCGImage(from: pixelBuffer, maxWidth: Self.previewMaxWidth),
               let inputTexture = try? MetalTextureUtilities.texture(
                   from: cg, device: renderer.device),
-              let result = renderer.renderToNewTexture(input: inputTexture, landmarkSets: faces),
+              let result = renderer.renderToNewTexture(
+                  input: inputTexture, landmarkSets: faces, faceOptions: options),
               let outCG = MetalTextureUtilities.cgImage(from: result.texture) else { return }
         onPreviewImage?(UIImage(cgImage: outCG))
     }
