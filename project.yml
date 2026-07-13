@@ -61,6 +61,8 @@ targets:
           - UIInterfaceOrientationLandscapeLeft
           - UIInterfaceOrientationLandscapeRight
         NSPhotoLibraryUsageDescription: 編集する写真・動画を読み込むために写真ライブラリへアクセスします。
+        NSCameraUsageDescription: モザイクを掛けながら撮影するためにカメラへアクセスします。
+        NSMicrophoneUsageDescription: 動画撮影に音声を含めるためにマイクへアクセスします。許可しない場合は無音で録画されます。
         NSPhotoLibraryAddUsageDescription: モザイク加工した写真・動画を保存するために写真ライブラリへアクセスします。
     # Generates a shared "MaskMe" scheme so `xcodebuild -scheme MaskMe`
     # (and SwiftPM package resolution) works in CI. The detection-accuracy

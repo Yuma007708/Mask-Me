@@ -2,11 +2,15 @@ import SwiftUI
 
 struct SettingsView: View {
     @EnvironmentObject private var store: DetectionSettingsStore
+    @EnvironmentObject private var captureStore: CaptureSettingsStore
+    /// 端末カメラの対応組み合わせ（非対応の解像度 × fps は選択肢に出さない）。
+    private let supportedCaptureCombinations = CaptureCapabilities.supportedCombinations()
 
     var body: some View {
         NavigationStack {
             Form {
                 presetsSection
+                captureSection
                 parametersSection
                 resetSection
             }
@@ -67,6 +71,41 @@ struct SettingsView: View {
     }
 
     // MARK: - パラメーター
+
+    // MARK: - 撮影画質
+
+    /// 対応している解像度と、選択中の解像度で対応している fps だけを出す。
+    private var captureSection: some View {
+        Section("撮影画質") {
+            let resolutions = CaptureResolution.allCases.filter { res in
+                supportedCaptureCombinations.contains { $0.resolution == res }
+            }
+            Picker("解像度", selection: $captureStore.settings.resolution) {
+                ForEach(resolutions) { res in
+                    Text(res.label).tag(res)
+                }
+            }
+            let frameRates = supportedCaptureCombinations
+                .filter { $0.resolution == captureStore.settings.resolution }
+                .map(\.fps)
+            Picker("フレームレート", selection: $captureStore.settings.fps) {
+                ForEach(frameRates, id: \.self) { fps in
+                    Text("\(fps) fps").tag(fps)
+                }
+            }
+            .onChange(of: captureStore.settings.resolution) { newValue in
+                // 解像度変更で fps が非対応になったら対応値へ丸める
+                let rates = supportedCaptureCombinations
+                    .filter { $0.resolution == newValue }.map(\.fps)
+                if !rates.contains(captureStore.settings.fps), let first = rates.first {
+                    captureStore.settings.fps = first
+                }
+            }
+            Text("アプリ内カメラ（リアルタイムモザイク撮影）の画質です。高いほど発熱・電池消費が増えます。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
 
     private var parametersSection: some View {
         Section("検出パラメーター") {

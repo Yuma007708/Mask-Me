@@ -22,6 +22,10 @@
 	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<key>NSCameraUsageDescription</key>
+	<string>モザイクを掛けながら撮影するためにカメラへアクセスします。</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>動画撮影に音声を含めるためにマイクへアクセスします。許可しない場合は無音で録画されます。</string>
 	<key>NSPhotoLibraryAddUsageDescription</key>
 	<string>モザイク加工した写真・動画を保存するために写真ライブラリへアクセスします。</string>
 	<key>NSPhotoLibraryUsageDescription</key>

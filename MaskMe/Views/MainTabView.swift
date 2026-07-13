@@ -3,6 +3,9 @@ import UIKit
 
 struct MainTabView: View {
     @State private var selectedTab: Tab = .edit
+    @State private var showsCamera = false
+    @EnvironmentObject private var detectionStore: DetectionSettingsStore
+    @EnvironmentObject private var captureStore: CaptureSettingsStore
 
     enum Tab { case edit, settings }
 
@@ -17,20 +20,25 @@ struct MainTabView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
 
             Divider()
-            AppTabBar(selected: $selectedTab)
+            AppTabBar(selected: $selectedTab, cameraTapped: { showsCamera = true })
+        }
+        .fullScreenCover(isPresented: $showsCamera) {
+            CameraView(captureSettings: captureStore.settings,
+                       detectionSettings: detectionStore.settings)
         }
     }
 }
 
 private struct AppTabBar: View {
     @Binding var selected: MainTabView.Tab
+    let cameraTapped: () -> Void
 
     var body: some View {
         HStack(spacing: 0) {
             tabButton(icon: "square.and.pencil", label: "編集", tab: .edit)
 
-            // カメラボタン（中央・大きめ・未実装）
-            Button(action: {}) {
+            // リアルタイムモザイク撮影（中央・大きめ）
+            Button(action: cameraTapped) {
                 Image(systemName: "camera.fill")
                     .font(.title2)
                     .foregroundStyle(.white)
@@ -40,7 +48,6 @@ private struct AppTabBar: View {
                     .shadow(color: Color.accentColor.opacity(0.4), radius: 6, y: 2)
             }
             .frame(maxWidth: .infinity)
-            .allowsHitTesting(false)   // 未実装
 
             tabButton(icon: "gearshape", label: "設定", tab: .settings)
         }
