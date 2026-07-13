@@ -195,16 +195,27 @@ final class CameraCaptureController: NSObject {
     }
 
     /// 現在の映像デバイスでポートレート正立となる回転角。
-    /// アプリは Portrait 固定なので、端末を横に持って起動した等で水平系（0/180）が
-    /// 返った場合はポートレート系の既定 90 に丸める。
+    ///
+    /// 実測（iPhone 17 世代）: `RotationCoordinator` の
+    /// `videoRotationAngleForHorizonLevelCapture` はフロントでも 90 を返すが、
+    /// フロントに 90 を適用するとバッファが 180 度ずれる（鏡像表示と合成されて
+    /// 上下反転に見える）。コーディネーターはセンサー実装向きの差を吸収して
+    /// くれなかったため、実測に基づきフロントは 180 度足した 270 を使う。
+    /// coordinator の生値は機種差の判断材料として DEBUG ログにだけ残す。
     @available(iOS 17.0, *)
     private func portraitRotationAngle() -> CGFloat {
-        guard let device = videoDeviceInput?.device else { return 90 }
-        let coordinator = AVCaptureDevice.RotationCoordinator(
-            device: device, previewLayer: nil)
-        rotationCoordinator = coordinator
-        let angle = coordinator.videoRotationAngleForHorizonLevelCapture
-        return (angle == 90 || angle == 270) ? angle : 90
+        let angle: CGFloat = position == .front ? 270 : 90
+        #if DEBUG
+        if let device = videoDeviceInput?.device {
+            let coordinator = AVCaptureDevice.RotationCoordinator(
+                device: device, previewLayer: nil)
+            rotationCoordinator = coordinator
+            print("[MMCAM] coordinatorRaw="
+                  + "\(coordinator.videoRotationAngleForHorizonLevelCapture) "
+                  + "applying=\(angle) position=\(position)")
+        }
+        #endif
+        return angle
     }
 
     private func applyFrameRate() {
