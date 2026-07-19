@@ -866,7 +866,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 
 **Files:**
 - Modify: `MaskMe/Model/MosaicEditorModel.swift`
-- Modify: `MaskMeTests/DetectionCacheSyncTests.swift`（**1 行のみ**。下記 Step 5 参照）
+- Modify: `MaskMeTests/` の `detectionCache` 参照箇所（機械的な API 移行のみ。下記 Step 5 参照）
 - Modify: `MaskMe/Export/VideoMosaicExporter.swift`（呼び出し側の型合わせのみ。シグネチャは変えない）
 
 **このタスクでやらないこと（重要）:**
@@ -876,7 +876,8 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 - `VideoMosaicExporter.export` のシグネチャを変えないこと
 
 **このタスクの合格条件:** 既存の `DetectionCacheSyncTests` **4 件**が通ること。
-アサーションを 1 つも変えないこと。変更してよいのは Step 5 の 1 行だけ。
+**アサーションを 1 つも変えないこと。** テスト側の変更は `detectionCache` →
+`cacheStore` の機械的な API 移行に限る。
 
 **設計の要点: モデルは常に素材 ID を持つ**
 
@@ -890,17 +891,17 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 - [ ] **Step 1: 現状のベースラインを記録する**
 
 ```bash
-swiftlint lint --quiet 2>&1 | tail -20
-```
-
-lint の**現状の違反**をレポートに記録すること。このタスクで違反を増やさないことが基準であり、
-着手前から出ている違反をこのタスクで解消する義務はない。
-
-```bash
 cd /Users/tatsuki/Desktop/mirator/projects/Mask-Me && xcodebuild test -workspace MaskMe.xcworkspace -scheme MaskMe -destination 'platform=iOS Simulator,id=B418FA35-66F1-46C7-A314-EA162FC3D6CD' -only-testing:MaskMeTests/DetectionCacheSyncTests 2>&1 | grep -E "Test Case|Executed"
 ```
 
 Expected: **4 件 passed**。この 4 件が載せ替え後も通ることが合格条件。
+
+**lint について:** `.swiftlint.yml` の `included:` は `Sources` と `Tests` のみで、
+**`MaskMe/` は lint 対象外**である。よって `MosaicEditorModel.swift` が 1229 行あっても
+`file_length` 違反としては報告されない。このタスクで `swiftlint` の結果は変わらないため、
+lint を合否判定に使わないこと。ただし**ファイルが際限なく育つのは別途の問題**なので、
+このタスクで大幅に行数が増えるなら `MosaicEditorModel+Timeline.swift` への切り出しを
+検討し、判断をレポートに書くこと。
 
 - [ ] **Step 2: モデルに素材 ID とキャッシュ保管庫を追加する**
 
@@ -966,22 +967,28 @@ cd /Users/tatsuki/Desktop/mirator/projects/Mask-Me && grep -n "detectionCache" M
 毎フレーム呼ばれる経路であれば**コストが問題にならないか確認し、問題があれば
 レポートに書くこと**（当初計画はここを検討していない）。
 
-- [ ] **Step 5: テストの 1 行だけを直す**
+- [ ] **Step 5: テストの API 参照を機械的に移行する**
 
-`MaskMeTests/DetectionCacheSyncTests.swift:46` の
+`detectionCache` はテスト 4 ファイルから参照されている（`-skip-testing:` は実行を
+飛ばすだけでコンパイルは飛ばさないため、実行しないテストも直す必要がある）。
 
-```swift
-        XCTAssertEqual(model.detectionCache.count, 1,
+```bash
+grep -rn "detectionCache" MaskMeTests/
 ```
 
-を
+**許されるのは「同じ意味の新 API に置き換える機械的な変更」だけである。**
 
-```swift
-        XCTAssertEqual(model.cacheStore.count, 1,
-```
+| 旧 | 新 |
+|---|---|
+| `model.detectionCache.count` | `model.cacheStore.count` |
+| `model.detectionCache[t]` | `model.cacheStore.faces(sourceID: model.currentSourceID, time: t)` |
 
-に変える。**変更はこの 1 行のみ。** アサーションの意味・メッセージ・他の 3 件は
-一切触らないこと。他のテストを直したくなったら、それは実装側が間違っている合図である。
+**アサーションの条件・期待値・失敗メッセージ・テストの本数を変えないこと。**
+`?? []` を挟んで nil と空配列を潰さないこと。テストが落ちたとき、テスト側を
+いじって通そうとした瞬間にこのタスクの意味（検出キャッシュの回帰ガード）が失われる。
+落ちたら実装側を疑うこと。
+
+変更したテストの差分は全て `git diff MaskMeTests/` でレポートに貼ること。
 
 - [ ] **Step 6: エクスポートへの受け渡しを合わせる**
 
@@ -998,14 +1005,7 @@ cd /Users/tatsuki/Desktop/mirator/projects/Mask-Me && xcodebuild clean -workspac
 Expected: `DetectionCacheSyncTests` の **4 件が passed** の行が見えること。総件数も記録すること。
 `clean` を挟むのは、ビルドキャッシュが古いまま「新規テストが走らずに成功表示が出る」事故を防ぐため。
 
-- [ ] **Step 8: lint が Step 1 から悪化していないことを確認しコミット**
-
-```bash
-cd /Users/tatsuki/Desktop/mirator/projects/Mask-Me && swiftlint lint --quiet 2>&1 | tail -20
-```
-
-Step 1 で記録した違反から**増えていない**こと。増えていたら
-`MosaicEditorModel+Timeline.swift` に extension として切り出す。
+- [ ] **Step 8: コミット**
 
 ```bash
 cd /Users/tatsuki/Desktop/mirator/projects/Mask-Me && git add -A && git commit -m "refactor: 検出キャッシュを素材基準のキーに載せ替え
@@ -1155,3 +1155,4 @@ Expected: 全て passed。Task 5 と同じ総件数であること。
 | `liveFlowCache` の基準 | フェーズ1では合成時刻キーのまま。`detectionCache` と対称に素材基準へ寄せる |
 | `DetectionCacheKey` の生 init | 丸めを通さない `init(sourceID:bucket:)` が残っている。丸め忘れ回帰の再発経路。使用箇所ゼロを維持できるか、削除するか |
 | `nearestFaces` の計算量 | 毎回全走査 O(n)。長尺・複数素材で重くなる |
+| `MaskMe/` が lint 対象外 | `.swiftlint.yml` の `included:` は `Sources`/`Tests` のみ。アプリ本体 3 万行超が未 lint。`MosaicEditorModel.swift` は 1229 行 |
