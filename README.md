@@ -13,7 +13,7 @@ TikTok 風の「顔ピクセルモザイク」を画像・動画に適用する 
 - **フォールバック（凸包マスク + 傾き追従）** — フルメッシュが得られない場合は、顔ランドマークの凸包マスク（`FaceMaskBuilder`）＋ roll に追従して回転するブロック格子（`MosaicShader.metal` の `blockAverage`）で処理。
 - **粗さ調整** — 粗さスライダー 1 本でブロックサイズを調整（ハードエッジ）。顔全体への適用を ON/OFF 切替可能。
 - **追従率（0–100%）と自動復帰** — 検出信頼度を EMA で平滑化して追従率を算出。顔をロストしてもクラッシュせず `idle → searching → tracking → lost → searching → tracking` と遷移し、再検出フレームで遅延なく復帰（`TrackingEvaluator` / `TrackingStatus`）。
-- **補助検出器の個別トグル** — MediaPipe が取り逃した顔を別の検出器で見つけ、その領域を MediaPipe で再検出して補完します。Apple Vision（実機専用、常時 ON）に加え、MediaPipe Face Detector (BlazeFace) と YuNet (Core ML) を設定画面から個別に ON/OFF できます（`DetectionSettings`）。デフォルトは Vision のみ ON — 実機で全補助検出器を並走させると FPS 低下による検出間引き・追従遅れ・ちらつきが発生するため、FaceDetector/YuNet はオプトインです。
+- **補助検出器の個別トグル** — MediaPipe が取り逃した顔を別の検出器で見つけ、その領域を MediaPipe で再検出して補完します。MediaPipe Face Detector (BlazeFace) と YuNet (Core ML) を設定画面から個別に ON/OFF できます（`DetectionSettings`、デフォルトは両方 ON）。Apple Vision は実機での体誤検知と Simulator での 0 検出のため削除済みです。
 - **SwiftUI 連携** — `TrackingStatusStore`（`ObservableObject`）で追従状態を購読。
 
 ## アーキテクチャ
@@ -37,15 +37,16 @@ Mask-Me/
 │  ├─ MetalTextureUtilities.swift     # CGImage/CVPixelBuffer ↔ MTLTexture 変換
 │  └─ Shaders/MosaicShader.metal      # ピクセルシェーダー
 ├─ Tests/MosaicCoreTests/             # 追従ロジック・検出率・マスク生成のユニットテスト
-├─ App/                               # アプリターゲット（XcodeGen + CocoaPods）
-│  ├─ project.yml                     # XcodeGen 定義（MaskMe / MaskMeTests）
-│  ├─ Podfile                         # MediaPipeTasksVision
-│  ├─ MaskMe/
-│  │  ├─ MaskMeApp.swift              # @main / NavigationStack
-│  │  ├─ Views/                       # Home / Editor / RecentItems / MediaPicker / TrackingBadge
-│  │  ├─ Model/                       # FaceLandmarking / MediaPipe アダプタ / 司令塔 / 最近の項目
-│  │  └─ Export/                      # Photos 保存 / 動画モザイクエクスポート
-│  └─ MaskMeTests/                    # 実画像での顔検出精度テスト（要 MediaPipe / Simulator）
+├─ project.yml                        # XcodeGen 定義（MaskMe / MaskMeTests / OpticalFlowKit）
+├─ Podfile                            # MediaPipeTasksVision
+├─ MaskMe/                            # アプリターゲット本体
+│  ├─ MaskMeApp.swift                 # @main / NavigationStack
+│  ├─ Views/                          # Home / Editor / RecentItems / MediaPicker / TrackingBadge
+│  ├─ Model/                          # FaceLandmarking / MediaPipe アダプタ / 司令塔 / 最近の項目
+│  └─ Export/                         # Photos 保存 / 動画モザイクエクスポート
+├─ MaskMeTests/                       # 実画像での顔検出精度テスト（要 MediaPipe / Simulator）
+├─ OpticalFlowKit/                    # OpenCV 疎LKオプティカルフローの動的framework（シンボル隔離）
+├─ open.sh                            # xcodegen + pod install + open workspace の一括スクリプト
 └─ .github/workflows/ci.yml           # コア build/test/lint + アプリ build（Simulator）
 ```
 
@@ -58,7 +59,12 @@ Mask-Me/
 ## アプリのビルド・実行
 
 ```bash
-cd App
+./open.sh   # xcodegen generate → pod install → open MaskMe.xcworkspace
+```
+
+または個別に:
+
+```bash
 xcodegen generate          # MaskMe.xcodeproj を生成
 pod install                # MediaPipe を結線（MaskMe.xcworkspace 生成）
 open MaskMe.xcworkspace
@@ -79,7 +85,7 @@ open MaskMe.xcworkspace
   - 写真は「保存」、動画は「エクスポート」（進捗表示）。
 - **設定**（下部タブバー「設定」）：検出感度・存在確信度・追跡確信度・最小顔サイズ・最大検出数
   のスライダー / ステッパーに加え、**補助検出器の個別トグル**（MediaPipe Face Detector /
-  YuNet）を提供（`SettingsView`）。Apple Vision は実機専用のため UI には出さず常時 ON。
+  YuNet）を提供（`SettingsView`）。
 
 ## ビルド・テスト（コア層）
 
@@ -103,11 +109,10 @@ Metal の GPU 実行は実機 / シミュレータ依存のため、ユニット
 ## 実画像での顔検出精度テスト（アプリターゲット）
 
 実際の顔写真 / 動画に対する MediaPipe の検出精度は、アプリターゲットの XCTest
-（`App/MaskMeTests/`）で検証します。MediaPipe pod・モデル・実画像・Simulator が必要なため、
+（`MaskMeTests/`）で検証します。MediaPipe pod・モデル・実画像・Simulator が必要なため、
 **CI では実行せず**ローカル / Simulator で実施します。
 
 ```bash
-cd App
 xcodegen generate
 pod install
 xcodebuild test \
@@ -116,7 +121,7 @@ xcodebuild test \
   -destination 'platform=iOS Simulator,name=iPhone 16'
 ```
 
-- `App/MaskMeTests/Fixtures/` に実画像（`faces/` `nonfaces/`）・`sample_face.mov`・
+- `MaskMeTests/Fixtures/` に実画像（`faces/` `nonfaces/`）・`sample_face.mov`・
   `face_landmarker.task` を配置します（配置方法は同フォルダの `README.md` 参照）。
   プライバシー / 著作権の都合で実画像はリポジトリに含めていません。未配置のテストは
   失敗ではなく `XCTSkip` になります。

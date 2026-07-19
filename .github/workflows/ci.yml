@@ -62,7 +62,6 @@ jobs:
         run: brew install xcodegen
 
       - name: Generate Xcode project
-        working-directory: App
         run: xcodegen generate
 
       # Builds without CocoaPods on purpose: the MediaPipe glue is gated on
@@ -73,7 +72,7 @@ jobs:
         run: |
           set -euo pipefail
           xcodebuild build \
-            -project App/MaskMe.xcodeproj \
+            -project MaskMe.xcodeproj \
             -scheme MaskMe \
             -configuration Debug \
             -destination 'generic/platform=iOS Simulator' \

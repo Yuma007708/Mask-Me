@@ -157,7 +157,8 @@ final class FaceMaskBuilderTests: XCTestCase {
     func testMultiFaceRenderMaskWithZeroFacesProducesEmptyMask() throws {
         let builder = FaceMaskBuilder(dilation: 0)
         let rendered = try XCTUnwrap(
-            builder.renderMask(for: [], additionalPaths: [], width: 64, height: 64)
+            builder.renderMask(for: [] as [FaceLandmarkSet],
+                               additionalPaths: [], width: 64, height: 64)
         )
         XCTAssertTrue(rendered.bytes.allSatisfy { $0 == 0 }, "顔なし・追加パスなし → 全ピクセル 0")
     }
@@ -197,11 +198,32 @@ final class FaceMaskBuilderTests: XCTestCase {
         )
         let additionalPath = FaceMaskBuilder.RegionPath(path: rectPath, value: 1.0)
         let rendered = try XCTUnwrap(
-            builder.renderMask(for: [], additionalPaths: [additionalPath], width: 64, height: 64)
+            builder.renderMask(for: [] as [FaceLandmarkSet],
+                               additionalPaths: [additionalPath], width: 64, height: 64)
         )
         // Image center (byte row 32, col 32) is inside the rect.
         XCTAssertGreaterThan(rendered.bytes[32 * rendered.bytesPerRow + 32], 0, "追加パス内のピクセルはマスクされるべき")
         // Top-left corner (byte row 0, col 0) = CG y=63, x=0 — outside the rect.
         XCTAssertEqual(rendered.bytes[0], 0, "追加パス外のコーナーは 0 のまま")
+    }
+
+    /// per-face dilation: 同じ顔でも大きい膨らみを指定した方がマスク面積が広い。
+    /// nil はビルダー既定（速度適応マージンで顔ごとに余白を変えるための API）。
+    func testPerFaceDilationGrowsMaskArea() throws {
+        let builder = FaceMaskBuilder(dilation: 0.04)
+        let face = makeLandmarks()
+        func maskedArea(_ dilation: CGFloat?) throws -> Int {
+            let faces: [(landmarks: FaceLandmarkSet, dilation: CGFloat?)] =
+                [(face, dilation)]
+            let rendered = try XCTUnwrap(builder.renderMask(
+                for: faces,
+                width: Int(imageSize.width), height: Int(imageSize.height)))
+            return rendered.bytes.lazy.filter { $0 > 0 }.count
+        }
+        let base = try maskedArea(nil)
+        let defaulted = try maskedArea(0.04)
+        let inflated = try maskedArea(0.15)
+        XCTAssertEqual(base, defaulted, "nil はビルダー既定と同じはず")
+        XCTAssertGreaterThan(inflated, base, "大きい dilation でマスクが広がるはず")
     }
 }

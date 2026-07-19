@@ -20,7 +20,10 @@ jobs:
   test:
     name: ${{ matrix.video }} / ${{ matrix.backend }} / ${{ matrix.half }}
     runs-on: macos-15
-    timeout-minutes: 60
+    # s3 の A/B ハーフは 1 attempt に 35〜48 分かかるため、VM クラッシュで
+    # 1 回リトライすると 60 分では attempt 2 の途中で確実に詰む（2 回実測）。
+    # 2 attempt 分 + 余裕で 90 分。
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -63,61 +66,68 @@ jobs:
         if: steps.subset.outputs.ok == 'true'
         uses: actions/cache@v4
         with:
-          path: App/Pods
-          key: pods-${{ runner.os }}-${{ hashFiles('App/Podfile') }}
+          path: Pods
+          key: pods-${{ runner.os }}-${{ hashFiles('Podfile') }}
           restore-keys: pods-${{ runner.os }}-
 
       - name: Install xcodegen
         if: steps.subset.outputs.ok == 'true'
         run: brew install xcodegen
 
-      - name: Setup Python
+      - name: Download sample videos from Pexels
         if: steps.subset.outputs.ok == 'true'
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Install gdown
-        if: steps.subset.outputs.ok == 'true'
-        run: pip install --quiet gdown
-
-      - name: Download sample videos from Drive folder
-        if: steps.subset.outputs.ok == 'true'
-        env:
-          FOLDER_ID: ${{ secrets.SAMPLE_DRIVE_FOLDER_ID }}
         run: |
-          if [ -z "$FOLDER_ID" ]; then
-            echo "::error::secret SAMPLE_DRIVE_FOLDER_ID が未設定です"
-            exit 1
-          fi
+          # 公開 Pexels 動画（無料・商用可・アトリビューション不要）を使用する。
+          # /download/video/{ID}/ が 302 で videos.pexels.com の直 MP4 に redirect するので
+          # curl -L のみで取得できる（gdown / Drive secret 不要）。
+          #
+          # === CI デフォルト: BRIGHT セット ===
+          # 顔クッキリ close-up 5 本。3 backend × 5 videos × 2 halves = 30 テスト、
+          # 実測 iPhone 17 Pro Simulator で 9 分・全て rate=bridged=100% を確認済み。
+          # SN 比が最も高いのでレグレッション検知のベースライン用途。
+          #
+          #  s1 = 4769796 / curly hair woman close-up / 11.2s / 1080x1920 (portrait)
+          #  s2 = 4888198 / thoughtful man close-up  /  6.4s / 1920x1080 (landscape)
+          #  s3 = 8056845 / elegant woman            / 18.0s / 1920x1080 (landscape)
+          #  s4 = 8048443 / woman talking (headphones)/14.2s / 1080x1920 (portrait)
+          #  s5 = 8124136 / woman talking (window)   /  9.5s / 1080x1920 (portrait)
+          #
+          # === 手動切替用: DIM セット（薄暗い挙動の regression 用）===
+          # 手元検証で MP 単独 63〜100% / enhance path 経由の bridged 96〜100% を確認済み。
+          # 5 本入替の代わりに一時的に Video ID を差し替えて workflow_dispatch。
+          #  s1 = 34725792 / moody man tube-light / 16.3s
+          #  s2 = 34725795 / contemplative man    / 15.4s
+          #  s3 = 34725797 / introspective man    / 16.6s
+          #  s4 = 8496812  / man dark room        /  9.1s
+          #  s5 = 9943152  / woman hoodie 4K      / 12.2s
+          #
+          # === 手動切替用: BEACH セット（体誤検知 regression 用）===
+          # シャツレス/水着で顔＋露出肌が同時に映る素材。5 本すべてで真の体誤検知
+          # （bh > 0.5 の体級 bbox / bh/bw の逸脱）は観測されず。
+          #  s1 = 8858138  / shirtless man shades / 15.3s
+          #  s2 = 8621339  / smiling man beach    /  7.7s
+          #  s3 = 6012393  / female swimmer cam   /  8.2s
+          #  s4 = 6012315  / swimmer look cam     / 14.4s
+          #  s5 = 12169428 / beach volleyball     /  8.1s
           mkdir -p /tmp/samples
           cd /tmp/samples
-          gdown --folder "https://drive.google.com/drive/folders/$FOLDER_ID"
-          find . -mindepth 2 -type f -name "*.MOV" -exec mv -f {} . \;
-          echo "--- after flatten ---"
-          ls -la
-
-      - name: Map Drive filenames → sN.mov
-        if: steps.subset.outputs.ok == 'true'
-        run: |
-          # 全ファイル名固定マップ。サイズ判定は動画追加で壊れるので使わない。
-          # ローカル baseline で計測した動画に対応：
-          #   s1 = 65MB / 92s
-          #   s2 = 13MB / 29s  (元ローカル S2)
-          #   s3 = 48MB / 159s (Drive に新規追加された動画、新 baseline 計測)
-          #   s4 = 52MB / 38s
-          #   s5 = 87MB / 104s
-          cd /tmp/samples
-          mv copy_4D828ACB*.MOV s1.mov 2>/dev/null || true
-          mv copy_0C57704F*.MOV s2.mov 2>/dev/null || true
-          mv copy_EB41EC4E*.MOV s3.mov 2>/dev/null || true
-          mv copy_5B417FE2*.MOV s4.mov 2>/dev/null || true
-          mv copy_324B1BD2*.MOV s5.mov 2>/dev/null || true
+          declare -A URLS=(
+            [s1]=4769796
+            [s2]=4888198
+            [s3]=8056845
+            [s4]=8048443
+            [s5]=8124136
+          )
+          for name in s1 s2 s3 s4 s5; do
+            id=${URLS[$name]}
+            echo "==> $name.mov (Pexels $id)"
+            curl -fSL --retry 3 -A "Mozilla/5.0" \
+              "https://www.pexels.com/download/video/$id/" -o "$name.mov"
+          done
           ls -la s*.mov
 
       - name: xcodegen
         if: steps.subset.outputs.ok == 'true'
-        working-directory: App
         run: xcodegen generate
 
       - name: Inject SAMPLE_VIDEO_DIR into xcscheme TestAction
@@ -125,7 +135,7 @@ jobs:
         run: |
           python3 - << 'PYEOF'
           import re, pathlib
-          p = pathlib.Path('App/MaskMe.xcodeproj/xcshareddata/xcschemes/MaskMe.xcscheme')
+          p = pathlib.Path('MaskMe.xcodeproj/xcshareddata/xcschemes/MaskMe.xcscheme')
           content = p.read_text()
           # Disable "use launch scheme env" in TestAction so test-specific env vars take effect
           content = re.sub(
@@ -150,7 +160,6 @@ jobs:
 
       - name: pod install
         if: steps.subset.outputs.ok == 'true'
-        working-directory: App
         run: pod install --no-repo-update
 
       - name: Run XCTest
@@ -177,7 +186,7 @@ jobs:
           max_attempts=3
           attempt=1
           until xcodebuild test \
-            -workspace App/MaskMe.xcworkspace \
+            -workspace MaskMe.xcworkspace \
             -scheme MaskMe \
             -destination "platform=iOS Simulator,id=$SIM_UUID" \
             -only-testing:"MaskMeTests/DValidVideoTests/$TEST_NAME" \
@@ -242,8 +251,9 @@ jobs:
                                           'jumpBig': 0, 'pairCount': 0,
                                           'sumJumpWeighted': 0.0, 'baseline': 0.0,
                                           'bridgedHit': 0, 'bridgedHit10': 0,
+                                          'flowHit': 0, 'srcFlow': 0,
                                           'srcMp': 0, 'srcEnh': 0, 'srcBbox': 0,
-                                          'srcRoi': 0, 'srcLow': 0,
+                                          'srcRoi': 0, 'srcLow': 0, 'srcTile': 0,
                                           'halves': []})
           for d in rows:
               key = (d.get('video', ''), d.get('backend', ''))
@@ -257,19 +267,23 @@ jobs:
               m['baseline'] = d.get('baseline', 0.0)
               m['bridgedHit'] += d.get('bridgedHit', 0)
               m['bridgedHit10'] += d.get('bridgedHit10', 0)
+              m['flowHit'] += d.get('flowHit', 0)
+              m['srcFlow'] += d.get('srcFlow', 0)
               m['srcMp'] += d.get('srcMp', 0)
               m['srcEnh'] += d.get('srcEnh', 0)
               m['srcBbox'] += d.get('srcBbox', 0)
               m['srcRoi'] += d.get('srcRoi', 0)
               m['srcLow'] += d.get('srcLow', 0)
+              m['srcTile'] += d.get('srcTile', 0)
               m['halves'].append(d.get('half', '?'))
 
           out = ['# Detection Accuracy Summary', '',
-                 '| 動画 | backend | half | hit | total | rate | baseline | Δ | bridged | bridged10 | lowCy% | avgJump | jumpBig% | src mp/enh/bbox/roi/low |',
-                 '|---|---|---|---|---|---|---|---|---|---|---|---|---|---|']
+                 '| 動画 | backend | half | hit | total | rate | flow | baseline | Δ | bridged | bridged10 | lowCy% | avgJump | jumpBig% | src mp/enh/bbox/roi/low/tile/flow |',
+                 '|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|']
           for (video, backend), m in sorted(merged.items()):
               total = m['total']
               rate = (m['hit'] / total * 100) if total else 0.0
+              flow_rate = (m['flowHit'] / total * 100) if total else 0.0
               bl = m['baseline'] * 100
               delta = rate - bl
               low = (m['lowCy'] / total * 100) if total else 0.0
@@ -277,9 +291,9 @@ jobs:
               jump_big_rate = (m['jumpBig'] / m['pairCount'] * 100) if m['pairCount'] else 0.0
               bridged = (m['bridgedHit'] / total * 100) if total else 0.0
               bridged10 = (m['bridgedHit10'] / total * 100) if total else 0.0
-              srcs = f"{m['srcMp']}/{m['srcEnh']}/{m['srcBbox']}/{m['srcRoi']}/{m['srcLow']}"
+              srcs = f"{m['srcMp']}/{m['srcEnh']}/{m['srcBbox']}/{m['srcRoi']}/{m['srcLow']}/{m['srcTile']}/{m['srcFlow']}"
               half_label = '+'.join(sorted(m['halves'])) or '?'
-              out.append(f"| {video} | {backend} | {half_label} | {m['hit']} | {total} | {rate:.1f}% | {bl:.0f}% | {delta:+.1f}pp | {bridged:.1f}% | {bridged10:.1f}% | {low:.1f}% | {avg_jump:.4f} | {jump_big_rate:.1f}% | {srcs} |")
+              out.append(f"| {video} | {backend} | {half_label} | {m['hit']} | {total} | {rate:.1f}% | {flow_rate:.1f}% | {bl:.0f}% | {delta:+.1f}pp | {bridged:.1f}% | {bridged10:.1f}% | {low:.1f}% | {avg_jump:.4f} | {jump_big_rate:.1f}% | {srcs} |")
           summary = '\n'.join(out) + '\n'
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
               f.write(summary)

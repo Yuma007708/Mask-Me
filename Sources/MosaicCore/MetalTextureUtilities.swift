@@ -164,7 +164,8 @@ extension MosaicRenderer {
     public func renderToNewTexture(
         input: MTLTexture,
         landmarkSets: [FaceLandmarkSet],
-        additionalPaths: [FaceMaskBuilder.RegionPath] = []
+        additionalPaths: [FaceMaskBuilder.RegionPath] = [],
+        faceOptions: [FaceRenderOption]? = nil
     ) -> (texture: MTLTexture, status: TrackingStatus)? {
         guard let output = MetalTextureUtilities.makeOutputTexture(like: input, device: device) else {
             return nil
@@ -174,6 +175,7 @@ extension MosaicRenderer {
             into: output,
             landmarkSets: landmarkSets,
             additionalPaths: additionalPaths,
+            faceOptions: faceOptions,
             waitForCompletion: true
         )
         return (output, status)

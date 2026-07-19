@@ -22,12 +22,38 @@ Mask-Me は、顔ランドマークに沿ってブロック状のモザイクを
   (`FaceMaskBuilder` / `MosaicShader.metal` の `blockAverage`)。
 - コアロジックは **MediaPipe に一切依存しない SwiftPM ライブラリ `MosaicCore`** として分離
   されています。MediaPipe は公式 SwiftPM 配布がなく CocoaPods / xcframework のみのため、
-  MediaPipe への依存はアプリターゲット側（`App/`）でのみ発生します。これにより `swift build` /
+  MediaPipe への依存はアプリターゲット側（ルートの `MaskMe/`）でのみ発生します。これにより `swift build` /
   `swift test` だけで高速に CI を回せます。
-- 補助顔検出器として Apple Vision（常時 ON・実機専用）、MediaPipe Face Detector
-  (BlazeFace)、YuNet (Core ML) の 3 系統があり、`DetectionSettings` の
-  `useVision` / `useFaceDetector` / `useYunet` の 3 Bool で個別に ON/OFF できます
-  （詳細は README.md 参照）。
+- 補助顔検出器として MediaPipe Face Detector (BlazeFace) と YuNet (Core ML) の
+  2 系統があり、`DetectionSettings` の `useFaceDetector` / `useYunet` の 2 Bool で
+  個別に ON/OFF できます（Apple Vision は実機での体誤検知・Simulator での 0 検出の
+  ため削除済み。詳細は README.md 参照）。
+- 再生中はライブ検出（`MosaicEditorModel.liveDetectionTargetWidth`=640px 縮小 +
+  IMAGE モード）が `detectionCache` を先行して
+  埋め、プリスキャン（フル解像度 + VIDEO モード）が後から同じ 15fps バケットキーを
+  上書きします。キー整合と空結果の扱いは `MosaicEditorModel.storePreScanResult` の
+  doc コメントを参照。
+- ライブ検出は `MediaPipeFaceLandmarkerAdapter.liveLandmarks(in:atMediaSeconds:)` 経由で、
+  エクスポートと同じテンポラル追跡（Kalman 予測 ROI 再検出 + オプティカルフロー橋渡し）
+  を IMAGE モードのまま使います（横顔・急な頭部回転対策）。シークによる時系列の巻き戻りは
+  メディア時刻の不連続検知＋`notifyLiveSeek` の明示リセットで処理します。フロー由来の
+  結果は実検出ではないため `detectionCache` に入れず `liveFlowCache` に別置きします
+  （エクスポートはキャッシュヒットで検出をスキップするため混ぜると品質汚染になる）。
+
+- アプリ内カメラ（`MaskMe/Camera/`）はリアルタイムモザイク撮影を提供します。
+  `CameraMosaicPipeline` がカメラフレームに `liveLandmarks` と Metal 描画を掛け、
+  **モザイク焼き込み済みのメディアだけを保存**します（原本は残さない設計。
+  レコーダー層は描画済みバッファ以外を受け取りません）。モザイク対象は
+  オプトアウト方式で、`MosaicCore` の `CameraFaceSelection` がタップで OFF に
+  した顔だけを重心マッチングで追跡・除外します。フレームは常にポートレート
+  回転・非ミラーに正規化し、フロントカメラの鏡像は表示レイヤーのみで行います
+  （検出・描画・保存の座標系を一致させるため。この規約を崩さないこと）。
+  素早い動きへの追従は `MosaicCore` の `LiveFacePropagator`（毎フレーム前進層）が
+  担います: 顔ごとのオプティカルフロー（`CameraFlowAdvancer` → OpticalFlowKit の
+  共有 `MMGrayFrame`）から相似変換を推定して検出(10Hz)間のフレームを前進させ、
+  検出結果は「検出開始→現在」の累積変換で現フレームへ補正してから採用します。
+  フロー失敗時は Kalman 外挿（上限つき凍結）→ マージン漸増 + メッシュ→凸包降格の
+  安全側デグレードで、位置を縮める・消す方向には倒しません。
 
 ## リポジトリ構成（要点）
 
@@ -35,11 +61,12 @@ Mask-Me は、顔ランドマークに沿ってブロック状のモザイクを
 Package.swift                 # MosaicCore ライブラリ（MediaPipe 非依存）
 Sources/MosaicCore/           # 描画・追従・検出率ロジック本体
 Tests/MosaicCoreTests/        # MosaicCore のユニットテスト
-App/                          # アプリターゲット（XcodeGen + CocoaPods）
-  project.yml                 # XcodeGen 定義
-  Podfile                     # MediaPipeTasksVision
-  MaskMe/                     # SwiftUI アプリ本体
-  MaskMeTests/                # 実画像・実動画での顔検出精度テスト（要 MediaPipe / Simulator）
+project.yml                   # XcodeGen 定義（MaskMe / MaskMeTests / OpticalFlowKit）
+Podfile                       # MediaPipeTasksVision
+MaskMe/                       # SwiftUI アプリ本体
+MaskMeTests/                  # 実画像・実動画での顔検出精度テスト（要 MediaPipe / Simulator）
+OpticalFlowKit/               # OpenCV 隔離用の動的 framework（MediaPipe 内包の OpenCV 4.13 と非干渉）
+open.sh                       # xcodegen + pod install + open workspace の一括スクリプト
 .github/workflows/ci.yml      # コア build/test/lint + アプリ build（Simulator, MediaPipe無し）
 .github/workflows/dvalid.yml  # 実動画5本 × backend(off/faceDetector/yunet) の検出精度CI
 .claude-handoff.md            # 作業引き継ぎドキュメント（cloud/別マシン向け）
@@ -65,7 +92,12 @@ swiftlint lint --strict
 アプリターゲットのビルド:
 
 ```bash
-cd App
+./open.sh   # xcodegen generate → pod install → open MaskMe.xcworkspace を一括
+```
+
+または個別に:
+
+```bash
 xcodegen generate
 pod install
 open MaskMe.xcworkspace
@@ -74,7 +106,6 @@ open MaskMe.xcworkspace
 アプリターゲットの実画像・実動画テスト（CI では実行されない。ローカル/Simulator 専用）:
 
 ```bash
-cd App
 xcodegen generate
 pod install
 xcodebuild test \
@@ -88,16 +119,10 @@ xcodebuild test \
 フロー `.github/workflows/dvalid.yml`（5動画 × 3 backend = 最大15ジョブ並列、Google Drive から
 サンプル動画を取得）で行い、これは push では自動実行されず `workflow_dispatch` で手動起動する。
 
-## 現在のブランチ状況（fix/video-face-detection）
+## 現在の状況
 
-動画の顔検出精度チューニング作業中。直近の `dvalid.yml` CI Run（#28496967052）では
-**`s1/off`・`s3/yunet`・`s5/off` の3ジョブが失敗**しており、原因調査待ちの状態です。
-
-`.claude-handoff.md` の記録によると、`s1`/`s3` の `off`・`yunet` backend は動画長 92秒以上 +
-補助検出器が MediaPipe FaceLandmarker 共有以外という組み合わせで、テストプロセスがフレーム
-ループ終盤でクラッシュする構造的な flaky が確認されています（`.faceDetector` backend や短尺
-動画では再現しない）。対策候補（scanner の定期再生成、フレーム間隔の見直し、テストの分割など）
-は `.claude-handoff.md` の「今後の対策候補」「残作業」セクションを参照してください。
+最新状況は `.claude-handoff.md` を参照してください（このセクションはすぐ古くなるため、
+詳細な CI Run 番号や残作業は handoff 側にのみ記録します）。
 
 作業を始める前に、まず `.claude-handoff.md` の最新状況（CI Run結果・残作業・アクションリスト）
 を確認してから着手してください。
