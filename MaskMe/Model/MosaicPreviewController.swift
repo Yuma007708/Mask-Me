@@ -34,6 +34,8 @@ final class MosaicPreviewController {
     private let landmarkSmoother = LandmarkSmoother()
 
     private(set) var duration: Double = 0
+    /// DEBUG 診断用: copyPixelBuffer が nil を返した累計（間引きログの分母）。
+    private var pixelBufferMissCount = 0
 
     init(renderer: MosaicRenderer, url: URL, model: MosaicEditorModel) {
         self.renderer = renderer
@@ -98,6 +100,8 @@ final class MosaicPreviewController {
         framesUntilResegment = 0
         // シーク先では前位置の EMA 状態も意味を持たない
         landmarkSmoother.reset()
+        // ライブ検出の追跡状態（ROI track / フロー）もシーク先では別時系列になる
+        model?.notifyLiveSeek()
         await player.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero)
         renderCurrentFrame()
     }
@@ -114,7 +118,6 @@ final class MosaicPreviewController {
             await self?.seek(to: position)
         }
     }
-
 
     /// コントロール（blockSize など）が変化したときに現在フレームを再描画する。
     func invalidate() {
@@ -162,6 +165,15 @@ final class MosaicPreviewController {
             forItemTime: currentTime,
             itemTimeForDisplay: &actualItemTime
         ) else {
+            #if DEBUG
+            // 実機デバッグ用: 出力がフレームを返さないとプレビュー更新もライブ検出も
+            // 止まる（映像フリーズ/モザイク不掲載の一次原因になりうる）。連発するので間引く。
+            pixelBufferMissCount += 1
+            if pixelBufferMissCount % 30 == 1 {
+                print("[MMLIVE] copyPixelBuffer=nil count=\(pixelBufferMissCount) "
+                      + "t=\(String(format: "%.2f", currentTime.seconds))")
+            }
+            #endif
             return
         }
 
@@ -248,12 +260,12 @@ final class MosaicPreviewController {
         }
     }
 
-    /// ライブ検出用に pixelBuffer を最大 480px 幅へ縮小した CGImage を作る。
-    /// 検出精度は 480px で十分で、フル解像度より MediaPipe が速く回る。
+    /// ライブ検出用に pixelBuffer を最大 `MosaicEditorModel.liveDetectionTargetWidth` px
+    /// 幅へ縮小した CGImage を作る。フル解像度より MediaPipe が速く回る。
     /// throttle 済みのフレーム（同時1枚）だけ変換されるので表示スレッドへの負荷は小さい。
     private func detectionCGImage(from pixelBuffer: CVPixelBuffer) -> CGImage? {
         let width = CVPixelBufferGetWidth(pixelBuffer)
-        let targetWidth = 480.0
+        let targetWidth = MosaicEditorModel.liveDetectionTargetWidth
         let scale = min(targetWidth / Double(width), 1.0)
         let ci = CIImage(cvPixelBuffer: pixelBuffer)
             .transformed(by: CGAffineTransform(scaleX: scale, y: scale))

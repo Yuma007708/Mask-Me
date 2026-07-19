@@ -73,6 +73,41 @@ final class FlowBridgeTests: XCTestCase {
         throw XCTSkip("seed フレーム取得失敗")
     }
 
+    /// フロー橋渡し系テスト専用の seed フレーム探索。検出成功かつ
+    /// `isFlowBridgeEligible`（面積≤0.08・midY≤0.5）な顔を含むフレームを
+    /// s1..s5 の 1 秒刻みで探す。クローズアップ中心のセット（bright/backlight 等）は
+    /// 顔 bbox が面積ゲートを超えフローが原理的に発火しないため、見つからなければ
+    /// 失敗ではなく XCTSkip（セット依存の前提不成立）。フローの実効性そのものは
+    /// DValidLiveModelTests の flowFrames 帰属が実動画で担保する。
+    private func loadFlowEligibleSeedFrame() async throws -> UIImage {
+        try XCTSkipIf(videoDir.isEmpty, "SAMPLE_VIDEO_DIR 未設定（ローカルでは XCTSkip）")
+        let probe = try makeAdapter()
+        var ts = 0
+        for name in ["s1", "s2", "s3", "s4", "s5"] {
+            let url = URL(fileURLWithPath: "\(videoDir)/\(name).mov")
+            guard FileManager.default.fileExists(atPath: url.path) else { continue }
+            let asset = AVAsset(url: url)
+            guard let duration = try? await asset.load(.duration).seconds,
+                  duration > 0 else { continue }
+            let gen = AVAssetImageGenerator(asset: asset)
+            gen.appliesPreferredTrackTransform = true
+            gen.requestedTimeToleranceBefore = CMTime(seconds: 0.067, preferredTimescale: 600)
+            gen.requestedTimeToleranceAfter  = CMTime(seconds: 0.067, preferredTimescale: 600)
+            for t in stride(from: 1.0, to: duration, by: 1.0) {
+                guard let cg = try? gen.copyCGImage(
+                    at: CMTime(seconds: t, preferredTimescale: 600), actualTime: nil
+                ) else { continue }
+                let img = UIImage(cgImage: cg)
+                ts += 100
+                let faces = probe.allLandmarks(in: img, timestampMs: ts)
+                if faces.contains(where: { probe.isFlowBridgeEligible($0.boundingBox) }) {
+                    return img
+                }
+            }
+        }
+        throw XCTSkip("flow 適格（面積≤0.08・midY≤0.5）の顔を含むフレームがこのセットに無い")
+    }
+
     /// `image` を黒背景の同サイズキャンバスに (dx, dy) だけずらして描き直す。
     /// AVAssetImageGenerator 由来のフレームは scale=1 なのでポイント=ピクセル。
     /// 余白は黒でよい。移動後も顔領域自体はフレーム内に残るので LK は追跡できる。
@@ -112,7 +147,7 @@ final class FlowBridgeTests: XCTestCase {
 
     func test_flowBridge_translatesLandmarksOnKnownShift() async throws {
         #if DEBUG
-        let baseImage = try await loadDetectableSeedFrame()
+        let baseImage = try await loadFlowEligibleSeedFrame()
         let adapter = try makeAdapter()
         let size = pixelSize(of: baseImage)
 
@@ -153,7 +188,7 @@ final class FlowBridgeTests: XCTestCase {
 
     func test_flowBridge_stopsAfterMaxConsecutiveFrames() async throws {
         #if DEBUG
-        let baseImage = try await loadDetectableSeedFrame()
+        let baseImage = try await loadFlowEligibleSeedFrame()
         let adapter = try makeAdapter()
         XCTAssertNotNil(seedWithRealDetection(adapter, image: baseImage, timestampMs: 0))
 
@@ -184,7 +219,7 @@ final class FlowBridgeTests: XCTestCase {
 
     func test_flowBridge_reseedsAfterRealDetectionReturns() async throws {
         #if DEBUG
-        let baseImage = try await loadDetectableSeedFrame()
+        let baseImage = try await loadFlowEligibleSeedFrame()
         let adapter = try makeAdapter()
         XCTAssertNotNil(seedWithRealDetection(adapter, image: baseImage, timestampMs: 0))
 
@@ -280,6 +315,153 @@ final class FlowBridgeTests: XCTestCase {
             adapter.isFlowBridgeEligible(areaOverCyOk),
             "面積超過かつcy適格でも不適格のはず（AND条件）"
         )
+    }
+
+    // MARK: - ライブ経路（liveLandmarks）: テンポラル追跡とシークリセット
+
+    /// ライブプレビューと同じ IMAGE モード構成の adapter を作る。
+    private func makeImageAdapter() throws -> MediaPipeFaceLandmarkerAdapter {
+        guard let modelPath = Bundle.main.path(forResource: "face_landmarker", ofType: "task") else {
+            throw XCTSkip("face_landmarker.task がアプリバンドルにありません")
+        }
+        var settings = DetectionSettings()
+        settings.faceDetectorBackend = .off
+        return try MediaPipeFaceLandmarkerAdapter(
+            modelPath: modelPath, runningMode: .image, settings: settings
+        )
+    }
+
+    /// liveLandmarks が IMAGE モードでも検出でき、実検出フレームで
+    /// テンポラル track（次フレームの ROI 再検出の種）を構築すること。
+    func test_liveLandmarks_seedsTracksOnRealDetection() async throws {
+        #if DEBUG
+        let baseImage = try await loadDetectableSeedFrame()
+        let adapter = try makeImageAdapter()
+        let result = adapter.liveLandmarks(in: baseImage, atMediaSeconds: 1.0)
+        XCTAssertFalse(result.faces.isEmpty, "seed フレームは実検出に成功するはず")
+        XCTAssertFalse(result.bridgedByFlow)
+        XCTAssertGreaterThan(adapter.liveTrackCountForTesting, 0,
+                             "実検出フレームで trackedFaces が構築されるはず")
+        #else
+        throw XCTSkip("DEBUG 専用テストシームが必要")
+        #endif
+    }
+
+    /// 巻き戻り（シーク）で追跡状態が破棄されること。破棄が漏れると
+    /// シーク先の別時系列でシーク前の顔位置 ROI・フローが延命し、
+    /// 無関係な位置にモザイクが貼り付く。
+    func test_liveTracking_resetsOnBackwardTimeJump() async throws {
+        #if DEBUG
+        let baseImage = try await loadDetectableSeedFrame()
+        let adapter = try makeImageAdapter()
+        _ = adapter.liveLandmarks(in: baseImage, atMediaSeconds: 1.0)
+        XCTAssertGreaterThan(adapter.liveTrackCountForTesting, 0)
+
+        // 検出を全滅させた状態で巻き戻す → リセットだけが起きる
+        adapter.simulateDetectionFailureForTesting = true
+        let back = adapter.liveLandmarks(in: baseImage, atMediaSeconds: 0.2)
+        XCTAssertTrue(back.faces.isEmpty)
+        XCTAssertEqual(adapter.liveTrackCountForTesting, 0,
+                       "巻き戻りで trackedFaces が破棄されるはず")
+        #else
+        throw XCTSkip("DEBUG 専用テストシームが必要")
+        #endif
+    }
+
+    /// 前方への大ジャンプ（1 秒超）でも破棄され、通常の連続フレーム
+    /// （次バケット）では保持されること。
+    func test_liveTracking_resetsOnForwardJump_keepsOnAdjacentBucket() async throws {
+        #if DEBUG
+        let baseImage = try await loadDetectableSeedFrame()
+        let adapter = try makeImageAdapter()
+        _ = adapter.liveLandmarks(in: baseImage, atMediaSeconds: 1.0)
+        XCTAssertGreaterThan(adapter.liveTrackCountForTesting, 0)
+
+        // 隣接バケット（+1/15s）: 検出全滅でも track は保持（ROI 再検出の種になる）
+        adapter.simulateDetectionFailureForTesting = true
+        _ = adapter.liveLandmarks(in: baseImage, atMediaSeconds: 1.0 + 1.0 / 15.0)
+        XCTAssertGreaterThan(adapter.liveTrackCountForTesting, 0,
+                             "隣接バケットでは track を保持するはず")
+
+        // 1 秒超の前方ジャンプ: 破棄
+        _ = adapter.liveLandmarks(in: baseImage, atMediaSeconds: 3.0)
+        XCTAssertEqual(adapter.liveTrackCountForTesting, 0,
+                       "1 秒超の前方ジャンプで trackedFaces が破棄されるはず")
+        #else
+        throw XCTSkip("DEBUG 専用テストシームが必要")
+        #endif
+    }
+
+    /// ライブ経路でも検出全滅フレームがフローで橋渡しされ、`bridgedByFlow` で
+    /// タグ付けされること（VIDEO 版 (a) のライブ対応）。
+    func test_liveFlow_bridgesTranslatedFrame() async throws {
+        #if DEBUG
+        let baseImage = try await loadFlowEligibleSeedFrame()
+        let adapter = try makeImageAdapter()
+        let size = pixelSize(of: baseImage)
+        let seeded = adapter.liveLandmarks(in: baseImage, atMediaSeconds: 0.0)
+        try XCTSkipIf(seeded.faces.isEmpty, "IMAGE モードで seed フレームを検出できない環境")
+
+        let dx: CGFloat = 12, dy: CGFloat = 8
+        let shifted = translated(baseImage, dx: dx, dy: dy)
+        adapter.simulateDetectionFailureForTesting = true
+        let bridged = adapter.liveLandmarks(in: shifted, atMediaSeconds: 1.0 / 15.0)
+
+        XCTAssertTrue(bridged.bridgedByFlow, "検出全滅フレームは bridgedByFlow=true のはず")
+        XCTAssertFalse(bridged.faces.isEmpty)
+        XCTAssertEqual(adapter.lastSource, .flow)
+        let before = try XCTUnwrap(seeded.faces.first).boundingBox
+        let after = try XCTUnwrap(bridged.faces.first).boundingBox
+        XCTAssertEqual((after.midX - before.midX) * size.width, dx, accuracy: 3.0)
+        XCTAssertEqual((after.midY - before.midY) * size.height, dy, accuracy: 3.0)
+        #else
+        throw XCTSkip("DEBUG 専用テストシームが必要")
+        #endif
+    }
+
+    /// ライブのフロー橋渡しは実検出からのメディア時刻 2.0 秒で打ち切られること
+    /// （VIDEO 版 (b) のフレーム数上限に対応するメディア秒上限）。
+    func test_liveFlow_stopsAfterMaxSeconds() async throws {
+        #if DEBUG
+        let baseImage = try await loadFlowEligibleSeedFrame()
+        let adapter = try makeImageAdapter()
+        let seeded = adapter.liveLandmarks(in: baseImage, atMediaSeconds: 0.0)
+        try XCTSkipIf(seeded.faces.isEmpty, "IMAGE モードで seed フレームを検出できない環境")
+
+        let shifted = translated(baseImage, dx: 12, dy: 8)
+        adapter.simulateDetectionFailureForTesting = true
+        let step = 1.0 / 15.0
+        var lastBridgedT: Double = 0
+        // 2.0s 上限を跨いで供給し続ける（1s 超のジャンプでリセットされないよう連続時刻で）
+        for i in 1...35 {
+            let t = Double(i) * step
+            let result = adapter.liveLandmarks(in: shifted, atMediaSeconds: t)
+            if result.bridgedByFlow { lastBridgedT = t }
+            if t <= 2.0 {
+                XCTAssertTrue(result.bridgedByFlow, "t=\(t) はまだフロー供給されるはず（上限2.0s）")
+            } else {
+                XCTAssertTrue(result.faces.isEmpty, "t=\(t) はメディア秒上限で打ち切られるはず")
+            }
+        }
+        XCTAssertLessThanOrEqual(lastBridgedT, 2.0)
+        #else
+        throw XCTSkip("DEBUG 専用テストシームが必要")
+        #endif
+    }
+
+    /// 明示リセット（MosaicPreviewController.seek → notifyLiveSeek 経由）で
+    /// 追跡状態が破棄されること。
+    func test_resetLiveTracking_clearsTracks() async throws {
+        #if DEBUG
+        let baseImage = try await loadDetectableSeedFrame()
+        let adapter = try makeImageAdapter()
+        _ = adapter.liveLandmarks(in: baseImage, atMediaSeconds: 1.0)
+        XCTAssertGreaterThan(adapter.liveTrackCountForTesting, 0)
+        adapter.resetLiveTracking()
+        XCTAssertEqual(adapter.liveTrackCountForTesting, 0)
+        #else
+        throw XCTSkip("DEBUG 専用テストシームが必要")
+        #endif
     }
 }
 #endif

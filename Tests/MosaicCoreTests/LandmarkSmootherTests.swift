@@ -28,9 +28,23 @@ final class LandmarkSmootherTests: XCTestCase {
     func testSmallJitterIsDamped() {
         let smoother = LandmarkSmoother(alpha: 0.5)
         _ = smoother.smooth([face(cx: 0.5, cy: 0.5)])
-        // +0.02 の微小移動 → EMA で半分の +0.01 に減衰
+        // +0.02 の移動 → 速度適応 alpha = 0.5 + 0.5 * (0.02 / 0.05) = 0.7 で減衰
         let out = smoother.smooth([face(cx: 0.52, cy: 0.5)])
-        XCTAssertEqual(centroidX(out[0]), 0.51, accuracy: 0.0001)
+        XCTAssertEqual(centroidX(out[0]), 0.514, accuracy: 0.0001)
+    }
+
+    func testAdaptiveAlphaTracksFastMotionCloser() {
+        let smoother = LandmarkSmoother(alpha: 0.5, snapDistance: 0.05)
+        _ = smoother.smooth([face(cx: 0.5, cy: 0.5)])
+        // snapDistance 直下の速い移動 → alpha がほぼ 1 に上がり遅れがほぼ消える
+        let out = smoother.smooth([face(cx: 0.548, cy: 0.5)])
+        let lag = 0.548 - centroidX(out[0])
+        XCTAssertLessThan(lag, 0.002, "高速移動で EMA 遅延が残っている")
+        // 一方、ごく微小なジッタには基準 alpha 近くの減衰が効いている
+        smoother.reset()
+        _ = smoother.smooth([face(cx: 0.5, cy: 0.5)])
+        let jitter = smoother.smooth([face(cx: 0.505, cy: 0.5)])
+        XCTAssertEqual(centroidX(jitter[0]), 0.50275, accuracy: 0.0005)
     }
 
     func testLargeJumpSnapsWithoutSmoothing() {

@@ -4,7 +4,9 @@ import MosaicCore
 /// 検出された顔1件を表すモデル。ユーザーによる選択状態と動画での検出率を持つ。
 public struct FaceTarget: Identifiable {
     public let id: UUID
-    public let landmarks: FaceLandmarkSet
+    /// 顔の最新既知位置。ライブ検出でマッチするたびに更新される（追加時の初期位置の
+    /// まま固定すると、移動・再入した顔と重心マッチングが永久に不成立になる）。
+    public var landmarks: FaceLandmarkSet
     public let thumbnail: UIImage
     public var isSelected: Bool
     /// 動画のみ: 事前スキャンで算出した検出率（0-100%）。スキャン前は nil。

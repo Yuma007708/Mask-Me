@@ -38,7 +38,11 @@ public struct FaceMaskBuilder: Sendable {
 
     /// Builds one fill path per region present in `landmarks`, in painter order
     /// (broad face first, then the finer eye / mouth regions on top).
-    public func regionPaths(for landmarks: FaceLandmarkSet, in size: CGSize) -> [RegionPath] {
+    /// `dilationOverride` は速度適応マージン用（nil でビルダー既定を使う）。
+    public func regionPaths(for landmarks: FaceLandmarkSet,
+                            in size: CGSize,
+                            dilationOverride: CGFloat? = nil) -> [RegionPath] {
+        let effectiveDilation = dilationOverride ?? dilation
         // Face first so eyes/lips overwrite it with their higher mask values.
         let order: [FaceRegion] = [.faceOval, .leftEye, .rightEye, .lips]
         return order.filter(enabledRegions.contains).compactMap { region in
@@ -46,7 +50,7 @@ public struct FaceMaskBuilder: Sendable {
             guard points.count >= 3 else { return nil }
             // Dilate relative to the region's own size so the margin scales with
             // how large the face appears, hugging it without spilling background.
-            let inset = dilation * Self.span(of: points)
+            let inset = effectiveDilation * Self.span(of: points)
             guard let path = Self.convexHullPath(through: points, expandedBy: inset) else {
                 return nil
             }
@@ -116,6 +120,18 @@ public struct FaceMaskBuilder: Sendable {
         width: Int,
         height: Int
     ) -> (bytes: [UInt8], bytesPerRow: Int)? {
+        renderMask(for: landmarkSets.map { ($0, nil) },
+                   additionalPaths: additionalPaths, width: width, height: height)
+    }
+
+    /// 顔ごとに膨らみを変えられる版（速度適応マージン用）。dilation が nil の
+    /// 顔はビルダー既定（`self.dilation`）で描く。
+    public func renderMask(
+        for facesWithDilation: [(landmarks: FaceLandmarkSet, dilation: CGFloat?)],
+        additionalPaths: [RegionPath] = [],
+        width: Int,
+        height: Int
+    ) -> (bytes: [UInt8], bytesPerRow: Int)? {
         guard width > 0, height > 0 else { return nil }
         let bytesPerRow = width
         var bytes = [UInt8](repeating: 0, count: bytesPerRow * height)
@@ -133,8 +149,10 @@ public struct FaceMaskBuilder: Sendable {
                   ) else {
                 return false
             }
-            for landmarks in landmarkSets {
-                for region in regionPaths(for: landmarks, in: size) {
+            for face in facesWithDilation {
+                let paths = regionPaths(for: face.landmarks, in: size,
+                                        dilationOverride: face.dilation)
+                for region in paths {
                     context.addPath(region.path)
                     context.setFillColor(gray: CGFloat(region.value), alpha: 1)
                     context.fillPath()

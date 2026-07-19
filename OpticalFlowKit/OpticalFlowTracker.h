@@ -11,6 +11,16 @@ NS_ASSUME_NONNULL_BEGIN
                          current:(NSArray<NSValue *> *)current;
 @end
 
+/// 縮小グレースケール済みの 1 フレーム（cv::Mat を内包する opaque ラッパ）。
+/// 複数の OpticalFlowTracker（顔ごと）が同じフレームを追跡するとき、
+/// グレー化・縮小を 1 フレーム 1 回に共有するために使う。
+@interface MMGrayFrame : NSObject
+/// UIImage から縮小グレーフレームを作る。maxLongSide は縮小後の長辺上限（px）。
++ (nullable MMGrayFrame *)frameWithImage:(UIImage *)image
+                             maxLongSide:(double)maxLongSide
+    NS_SWIFT_NAME(init(image:maxLongSide:));
+@end
+
 /// OpenCV 疎 Lucas-Kanade によるフレーム間の特徴点追跡。
 /// 検出パイプラインが全滅したフレームで「画素の動き」から顔の運動を推定するための
 /// 対応点ペアを供給する。OpenCV 依存はこのクラスの実装（.mm）に閉じ込める。
@@ -28,6 +38,14 @@ NS_ASSUME_NONNULL_BEGIN
 /// 成功時は内部状態を今フレームへ前進させる（連続ギャップを追跡し続けられる）。
 - (nullable MMFlowMatch *)advanceWithImage:(UIImage *)image
     NS_SWIFT_NAME(advance(with:));
+
+/// 共有グレーフレーム版の seed（毎フレーム前進層用。グレー化を顔間で共有する）。
+/// seed と advance には同一系列（同じ寸法）の MMGrayFrame を渡すこと。
+- (BOOL)seedWithGrayFrame:(MMGrayFrame *)frame faceBox:(CGRect)faceBox
+    NS_SWIFT_NAME(seed(grayFrame:faceBox:));
+/// 共有グレーフレーム版の advance。
+- (nullable MMFlowMatch *)advanceWithGrayFrame:(MMGrayFrame *)frame
+    NS_SWIFT_NAME(advance(grayFrame:));
 @end
 
 NS_ASSUME_NONNULL_END

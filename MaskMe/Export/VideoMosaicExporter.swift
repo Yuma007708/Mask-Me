@@ -533,23 +533,20 @@ public final class VideoMosaicExporter: @unchecked Sendable {
         DetectionBridge(interpolates: true).faces(in: cache, at: time)
     }
 
+    /// 選択顔の時系列トラッカー。旧実装は選択時の静的位置と距離 0.3 で毎フレーム照合
+    /// しており、顔が移動しただけで書き出し動画からモザイクが消えていた
+    /// （実機報告「フレームアウト→イン／後ろ向き→正面のあと一切掛からない」の
+    /// エクスポート側の原因）。SelectedFaceTracker がマッチのたびに位置を追従させる。
+    private var selectedTracker: SelectedFaceTracker?
+
     private func filterToSelected(_ faces: [FaceLandmarkSet], targets: [FaceTarget]) -> [FaceLandmarkSet] {
         if targets.isEmpty { return faces }
-        return faces.filter { face in
-            let fc = normalizedCentroid(of: face)
-            return targets.contains { target in
-                let tc = normalizedCentroid(of: target.landmarks)
-                return hypot(fc.x - tc.x, fc.y - tc.y) < 0.3
-            }
+        if selectedTracker == nil {
+            selectedTracker = SelectedFaceTracker(
+                initialCentroids: targets.map { SelectedFaceTracker.centroid(of: $0.landmarks) }
+            )
         }
-    }
-
-    private func normalizedCentroid(of lm: FaceLandmarkSet) -> CGPoint {
-        guard !lm.points.isEmpty else { return CGPoint(x: 0.5, y: 0.5) }
-        var sx: Float = 0; var sy: Float = 0
-        for p in lm.points { sx += p.x; sy += p.y }
-        let n = Float(lm.points.count)
-        return CGPoint(x: CGFloat(sx / n), y: CGFloat(sy / n))
+        return selectedTracker?.filter(faces) ?? faces
     }
 
     // MARK: - Setup helpers

@@ -217,12 +217,14 @@ public final class MosaicRenderer: NSObject {
     /// 複数の顔ランドマークセット（＋追加パス）でモザイクをレンダリングする。
     /// - フルメッシュ顔はメッシュレンダラーで順番にチェーン処理。
     /// - 部分メッシュ顔・追加パスはコンタマスクのコンピュートカーネルで処理。
+    /// - `faceOptions` は `landmarkSets` と添字対応（nil または不足分は既定挙動）。
     @discardableResult
     public func render(
         input: MTLTexture,
         into output: MTLTexture,
         landmarkSets: [FaceLandmarkSet],
         additionalPaths: [FaceMaskBuilder.RegionPath] = [],
+        faceOptions: [FaceRenderOption]? = nil,
         waitForCompletion: Bool = false
     ) -> TrackingStatus {
         let maxConfidence = landmarkSets.map(\.confidence).max()
@@ -237,8 +239,7 @@ public final class MosaicRenderer: NSObject {
             return newStatus
         }
 
-        let fullMesh = landmarkSets.filter(\.isFullMesh)
-        let partial = landmarkSets.filter { !$0.isFullMesh }
+        let (fullMesh, partial) = partitionFaces(landmarkSets, options: faceOptions)
         let hasContour = !partial.isEmpty || !additionalPaths.isEmpty
 
         // Phase 1: チェーンメッシュレンダリング（フルメッシュ顔）
@@ -285,7 +286,7 @@ public final class MosaicRenderer: NSObject {
     }
 
     private func buildCombinedMaskTexture(
-        landmarkSets: [FaceLandmarkSet],
+        landmarkSets: [(landmarks: FaceLandmarkSet, dilation: CGFloat?)],
         additionalPaths: [FaceMaskBuilder.RegionPath],
         width: Int,
         height: Int

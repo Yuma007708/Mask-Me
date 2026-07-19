@@ -298,7 +298,9 @@ public final class MosaicEditorModel: ObservableObject {
             let newFaces = found.map { lm -> FaceTarget in
                 let remapped = lm.remapped(into: normalizedRect)
                 let thumb = generateThumbnail(for: remapped, from: img)
-                return FaceTarget(id: UUID(), landmarks: remapped, thumbnail: thumb, isSelected: false)
+                // ユーザーが矩形を描いた意図は「この顔にモザイクを掛けたい」なので
+                // 即選択する（false だとサムネをもう一度タップするまで何も起きない）。
+                return FaceTarget(id: UUID(), landmarks: remapped, thumbnail: thumb, isSelected: true)
             }
             detectedFaces += newFaces
         } else {
@@ -328,7 +330,8 @@ public final class MosaicEditorModel: ObservableObject {
         if let (landmarks, foundFrame) = result {
             let thumbSource = referenceImage ?? foundFrame
             let thumb = generateThumbnail(for: landmarks, from: thumbSource)
-            detectedFaces.append(FaceTarget(id: UUID(), landmarks: landmarks, thumbnail: thumb, isSelected: false))
+            // 矩形を描いた意図に合わせて即選択（上の resolveRegion 直検出と同じ理由）。
+            detectedFaces.append(FaceTarget(id: UUID(), landmarks: landmarks, thumbnail: thumb, isSelected: true))
         } else {
             // どのフレームでも検出できなかった: 固定矩形マスクにフォールバック
             appendManualRect(rect)
@@ -415,7 +418,6 @@ public final class MosaicEditorModel: ObservableObject {
         previewController?.seekLatest(to: position)
     }
 
-
     // MARK: - 手動再検出（動画: 現在シーク位置で再検出）
 
     public func redetect(at position: Double) async {
@@ -425,20 +427,52 @@ public final class MosaicEditorModel: ObservableObject {
 
         let scanner = makeFaceLandmarker(forVideo: false, settings: detectionSettings)
         let found = scanner.allLandmarks(in: frame)
-        detectionCache[t] = found
+        // キーはライブ検出と同じ 15fps バケットに正規化する（storePreScanResult の
+        // doc コメント参照。生 t のままだとライブの空エントリを上書きできない）。
+        storePreScanResult(found, at: t)
 
         if !found.isEmpty {
-            detectedFaces = found.map { lm in
-                FaceTarget(id: UUID(), landmarks: lm,
-                           thumbnail: generateThumbnail(for: lm, from: frame),
-                           isSelected: false)
-            }
+            // 旧: 全員 isSelected: false で置き換えていた。モザイクが外れた時に
+            // ユーザーが押すボタンで選択が全消去され「以降一切モザイクがかからない」
+            // 実機報告の直接原因だった。選択状態は重心マッチで引き継ぎ、誰も選択
+            // されない結果になる場合は全選択にフォールバックする（このボタンを押す
+            // 意図は常に「顔にモザイクを掛けたい」なので、消える方向に倒さない）。
+            detectedFaces = carryingOverSelection(
+                found.map { lm in
+                    FaceTarget(id: UUID(), landmarks: lm,
+                               thumbnail: generateThumbnail(for: lm, from: frame),
+                               isSelected: false)
+                },
+                previousSelected: detectedFaces.filter(\.isSelected)
+            )
             sourceImage = frame
             sourceTexture = makeTexture(from: frame)
             updateBackgroundMask(from: frame)
             renderPreview()
             previewController?.invalidate()
         }
+    }
+
+    /// redetect 用の選択引き継ぎ。新しい顔候補に旧選択状態を重心マッチ（<0.5）で
+    /// 引き継ぎ、誰も選択されない結果になる場合は全選択にフォールバックする。
+    /// 「再検出」を押す意図は常に「顔にモザイクを掛けたい」なので、選択が空になって
+    /// 以降モザイクが一切掛からなくなる方向には決して倒さない（フェイルクローズ）。
+    func carryingOverSelection(
+        _ newFaces: [FaceTarget],
+        previousSelected: [FaceTarget]
+    ) -> [FaceTarget] {
+        var result = newFaces
+        for i in result.indices {
+            let fc = normalizedCentroid(of: result[i].landmarks)
+            result[i].isSelected = previousSelected.contains { sel in
+                let sc = normalizedCentroid(of: sel.landmarks)
+                return hypot(fc.x - sc.x, fc.y - sc.y) < 0.5
+            }
+        }
+        if !result.contains(where: \.isSelected) {
+            for i in result.indices { result[i].isSelected = true }
+        }
+        return result
     }
 
     // MARK: - レンダリング
@@ -493,7 +527,53 @@ public final class MosaicEditorModel: ObservableObject {
     func lookupFaces(at time: Double) -> [FaceLandmarkSet] {
         let bridged = DetectionBridge(interpolates: true).faces(in: detectionCache, at: time)
         if !bridged.isEmpty { return bridged }
-        return nearestCachedFaces(at: time, window: 0.75)
+        // フロー橋渡し結果: 実検出の両側補間が成立しないバケットを追跡位置で埋める。
+        // 実検出ホールド（nearest）より追従位置が新しいので先に引く。窓は±1バケット強
+        // だけ（フローは毎バケット供給されるので、それ以上離れたら供給が途絶えた区間）。
+        let flow = nearestFlowFaces(at: time)
+        if !flow.isEmpty { return flow }
+        let nearest = nearestCachedFaces(at: time, window: 0.75)
+        if !nearest.isEmpty { return nearest }
+        // 最寄りバケットが「スキャン済みで顔なし」でも、瞬き・モーションブラーによる
+        // 1〜数バケットだけの検出落ちの可能性がある。再生1周目は未来側の検出がまだ
+        // 無く DetectionBridge の両側補間が効かないため、blinkHoldWindow 以内の
+        // 非空バケットを片側ホールドして瞬間的なモザイク消失を防ぐ。
+        // 顔が本当に居ない区間では窓内に非空バケットが存在しないので空が返り、
+        // 体への貼り付き（nearestCachedFaces doc 参照）は最大 blinkHoldWindow 秒で止まる。
+        return nearestNonEmptyCachedFaces(at: time, window: blinkHoldWindow)
+    }
+
+    /// 瞬きブリッジのホールド幅（秒）。瞬き＋モーションブラーの検出落ちは
+    /// 15fps バケットで 1〜3 個（≦0.2s）に収まる実測に基づく。
+    private let blinkHoldWindow = 0.25
+
+    /// フロー橋渡し由来のライブ結果。実検出ではないため `detectionCache` とは分離する:
+    /// エクスポート（VideoMosaicExporter）はキャッシュヒットで自前検出をスキップする
+    /// ので、フロー由来を detectionCache に混ぜると書き出し品質を汚染する。
+    /// 参照するのはプレビューの `lookupFaces` のみ。動画切替（resetLiveDetection）で破棄。
+    private(set) var liveFlowCache: [Double: [FaceLandmarkSet]] = [:]
+
+    /// `liveFlowCache` のうち `time` から±1バケット強（0.1s）以内で最も近い顔リスト。
+    private func nearestFlowFaces(at time: Double) -> [FaceLandmarkSet] {
+        var best: (dist: Double, faces: [FaceLandmarkSet])?
+        for (t, faces) in liveFlowCache where !faces.isEmpty {
+            let d = abs(t - time)
+            if d > 1.5 / liveBucketFPS { continue }
+            if best == nil || d < best!.dist { best = (d, faces) }
+        }
+        return best?.faces ?? []
+    }
+
+    /// `nearestCachedFaces` と異なり空エントリ（スキャン済み顔なし）を飛ばして、
+    /// `window` 秒以内で最も近い「顔あり」バケットを返す。瞬きブリッジ専用。
+    private func nearestNonEmptyCachedFaces(at time: Double, window: Double) -> [FaceLandmarkSet] {
+        var best: (dist: Double, faces: [FaceLandmarkSet])?
+        for (t, faces) in detectionCache where !faces.isEmpty {
+            let d = abs(t - time)
+            if d > window { continue }
+            if best == nil || d < best!.dist { best = (d, faces) }
+        }
+        return best?.faces ?? []
     }
 
     /// `detectionCache` のうち時刻 `time` から `window` 秒以内で最も近い
@@ -562,8 +642,23 @@ public final class MosaicEditorModel: ObservableObject {
     private var liveMatchCounts: [Int] = []
     private var liveSampleCount = 0
 
-    private func liveBucket(_ timeSec: Double) -> Double {
+    func liveBucket(_ timeSec: Double) -> Double {
         (timeSec * liveBucketFPS).rounded() / liveBucketFPS
+    }
+
+    /// プリスキャン（フル解像度・VIDEO モード）の 1 フレーム分の結果を検出キャッシュへ
+    /// 記録する。MainActor 上で呼ぶこと。
+    ///
+    /// - キーはライブ検出と同じ 15fps バケット（`liveBucket`）に正規化する。
+    ///   プリスキャンループの `t += 1/15` 累積値をそのままキーにすると、丸めで得た
+    ///   バケット値と最下位ビットで食い違い、ライブ検出が先に書いた低解像度エントリ
+    ///   （誤検知含む）を上書きできずプレビュー・エクスポート両方に残り続ける。
+    /// - 空結果も上書き記録する。フル解像度パイプラインの「顔なし」判定でライブ検出
+    ///   （480px 簡易経路）の誤検知を消すため。空エントリは DetectionBridge が
+    ///   無視するので追従率には影響せず、nearestCachedFaces のホールド抑止
+    ///   （体への貼り付き防止）には効く。
+    func storePreScanResult(_ faces: [FaceLandmarkSet], at rawTime: Double) {
+        detectionCache[liveBucket(rawTime)] = faces
     }
 
     /// テスト専用: 「この時刻をスキャンしたが顔は無かった」状態を再現する。
@@ -577,6 +672,11 @@ public final class MosaicEditorModel: ObservableObject {
         liveMatchCounts = []
         liveSampleCount = 0
         liveDetectionInFlight = false
+        liveFlowCache.removeAll()
+        // 別動画の時系列を追跡しないよう、scanner 側の track / flow 状態も破棄する
+        liveDetectionQueue.async { [liveScanner] in
+            liveScanner.resetLiveTracking()
+        }
     }
 
     /// プレビューがこの時刻のフレームを検出すべきか（表示スレッドから安価に判定する）。
@@ -594,16 +694,78 @@ public final class MosaicEditorModel: ObservableObject {
         let bucket = liveBucket(timeSec)
         liveDetectionQueue.async { [weak self, liveScanner] in
             let img = UIImage(cgImage: cgImage)
-            let faces = liveScanner.allLandmarks(in: img)
+            // liveLandmarks は IMAGE 検出に加えてテンポラル ROI 再検出・フロー橋渡しで
+            // 横顔・急な頭部回転を追跡する（バケットではなく生の timeSec を渡す:
+            // 丸めると adapter 側のシーク不連続検知が鈍る）。
+            let detection = liveScanner.liveLandmarks(in: img, atMediaSeconds: timeSec)
             Task { @MainActor in
-                self?.storeLiveDetection(faces, at: bucket, source: img)
+                self?.storeLiveDetection(detection, at: bucket, source: img)
             }
         }
     }
 
+    /// シーク時にライブ追跡状態（ROI track / フロー）を破棄する。adapter 側の
+    /// 時刻不連続の自動検知に対する明示リセットの二段構え。追跡状態は検出キュー上で
+    /// しか触らない invariant を守るため、キュー経由で直列に実行する。
+    func notifyLiveSeek() {
+        liveDetectionQueue.async { [liveScanner] in
+            liveScanner.resetLiveTracking()
+        }
+    }
+
+    /// ライブ検出 1 フレーム分の結果を記録する。フロー橋渡し由来（bridgedByFlow）は
+    /// 「実検出は無かった」事実を detectionCache に空で残しつつ、追跡位置を
+    /// `liveFlowCache` に別置きする（エクスポート非汚染・検出率バッジ非算入・
+    /// nearestCachedFaces の体貼り付き防止の意味論をすべて維持するため）。
     @MainActor
-    private func storeLiveDetection(_ faces: [FaceLandmarkSet], at t: Double, source: UIImage) {
+    func storeLiveDetection(_ detection: LiveDetectionResult, at t: Double, source: UIImage) {
+        guard detection.bridgedByFlow else {
+            storeLiveDetection(detection.faces, at: t, source: source)
+            return
+        }
         liveDetectionInFlight = false
+        detectionCache[t] = []
+        liveFlowCache[t] = detection.faces
+        #if DEBUG
+        print("[MMLIVE] t=\(String(format: "%.2f", t)) flow faces=\(detection.faces.count)")
+        #endif
+        // 描画の重心マッチングが追跡位置と乖離しないよう位置だけ追従させる
+        // （検出率 liveMatchCounts / liveSampleCount には算入しない）。
+        updateFacePositions(with: detection.faces)
+        previewController?.invalidate()
+    }
+
+    /// `detectedFaces` の位置を検出/追跡結果へ追従させる（検出率には触らない）。
+    /// マッチング規則は storeLiveDetection の検出率ループと同一。
+    @MainActor
+    private func updateFacePositions(with faces: [FaceLandmarkSet]) {
+        guard !faces.isEmpty else { return }
+        for (i, target) in detectedFaces.enumerated() {
+            let tc = normalizedCentroid(of: target.landmarks)
+            guard let matched = faces.min(by: { a, b in
+                let ac = normalizedCentroid(of: a), bc = normalizedCentroid(of: b)
+                return hypot(ac.x - tc.x, ac.y - tc.y) < hypot(bc.x - tc.x, bc.y - tc.y)
+            }) else { continue }
+            let mc = normalizedCentroid(of: matched)
+            let isSoleFacePair = detectedFaces.count == 1 && faces.count == 1
+            if isSoleFacePair || hypot(mc.x - tc.x, mc.y - tc.y) < 0.5 {
+                detectedFaces[i].landmarks = matched
+            }
+        }
+    }
+
+    /// internal: シナリオテスト（フレームアウト→イン・後ろ向き→正面・冒頭顔なし等）が
+    /// ライブ検出の1フレーム分を直接注入して選択層まで含めて検証するための可視性。
+    @MainActor
+    func storeLiveDetection(_ faces: [FaceLandmarkSet], at t: Double, source: UIImage) {
+        liveDetectionInFlight = false
+        #if DEBUG
+        // 実機デバッグ用: ライブ検出が「どの時刻に・何件」乗ったかの証跡。
+        // 「途中スタートでモザイクなし」等の報告時に、検出が走っていないのか
+        // （このログ自体が出ない）、走ったが空なのか（faces=0）を切り分ける。
+        print("[MMLIVE] t=\(String(format: "%.2f", t)) faces=\(faces.count) "
+              + "targets=\(detectedFaces.count) sel=\(detectedFaces.filter(\.isSelected).count)")
+        #endif
         // 空の結果も保存する。「スキャン済みで顔なし」という事実が残らないと、
         // lookupFaces のホールドフォールバックが古い顔位置をこのフレームに描き続けて
         // 「体にモザイクが乗る／モザイクがずれる」誤描画になる。また、空を記録する
@@ -616,11 +778,14 @@ public final class MosaicEditorModel: ObservableObject {
         guard !faces.isEmpty else { return }
 
         // 先頭フレーム検出が失敗して顔候補が空だった場合の安全網。
+        // load(videoURL:) の初期スキャンと同じ自動選択規則を適用する: 顔が 1 つなら
+        // タップ不要で即モザイク。isSelected: false のままだと「冒頭に顔が写らない
+        // 動画（後ろ向きスタート等）では最後まで一切モザイクが掛からない」になる。
         if detectedFaces.isEmpty {
-            detectedFaces = faces.map { lm in
+            detectedFaces = faces.enumerated().map { idx, lm in
                 FaceTarget(id: UUID(), landmarks: lm,
                            thumbnail: generateThumbnail(for: lm, from: source),
-                           isSelected: false)
+                           isSelected: faces.count == 1 && idx == 0)
             }
         }
 
@@ -629,11 +794,22 @@ public final class MosaicEditorModel: ObservableObject {
         while liveMatchCounts.count < detectedFaces.count { liveMatchCounts.append(0) }
         for (i, target) in detectedFaces.enumerated() {
             let tc = normalizedCentroid(of: target.landmarks)
-            if faces.contains(where: { face in
-                let fc = normalizedCentroid(of: face)
-                return hypot(fc.x - tc.x, fc.y - tc.y) < 0.5
+            if let matched = faces.min(by: { a, b in
+                let ac = normalizedCentroid(of: a), bc = normalizedCentroid(of: b)
+                return hypot(ac.x - tc.x, ac.y - tc.y) < hypot(bc.x - tc.x, bc.y - tc.y)
             }) {
-                liveMatchCounts[i] += 1
+                let mc = normalizedCentroid(of: matched)
+                // 単一ターゲット × 単一検出のときは距離条件を課さない（同一人物とみなす）。
+                // フレームアウト→反対側から再インすると距離 0.5 を超え、位置追従だけでは
+                // 永久に再マッチできないため、この再捕捉規則が無いと「一度外れたら戻らない」。
+                let isSoleFacePair = detectedFaces.count == 1 && faces.count == 1
+                if isSoleFacePair || hypot(mc.x - tc.x, mc.y - tc.y) < 0.5 {
+                    liveMatchCounts[i] += 1
+                    // ターゲット位置を最新の検出位置へ追従させる。顔追加時の初期位置の
+                    // まま固定すると、selectedLandmarks の重心マッチングが「移動した顔・
+                    // フレームアウト→別位置で再インした顔」と永久にマッチしなくなる。
+                    detectedFaces[i].landmarks = matched
+                }
             }
             detectedFaces[i].detectionRate =
                 Double(liveMatchCounts[i]) / Double(liveSampleCount) * 100
@@ -726,18 +902,16 @@ public final class MosaicEditorModel: ObservableObject {
             let timeForCache = t
             let matchCountsCopy = matchCounts
             let updated = await MainActor.run { [weak self, img] () -> [Int] in
-                // 空結果はキャッシュしない（直前の有効検出を再利用させる）
-                if !facesForCache.isEmpty {
-                    self?.detectionCache[timeForCache] = facesForCache
-                }
+                self?.storePreScanResult(facesForCache, at: timeForCache)
                 guard let self else { return matchCountsCopy }
                 // 初期フレーム検出が失敗して detectedFaces が空のまま残っている場合、
                 // プリスキャンで最初に見つかった顔を補完する（安全網）。
                 if !facesForCache.isEmpty && self.detectedFaces.isEmpty {
-                    self.detectedFaces = facesForCache.map { lm in
+                    // storeLiveDetection の安全網と同じ自動選択規則（単一顔なら即モザイク）。
+                    self.detectedFaces = facesForCache.enumerated().map { idx, lm in
                         FaceTarget(id: UUID(), landmarks: lm,
                                    thumbnail: self.generateThumbnail(for: lm, from: img),
-                                   isSelected: false)
+                                   isSelected: facesForCache.count == 1 && idx == 0)
                     }
                 }
                 var counts = matchCountsCopy
@@ -920,11 +1094,15 @@ public final class MosaicEditorModel: ObservableObject {
         guard let renderer, let videoAsset else { return }
         exportProgress = 0
         let exporter = VideoMosaicExporter(renderer: renderer, landmarker: landmarker)
-        let selectedIDs = Set(detectedFaces.filter(\.isSelected).map(\.id))
+        let selected = detectedFaces.filter(\.isSelected)
+        // 全顔選択（単一顔の自動選択を含む）なら選択フィルタを完全バイパスする
+        // （exporter は空配列を「全顔に適用」と解釈する）。追跡マッチングの誤棄却で
+        // 書き出しからモザイクが消える余地を残さないフェイルクローズ。
+        let targetsForExport = selected.count == detectedFaces.count ? [] : selected
         do {
             let url = try await exporter.export(
                 asset: videoAsset,
-                selectedFaceTargets: detectedFaces.filter { selectedIDs.contains($0.id) },
+                selectedFaceTargets: targetsForExport,
                 manualRegions: manualRegions,
                 detectionCache: detectionCache,
                 faceEnabled: faceMosaicOn,
@@ -1015,12 +1193,21 @@ public final class MosaicEditorModel: ObservableObject {
         return UIImage(cgImage: cg)
     }
 
-    /// 実機ライブ検出と同じ 480px 幅の縮小 CGImage を返す。
+    /// ライブ検出・初期スキャンで使う検出入力の目標幅（px）。
+    /// `MosaicPreviewController.detectionCGImage(from:)` と検証テスト
+    /// （DValidLivePathTests / SampleFalsePositiveTests）もこの値を参照し、
+    /// 実機・シミュレータ・テストが常に同一解像度で検出するよう一元化する。
+    /// 480 → 640: 逆光・低コントラストの小顔が 480px ではモデル入力への内部縮小で
+    /// 潰れて検出下限を割るため（DValidLivePathTests の backlight セット実測で
+    /// liveRate 0〜14% の動画があった）、推論回数を増やさずに底上げする。
+    static let liveDetectionTargetWidth = 640.0
+
+    /// 実機ライブ検出と同じ `liveDetectionTargetWidth` px 幅の縮小 CGImage を返す。
     /// `MosaicPreviewController.detectionCGImage(from:)` と同じスケール規則。
     private static let detectionCIContext = CIContext()
     static func downscaleForDetection(_ image: UIImage) -> UIImage {
         guard let cg = image.cgImage else { return image }
-        let target = 480.0
+        let target = liveDetectionTargetWidth
         let scale = min(target / Double(cg.width), 1.0)
         guard scale < 0.99 else { return image }
         let ci = CIImage(cgImage: cg)
