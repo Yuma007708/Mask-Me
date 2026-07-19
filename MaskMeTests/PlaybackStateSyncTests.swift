@@ -24,4 +24,22 @@ final class PlaybackStateSyncTests: XCTestCase {
         model.togglePlayback()
         XCTAssertFalse(model.isPlaying)
     }
+
+    /// Composition 未構築の間に書き出しを押しても無言で終わらないこと。
+    ///
+    /// 移行前は同期代入の `videoAsset` を見ていたため押せば必ず書き出しが始まった。
+    /// Composition 経由になって窓ができた結果、`guard let composition else { return }`
+    /// だと進捗もアラートも出ず「押しても何も起きない」状態になっていた。
+    func test_exportVideoReportsErrorWhileCompositionIsBuilding() async {
+        let model = MosaicEditorModel(mode: .video, recents: RecentItemsStore())
+        XCTAssertNil(model.errorMessage)
+        XCTAssertNil(model.exportProgress, "前提: まだ書き出しは走っていない")
+
+        await model.exportVideo()
+
+        XCTAssertNotNil(model.errorMessage,
+                        "Composition 未構築で書き出しを押したのに無言で終わった（進捗もアラートも出ない）")
+        XCTAssertNil(model.exportProgress, "書き出しは開始していないので進捗は出さない")
+        XCTAssertFalse(model.didSave)
+    }
 }

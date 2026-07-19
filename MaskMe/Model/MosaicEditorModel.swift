@@ -115,6 +115,10 @@ public final class MosaicEditorModel: ObservableObject {
     ///   - `redetect(at:)` の再検出フレーム
     ///   - 検出キャッシュのキー（素材基準の時刻で持っているため、composition 時刻で
     ///     引くと別クリップの結果を拾う）
+    ///   - `resolveRegion(_:referenceImage:)` / `findFaceInVideo(asset:rect:scanner:)`
+    ///     （矩形から動画全体を1fps走査する経路）。`videoAsset` を直接渡して素材全体を
+    ///     舐めるため、クリップ列が素材の一部しか使わなくなると「タイムラインに存在
+    ///     しない区間」で顔を拾い、composition 上に対応時刻の無い結果を返す
     /// そのため、フェーズ2では `videoAsset` の直接参照を全て
     /// `TimelineMapping.sourceLocation(at:)` 相当の写像経由に置き換える必要がある。
     private var composition: AVMutableComposition?
@@ -610,6 +614,17 @@ public final class MosaicEditorModel: ObservableObject {
     /// エクスポート（VideoMosaicExporter）はキャッシュヒットで自前検出をスキップする
     /// ので、フロー由来を detectionCache に混ぜると書き出し品質を汚染する。
     /// 参照するのはプレビューの `lookupFaces` のみ。動画切替（resetLiveDetection）で破棄。
+    ///
+    /// **⚠️ フェーズ2への申し送り: 時間基準が2つ並存している。**
+    /// このキャッシュのキーは **合成（composition）時刻**（プレビュー再生位置そのもの）
+    /// である一方、`cacheStore` のキーは **素材時刻** である。フェーズ1では
+    /// クリップが「素材全体を使う1本」しか無く両者が恒等変換で一致するため問題にならない。
+    /// フェーズ2でトリム・並べ替え・複数素材が入り、`lookupFaces` の入口で合成時刻を
+    /// 素材時刻へ写像するようにすると、`cacheStore` 側だけが正しくなり
+    /// **`liveFlowCache` だけが合成時刻キーのまま取り残されて誤フレームの顔を返す。**
+    /// 入口で一括変換して済ませず、このキャッシュの
+    /// 読み書き（`nearestFlowFaces` / `storeLiveDetection`）をどちらの基準に揃えるか
+    /// 明示的に決めること。
     private(set) var liveFlowCache: [Double: [FaceLandmarkSet]] = [:]
 
     /// `liveFlowCache` のうち `time` から±1バケット強（0.1s）以内で最も近い顔リスト。
@@ -1158,7 +1173,18 @@ public final class MosaicEditorModel: ObservableObject {
 
     public func exportVideo() async {
         // プレビューと同じ Composition を書き出す（素の素材ではなくクリップ編集の結果）。
-        guard let renderer, let composition else { return }
+        //
+        // composition は `load(videoURL:)` 内の Task で2回の await（duration ロード＋
+        // loadTracks）を経てから入る。移行前は同期代入の `videoAsset` を見ていたため
+        // この窓が存在せず、押せば必ず書き出しが始まった。窓の中で無言 return すると
+        // 進捗もアラートも出ず「押しても何も起きない」になるので、必ず理由を出す。
+        // （`togglePlayback` の無言 no-op は「状態を進めない」ことが目的なので黙って
+        //   良いが、書き出しはユーザーが結果を待つ操作なので黙ってはいけない。）
+        guard let composition else {
+            errorMessage = "動画の読み込み中です。少し待ってからもう一度お試しください"
+            return
+        }
+        guard let renderer else { return }
         exportProgress = 0
         let exporter = VideoMosaicExporter(renderer: renderer, landmarker: landmarker)
         let selected = detectedFaces.filter(\.isSelected)
