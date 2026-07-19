@@ -85,7 +85,13 @@ public final class MosaicEditorModel: ObservableObject {
     private var videoAsset: AVAsset?
     /// Source video URL (for saving a resumable draft).
     public private(set) var sourceVideoURL: URL?
-    private(set) var detectionCache: [Double: [FaceLandmarkSet]] = [:]
+    /// この編集画面が扱う素材の識別子。クリップの有無とは独立に存在する。
+    ///
+    /// 素材の「同一性」は、その素材をどの範囲使うか（= クリップ）とは別の概念である。
+    /// 動画ロード前でもキャッシュ操作が成立するよう、init で確定させる。
+    let currentSourceID = UUID()
+    /// 素材基準の検出キャッシュ。クラス全体が @MainActor なので同期機構は不要。
+    let cacheStore = DetectionCacheStore(bucketFPS: 15.0)
     private(set) var previewController: MosaicPreviewController?
     private var cancellables: Set<AnyCancellable> = []
 
@@ -227,7 +233,7 @@ public final class MosaicEditorModel: ObservableObject {
             // にモザイクが乗る。t=0 に顔が無い事実はライブ検出が空エントリとして
             // 記録し、ホールドフォールバックはそれを尊重して描かない。
             if !faces.isEmpty {
-                detectionCache[liveBucket(seedTime)] = faces
+                cacheStore.store(faces, sourceID: currentSourceID, time: seedTime)
             }
             detectedFaces = faces.enumerated().map { idx, lm in
                 // 顔が1つだけならユーザーの意図として自動選択する（サムネを
@@ -525,7 +531,7 @@ public final class MosaicEditorModel: ObservableObject {
     /// ホールドする。これは PREVIEW 専用で、エクスポート側は `VideoMosaicExporter` が
     /// 自前の bridge を持つため影響しない。
     func lookupFaces(at time: Double) -> [FaceLandmarkSet] {
-        let bridged = DetectionBridge(interpolates: true).faces(in: detectionCache, at: time)
+        let bridged = DetectionBridge(interpolates: true).faces(in: sourceScopedCache(), at: time)
         if !bridged.isEmpty { return bridged }
         // フロー橋渡し結果: 実検出の両側補間が成立しないバケットを追跡位置で埋める。
         // 実検出ホールド（nearest）より追従位置が新しいので先に引く。窓は±1バケット強
@@ -567,13 +573,7 @@ public final class MosaicEditorModel: ObservableObject {
     /// `nearestCachedFaces` と異なり空エントリ（スキャン済み顔なし）を飛ばして、
     /// `window` 秒以内で最も近い「顔あり」バケットを返す。瞬きブリッジ専用。
     private func nearestNonEmptyCachedFaces(at time: Double, window: Double) -> [FaceLandmarkSet] {
-        var best: (dist: Double, faces: [FaceLandmarkSet])?
-        for (t, faces) in detectionCache where !faces.isEmpty {
-            let d = abs(t - time)
-            if d > window { continue }
-            if best == nil || d < best!.dist { best = (d, faces) }
-        }
-        return best?.faces ?? []
+        cacheStore.nearestFaces(sourceID: currentSourceID, time: time, window: window)
     }
 
     /// `detectionCache` のうち時刻 `time` から `window` 秒以内で最も近い
@@ -585,13 +585,28 @@ public final class MosaicEditorModel: ObservableObject {
     /// 動いている人の体の上にモザイクが乗る・位置がずれる誤描画の原因になる。
     /// window は「ライブ検出がまだ追いついていない直近区間」を埋めるためだけの短い値。
     private func nearestCachedFaces(at time: Double, window: Double) -> [FaceLandmarkSet] {
+        // 空エントリ（スキャン済み顔なし）も選択対象にするため、非空だけを見る
+        // `DetectionCacheStore.nearestFaces` は使えない。既存ロジックのまま走査する。
         var best: (dist: Double, faces: [FaceLandmarkSet])?
-        for (t, faces) in detectionCache {
-            let d = abs(t - time)
+        for (key, faces) in cacheStore.allEntries where key.sourceID == currentSourceID {
+            let d = abs(key.bucket - time)
             if d > window { continue }
             if best == nil || d < best!.dist { best = (d, faces) }
         }
         return best?.faces ?? []
+    }
+
+    /// 現在の素材のエントリを、`DetectionBridge` / `VideoMosaicExporter` が受け取る
+    /// 従来の `[素材内時刻: 顔]` 形式へ射影する。
+    ///
+    /// フェーズ1では素材が1つしかないため実質全件コピーになる。フェーズ2で
+    /// 複数素材になったときに初めてフィルタとして意味を持つ。
+    private func sourceScopedCache() -> [Double: [FaceLandmarkSet]] {
+        var scoped: [Double: [FaceLandmarkSet]] = [:]
+        for (key, faces) in cacheStore.allEntries where key.sourceID == currentSourceID {
+            scoped[key.bucket] = faces
+        }
+        return scoped
     }
 
     /// 選択中の顔に対応する、指定時刻のランドマークセットを返す。
@@ -658,13 +673,13 @@ public final class MosaicEditorModel: ObservableObject {
     ///   無視するので追従率には影響せず、nearestCachedFaces のホールド抑止
     ///   （体への貼り付き防止）には効く。
     func storePreScanResult(_ faces: [FaceLandmarkSet], at rawTime: Double) {
-        detectionCache[liveBucket(rawTime)] = faces
+        cacheStore.store(faces, sourceID: currentSourceID, time: rawTime)
     }
 
     /// テスト専用: 「この時刻をスキャンしたが顔は無かった」状態を再現する。
     /// ライブ検出の空エントリ記録（storeLiveDetection）と同じ意味のキャッシュ状態を作る。
     func recordScannedEmptyForTesting(at timeSec: Double) {
-        detectionCache[liveBucket(timeSec)] = []
+        cacheStore.store([], sourceID: currentSourceID, time: timeSec)
     }
 
     /// 動画読み込み・顔追加時にライブ検出の集計状態をリセットする。
@@ -683,7 +698,7 @@ public final class MosaicEditorModel: ObservableObject {
     /// 既に同バケットを検出済み・検出中・顔タブOFF・写真モードのときはスキップ。
     func shouldDetectPreviewFrame(at timeSec: Double) -> Bool {
         guard mode == .video, faceMosaicOn, !liveDetectionInFlight else { return false }
-        return detectionCache[liveBucket(timeSec)] == nil
+        return !cacheStore.hasEntry(sourceID: currentSourceID, time: timeSec)
     }
 
     /// プレビューのデコード済みフレーム（検出用に縮小済み CGImage）を受け取り、
@@ -724,7 +739,7 @@ public final class MosaicEditorModel: ObservableObject {
             return
         }
         liveDetectionInFlight = false
-        detectionCache[t] = []
+        cacheStore.store([], sourceID: currentSourceID, time: t)
         liveFlowCache[t] = detection.faces
         #if DEBUG
         print("[MMLIVE] t=\(String(format: "%.2f", t)) flow faces=\(detection.faces.count)")
@@ -771,7 +786,7 @@ public final class MosaicEditorModel: ObservableObject {
         // 「体にモザイクが乗る／モザイクがずれる」誤描画になる。また、空を記録する
         // ことで shouldDetectPreviewFrame が同じ顔なしフレームを再スキャンし続ける
         // 無駄も止まる（DetectionBridge / nearestCachedFaces は空エントリを無視する）。
-        detectionCache[t] = faces
+        cacheStore.store(faces, sourceID: currentSourceID, time: t)
         // ポーズ中のシーク先で検出が終わったとき、次の displayLink を待たずに
         // モザイクを反映する（再生中は毎フレーム描画されるので実質無害）。
         previewController?.invalidate()
@@ -936,7 +951,7 @@ public final class MosaicEditorModel: ObservableObject {
         let finalMatchCounts = matchCounts
         await MainActor.run { [weak self] in
             guard let self else { return }
-            print("[MMSCAN] DONE samples=\(finalSampleCount) cacheEntries=\(self.detectionCache.count) detectedFaces=\(self.detectedFaces.count)")
+            print("[MMSCAN] DONE samples=\(finalSampleCount) cacheEntries=\(self.cacheStore.count) detectedFaces=\(self.detectedFaces.count)")
             if finalSampleCount > 0 {
                 for i in 0..<min(finalMatchCounts.count, self.detectedFaces.count) {
                     self.detectedFaces[i].detectionRate =
@@ -1104,7 +1119,7 @@ public final class MosaicEditorModel: ObservableObject {
                 asset: videoAsset,
                 selectedFaceTargets: targetsForExport,
                 manualRegions: manualRegions,
-                detectionCache: detectionCache,
+                detectionCache: sourceScopedCache(),
                 faceEnabled: faceMosaicOn,
                 backgroundEnabled: backgroundMosaicOn,
                 backgroundBlock: backgroundBlockSize,

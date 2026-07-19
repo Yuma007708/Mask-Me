@@ -43,7 +43,7 @@ final class DetectionCacheSyncTests: XCTestCase {
         // プリスキャンが同じ時刻をフル解像度で走査して顔を見つけた
         model.storePreScanResult([fakeFace(cx: 0.5, cy: 0.3)], at: accumulated)
 
-        XCTAssertEqual(model.detectionCache.count, 1,
+        XCTAssertEqual(model.cacheStore.count, 1,
                        "キーが正規化されず別エントリとして共存している")
         XCTAssertFalse(model.lookupFaces(at: bucketTime).isEmpty,
                        "プリスキャンの顔がライブの空エントリを上書きできていない")
