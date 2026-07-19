@@ -601,12 +601,10 @@ public final class MosaicEditorModel: ObservableObject {
     ///
     /// フェーズ1では素材が1つしかないため実質全件コピーになる。フェーズ2で
     /// 複数素材になったときに初めてフィルタとして意味を持つ。
+    ///
+    /// 毎フレーム呼ばれるため射影の実体は `DetectionCacheStore` 側でメモ化してある。
     private func sourceScopedCache() -> [Double: [FaceLandmarkSet]] {
-        var scoped: [Double: [FaceLandmarkSet]] = [:]
-        for (key, faces) in cacheStore.allEntries where key.sourceID == currentSourceID {
-            scoped[key.bucket] = faces
-        }
-        return scoped
+        cacheStore.projectedFaces(sourceID: currentSourceID)
     }
 
     /// 選択中の顔に対応する、指定時刻のランドマークセットを返す。

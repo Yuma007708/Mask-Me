@@ -106,4 +106,83 @@ final class DetectionCacheStoreTests: XCTestCase {
         // 検出結果は失われていない
         XCTAssertEqual(store.faces(sourceID: locAfter!.sourceID, time: locAfter!.time)?.count, 1)
     }
+
+    // MARK: - 射影のメモ化
+
+    /// 射影を取った後に store すると、次の射影に反映されること。
+    /// メモの無効化漏れは「古い検出結果が描かれ続ける」最悪の回帰になる。
+    func test_projectionReflectsLaterStore() {
+        let store = DetectionCacheStore(bucketFPS: 15)
+        store.store([face(cx: 0.5)], sourceID: sourceA, time: 1.0)
+        XCTAssertEqual(store.projectedFaces(sourceID: sourceA).count, 1)
+
+        store.store([face(cx: 0.3)], sourceID: sourceA, time: 2.0)
+        let after = store.projectedFaces(sourceID: sourceA)
+        XCTAssertEqual(after.count, 2)
+        XCTAssertEqual(after[2.0]?.count, 1)
+    }
+
+    /// 既存バケットの上書き（プリスキャンによるライブ結果の上書き）も反映されること。
+    func test_projectionReflectsOverwrite() {
+        let store = DetectionCacheStore(bucketFPS: 15)
+        store.store([face(cx: 0.5)], sourceID: sourceA, time: 1.0)
+        XCTAssertEqual(store.projectedFaces(sourceID: sourceA)[1.0]?.count, 1)
+
+        store.store([], sourceID: sourceA, time: 1.0)
+        XCTAssertEqual(store.projectedFaces(sourceID: sourceA)[1.0]?.isEmpty, true)
+    }
+
+    /// 射影を取った後に removeAll(sourceID:) すると、次の射影が空になること。
+    func test_projectionInvalidatedByRemoveBySource() {
+        let store = DetectionCacheStore(bucketFPS: 15)
+        store.store([face(cx: 0.5)], sourceID: sourceA, time: 1.0)
+        store.store([face(cx: 0.2)], sourceID: sourceB, time: 1.0)
+        XCTAssertEqual(store.projectedFaces(sourceID: sourceA).count, 1)
+        XCTAssertEqual(store.projectedFaces(sourceID: sourceB).count, 1)
+
+        store.removeAll(sourceID: sourceA)
+
+        XCTAssertTrue(store.projectedFaces(sourceID: sourceA).isEmpty)
+        // 巻き添えで消えていないこと
+        XCTAssertEqual(store.projectedFaces(sourceID: sourceB).count, 1)
+    }
+
+    /// 射影を取った後に removeAll() すると、次の射影が空になること。
+    func test_projectionInvalidatedByRemoveAll() {
+        let store = DetectionCacheStore(bucketFPS: 15)
+        store.store([face(cx: 0.5)], sourceID: sourceA, time: 1.0)
+        XCTAssertEqual(store.projectedFaces(sourceID: sourceA).count, 1)
+
+        store.removeAll()
+
+        XCTAssertTrue(store.projectedFaces(sourceID: sourceA).isEmpty)
+    }
+
+    /// 射影は指定した sourceID のエントリだけを含むこと。
+    func test_projectionIsScopedToSource() {
+        let store = DetectionCacheStore(bucketFPS: 15)
+        store.store([face(cx: 0.5)], sourceID: sourceA, time: 1.0)
+        store.store([face(cx: 0.2)], sourceID: sourceB, time: 2.0)
+
+        let projected = store.projectedFaces(sourceID: sourceA)
+        XCTAssertEqual(projected.count, 1)
+        XCTAssertNotNil(projected[1.0])
+        XCTAssertNil(projected[2.0])
+        XCTAssertTrue(store.projectedFaces(sourceID: UUID()).isEmpty)
+    }
+
+    /// 同じ状態で2回射影を取ったら等しい結果になること（メモ経路と再構築経路の一致）。
+    func test_projectionIsStableAcrossCalls() {
+        let store = DetectionCacheStore(bucketFPS: 15)
+        store.store([face(cx: 0.5)], sourceID: sourceA, time: 1.0)
+        store.store([], sourceID: sourceA, time: 2.0)
+
+        let first = store.projectedFaces(sourceID: sourceA)
+        let second = store.projectedFaces(sourceID: sourceA)
+
+        XCTAssertEqual(first.keys.sorted(), second.keys.sorted())
+        for (t, faces) in first {
+            XCTAssertEqual(faces.count, second[t]?.count)
+        }
+    }
 }
