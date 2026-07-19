@@ -92,6 +92,12 @@ public final class MosaicEditorModel: ObservableObject {
     let currentSourceID = UUID()
     /// 素材基準の検出キャッシュ。クラス全体が @MainActor なので同期機構は不要。
     let cacheStore = DetectionCacheStore(bucketFPS: 15.0)
+    /// タイムライン上のクリップ列。フェーズ1では常に1要素。
+    @Published private(set) var clips: [TimelineClip] = []
+    /// 素材IDから AVAsset への対応表。
+    private var sources: [UUID: AVAsset] = [:]
+    /// クリップ列から構築した合成結果。プレビューと書き出しで同じものを使い回す。
+    private var composition: AVMutableComposition?
     private(set) var previewController: MosaicPreviewController?
     private var cancellables: Set<AnyCancellable> = []
 
@@ -248,17 +254,30 @@ public final class MosaicEditorModel: ObservableObject {
         manualRegions = []
 
         Task {
-            videoDuration = (try? await asset.load(.duration))?.seconds ?? 0
+            let seconds = (try? await asset.load(.duration))?.seconds ?? 0
+            videoDuration = seconds
+
+            // フェーズ1では素材全体を使う単一クリップ。
+            sources = [currentSourceID: asset]
+            clips = [TimelineClip(sourceID: currentSourceID,
+                                  sourceStart: 0, sourceEnd: seconds)]
+
+            guard let r = renderer else { return }
+            do {
+                let built = try await TimelineCompositionBuilder()
+                    .build(clips: clips, sources: sources)
+                composition = built
+                previewController = MosaicPreviewController(
+                    renderer: r, asset: built, model: self)
+            } catch {
+                errorMessage = "動画の読み込みに失敗しました"
+            }
         }
 
         renderer?.reset()
         renderPreview()
         resetHistory()
         isLoading = false
-
-        if let r = renderer {
-            previewController = MosaicPreviewController(renderer: r, url: url, model: self)
-        }
         // 事前スキャンは廃止。再生しながらプレビューのフレームに検出を相乗りさせて
         // detectionCache を埋める（ライブ検出）。詳細は「ライブ検出」セクション参照。
         resetLiveDetection()
@@ -1104,7 +1123,8 @@ public final class MosaicEditorModel: ObservableObject {
     }
 
     public func exportVideo() async {
-        guard let renderer, let videoAsset else { return }
+        // プレビューと同じ Composition を書き出す（素の素材ではなくクリップ編集の結果）。
+        guard let renderer, let composition else { return }
         exportProgress = 0
         let exporter = VideoMosaicExporter(renderer: renderer, landmarker: landmarker)
         let selected = detectedFaces.filter(\.isSelected)
@@ -1114,7 +1134,7 @@ public final class MosaicEditorModel: ObservableObject {
         let targetsForExport = selected.count == detectedFaces.count ? [] : selected
         do {
             let url = try await exporter.export(
-                asset: videoAsset,
+                asset: composition,
                 selectedFaceTargets: targetsForExport,
                 manualRegions: manualRegions,
                 detectionCache: sourceScopedCache(),
