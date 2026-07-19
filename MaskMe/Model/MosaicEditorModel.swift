@@ -97,6 +97,26 @@ public final class MosaicEditorModel: ObservableObject {
     /// 素材IDから AVAsset への対応表。
     private var sources: [UUID: AVAsset] = [:]
     /// クリップ列から構築した合成結果。プレビューと書き出しで同じものを使い回す。
+    ///
+    /// **不変条件（フェーズ1限定）: `composition` は `videoAsset` と時間軸が一致する。**
+    /// フェーズ1のクリップ列は「素材全体を使う1本」しか無いため、
+    /// composition 上の時刻 t と videoAsset 上の時刻 t は同じフレームを指す。
+    /// この前提のもとで、資産を2つ並存させて用途で使い分けている:
+    ///
+    /// - `videoAsset`: サムネ生成とスクラブ時のフレーム抽出（`AVAssetImageGenerator`
+    ///   系の同期取り出し。Composition 経由より素材直読みのほうが速く確実）
+    /// - `composition`: 再生（`AVPlayerItem`）と書き出し（`AVAssetReader`）
+    ///
+    /// **フェーズ2でどこが壊れるか:**
+    /// トリム・並べ替え・複数素材のいずれかが入った瞬間に上の一致は崩れる。
+    /// 具体的には、composition 時刻 t に対応する素材と素材内時刻を解決する
+    /// 写像が必要になり、以下が全て誤フレームを返すようになる:
+    ///   - `seekTo(position:)` のフレーム抽出（`videoAsset` を composition 時刻で引く）
+    ///   - `redetect(at:)` の再検出フレーム
+    ///   - 検出キャッシュのキー（素材基準の時刻で持っているため、composition 時刻で
+    ///     引くと別クリップの結果を拾う）
+    /// そのため、フェーズ2では `videoAsset` の直接参照を全て
+    /// `TimelineMapping.sourceLocation(at:)` 相当の写像経由に置き換える必要がある。
     private var composition: AVMutableComposition?
     private(set) var previewController: MosaicPreviewController?
     private var cancellables: Set<AnyCancellable> = []
@@ -262,22 +282,32 @@ public final class MosaicEditorModel: ObservableObject {
             clips = [TimelineClip(sourceID: currentSourceID,
                                   sourceStart: 0, sourceEnd: seconds)]
 
-            guard let r = renderer else { return }
+            // Composition の構築は renderer の有無と無関係に行う。
+            // renderer が nil でも書き出し（composition 依存）は成立させたいので、
+            // 「renderer が無い ＝ composition も無い」という巻き添えを作らない。
             do {
                 let built = try await TimelineCompositionBuilder()
                     .build(clips: clips, sources: sources)
                 composition = built
-                previewController = MosaicPreviewController(
-                    renderer: r, asset: built, model: self)
+                if let r = renderer {
+                    previewController = MosaicPreviewController(
+                        renderer: r, asset: built, model: self)
+                }
             } catch {
                 errorMessage = "動画の読み込みに失敗しました"
             }
+            // 成功・失敗どちらの経路でも必ず解除する。ここより前に解除すると
+            // 「読み込み完了表示なのに previewController がまだ nil」の窓ができ、
+            // 再生ボタンの表示と実挙動がずれる（togglePlayback 側でも二重に防ぐ）。
+            isLoading = false
         }
 
+        // 以下は Composition ではなく先頭フレーム（sourceTexture）に対する処理なので
+        // Composition 構築の完了を待たない。待たせるとプレビューの初期表示が
+        // 素材ロード遅延ぶん遅れて、静止画モードとの体感差になる。
         renderer?.reset()
         renderPreview()
         resetHistory()
-        isLoading = false
         // 事前スキャンは廃止。再生しながらプレビューのフレームに検出を相乗りさせて
         // detectionCache を埋める（ライブ検出）。詳細は「ライブ検出」セクション参照。
         resetLiveDetection()
@@ -411,11 +441,15 @@ public final class MosaicEditorModel: ObservableObject {
     // MARK: - 動画再生制御
 
     public func togglePlayback() {
+        // previewController が未構築（Composition 構築中）の間は状態を進めない。
+        // 進めると play() が no-op なのに isPlaying だけ true になり、
+        // 「UI は再生中・映像は停止」のずれが起きて2回押さないと復帰できない。
+        guard let controller = previewController else { return }
         if isPlaying {
-            previewController?.pause()
+            controller.pause()
             isPlaying = false
         } else {
-            previewController?.play()
+            controller.play()
             isPlaying = true
         }
     }
