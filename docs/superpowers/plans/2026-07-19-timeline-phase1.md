@@ -809,57 +809,239 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 
 ---
 
-### Task 5: MosaicEditorModel をクリップ基盤に載せ替える
+## 計画改訂の記録（2026-07-19）
+
+当初の Task 5 は着手前に停止した。理由は 2 つ。
+
+1. 合格条件「`DetectionCacheSyncTests` 9 件」が事実誤認だった。実際は **4 件**である。
+2. その 4 件の `makeModel()` は `load(videoURL:)` を呼ばない。当初計画ではクリップは
+   `load(videoURL:)` の中でしか作られないため、テストでは `clips == []` となり
+   `sourceLocation(at:)` が常に nil を返す。「nil なら何もしない」規則に従うと
+   キャッシュ書き込みが全て no-op になり、4 件中 3 件が落ちる。
+
+より根本的な問題として、当初の Task 5 は**3 つの異なる変更を 1 タスクに詰め込んでいた**。
+
+- (a) 検出キャッシュのキーを素材基準にする
+- (b) プレビュー・書き出しを Composition 経由にする
+- (c) 合成時刻 ⇄ 素材時刻の変換層を検出経路に配線する
+
+このうち **(c) はフェーズ1では恒等変換にしかならない**。素材全体を使う単一クリップしか
+存在しないため、`sourceLocation(at:)` は入力をそのまま返すだけである。にもかかわらず
+(c) は、アプリで最も品質を作り込んできた検出・追跡経路を差し替える。**得るものがゼロで、
+回帰リスクだけが最大**という割の合わない変更だった。
+
+設計書がキー再設計を求めた理由は「クリップ編集をしても検出結果が失われないこと」であり、
+それは **(a) のキー変更だけで達成される**。(c) が意味を持つのはクリップが複数になる
+フェーズ2以降である。
+
+したがって以下のとおり改訂する。
+
+- **(c) はフェーズ1の対象外とする。** `TimelineMapping` は Task 2 で実装・テスト済みだが、
+  検出経路への配線はフェーズ2でカット編集 UI を入れるときに行う。
+- (a) を Task 5、(b) を Task 6 に分離する。それぞれ独立した合格条件を持つ。
+- `liveFlowCache` はフェーズ1では合成時刻キーのまま**触らない**。素材基準へ寄せるのは
+  フェーズ2で `TimelineMapping` を配線するときに `detectionCache` と対称に行う。
+
+### 調査で確定した事実（改訂前タスクの調査による）
+
+- `MosaicEditorModel` はクラス全体が `@MainActor`。ライブ検出はバックグラウンドキューで
+  検出のみ行い、結果の格納は `Task { @MainActor in }` 経由で戻る。よって `cacheStore` を
+  非 static stored property として持てば、`DetectionCacheStore` が `Sendable` でも
+  同期機構付きでもなくても現状と同じ安全性が保てる。
+- `.swiftlint.yml` の `file_length` は warning 500 / **error 800**。
+  `MosaicEditorModel.swift` は現在 **1229 行**で既に error 閾値を超えている。
+  着手前から lint が通っていない可能性が高いため、**まず現状の lint 結果を記録**すること。
+- `TimelineMapping.compositionTime(clipID:sourceTime:)` は上限が閉区間で
+  `sourceLocation(at:)` の半開区間と非対称である。フェーズ1では使わないため保留し、
+  フェーズ2で配線する前に決着させる。
+- `detectionCache` の実測参照行（当初計画の行番号は全てズレている。現ファイル 1229 行）:
+  88 定義 / 230 シード / 528 DetectionBridge / 559・571・589 近傍探索 /
+  661 `storePreScanResult` / 667 `recordScannedEmptyForTesting` / 686 未検出判定 /
+  727・774 ライブ格納 / 939 診断ログ / 1107 エクスポート受け渡し。
+  **着手時に必ず再確認すること。**
+
+---
+
+### Task 5: 検出キャッシュを素材基準のキーに載せ替える
 
 **Files:**
-- Modify: `MaskMe/Model/MosaicEditorModel.swift`（`detectionCache` 定義は 88 行目、動画ロードは 236-258 行目、キャッシュ参照は 596-830 行目付近）
-- Modify: `MaskMe/Model/MosaicPreviewController.swift:78`（`init(renderer:url:model:)`）
-- Modify: `MaskMe/Export/VideoMosaicExporter.swift:128`（`detectionCache` 引数の型）
+- Modify: `MaskMe/Model/MosaicEditorModel.swift`
+- Modify: `MaskMeTests/DetectionCacheSyncTests.swift`（**1 行のみ**。下記 Step 5 参照）
+- Modify: `MaskMe/Export/VideoMosaicExporter.swift`（呼び出し側の型合わせのみ。シグネチャは変えない）
 
-**Interfaces:**
-- Consumes: `TimelineClip`, `TimelineMapping`, `DetectionCacheStore`, `TimelineCompositionBuilder`（Task 1-4）
-- Produces: `MosaicEditorModel.clips: [TimelineClip]`, `MosaicEditorModel.timelineMapping: TimelineMapping`, `MosaicEditorModel.cacheStore: DetectionCacheStore`
+**このタスクでやらないこと（重要）:**
+- `TimelineMapping` を使わないこと。`sourceLocation(at:)` を呼ばないこと
+- `AVMutableComposition` を作らないこと。プレビュー経路に触らないこと
+- `liveFlowCache` / `livePropagatedFaces` に触らないこと
+- `VideoMosaicExporter.export` のシグネチャを変えないこと
 
-**この Task の要点:** 既存の時刻ベース API のシグネチャは変えない。内部で `timelineMapping` を通して素材時刻に直してからキャッシュを引くようにする。呼び出し側（View、PreviewController）の構造は変えない。
+**このタスクの合格条件:** 既存の `DetectionCacheSyncTests` **4 件**が通ること。
+アサーションを 1 つも変えないこと。変更してよいのは Step 5 の 1 行だけ。
 
-- [ ] **Step 1: 現在の挙動を固定する回帰テストを先に書く**
+**設計の要点: モデルは常に素材 ID を持つ**
 
-既存の `MaskMeTests/DetectionCacheSyncTests.swift` は `detectionCache` を直接見ている。載せ替え後も**同じ振る舞い**を保つことを保証するため、まず現状のテストが全て通ることを確認する。
+`MosaicEditorModel` は「1 本の素材を編集する画面」を表す。素材の**同一性**は、
+その素材を「どの範囲使うか」（= クリップ）とは独立に存在する。したがって
+`currentSourceID` は `init` で確定させ、クリップの有無に依存させない。
+
+これはクリップモデルと矛盾しない。クリップは「使う範囲」であって「素材の同一性」ではない。
+この分離により、動画ロード前でもキャッシュ操作が成立し、既存テストの前提が保たれる。
+
+- [ ] **Step 1: 現状のベースラインを記録する**
+
+```bash
+swiftlint lint --quiet 2>&1 | tail -20
+```
+
+lint の**現状の違反**をレポートに記録すること。このタスクで違反を増やさないことが基準であり、
+着手前から出ている違反をこのタスクで解消する義務はない。
 
 ```bash
 cd /Users/tatsuki/Desktop/mirator/projects/Mask-Me && xcodebuild test -workspace MaskMe.xcworkspace -scheme MaskMe -destination 'platform=iOS Simulator,id=B418FA35-66F1-46C7-A314-EA162FC3D6CD' -only-testing:MaskMeTests/DetectionCacheSyncTests 2>&1 | grep -E "Test Case|Executed"
 ```
 
-Expected: 9件 passed。**この9件が載せ替え後も全て通ることが Task 5 の合格条件**
+Expected: **4 件 passed**。この 4 件が載せ替え後も通ることが合格条件。
 
-- [ ] **Step 2: モデルにクリップ状態を追加する**
+- [ ] **Step 2: モデルに素材 ID とキャッシュ保管庫を追加する**
 
-`MaskMe/Model/MosaicEditorModel.swift` の 88 行目付近、`private(set) var detectionCache` の定義の直後に追加する。
+`MosaicEditorModel` の `detectionCache` 定義（実測 88 行目付近）を置き換える。
 
 ```swift
-    /// タイムライン上のクリップ列。フェーズ1では常に1要素。
-    @Published public private(set) var clips: [TimelineClip] = []
-    /// 素材IDから AVAsset への対応表。
-    private var sources: [UUID: AVAsset] = [:]
-    /// 合成時刻 ⇄ 素材時刻の変換。`clips` の変更時に作り直す。
-    private(set) var timelineMapping = TimelineMapping(clips: [])
-    /// 素材基準の検出キャッシュ。
+    /// この編集画面が扱う素材の識別子。クリップの有無とは独立に存在する。
+    ///
+    /// 素材の「同一性」は、その素材をどの範囲使うか（= クリップ）とは別の概念である。
+    /// 動画ロード前でもキャッシュ操作が成立するよう、init で確定させる。
+    let currentSourceID = UUID()
+    /// 素材基準の検出キャッシュ。クラス全体が @MainActor なので同期機構は不要。
     let cacheStore = DetectionCacheStore(bucketFPS: 15.0)
 ```
 
-- [ ] **Step 3: 動画ロード時にクリップを作る**
+`detectionCache` プロパティは**削除する**。互換用の computed property は残さないこと
+（残すと 2 系統の読み方が並存して必ず腐る）。
 
-`MaskMe/Model/MosaicEditorModel.swift` の 245 行目付近、`videoDuration` を読み込んでいる箇所を次のように変更する。
+- [ ] **Step 3: 全参照箇所を `cacheStore` 経由に置き換える**
 
-変更前:
+```bash
+cd /Users/tatsuki/Desktop/mirator/projects/Mask-Me && grep -n "detectionCache" MaskMe/ -r
+```
+
+で現在の全参照を洗い出し、1 箇所ずつ置き換える。対応は次のとおり。
+
+| 旧 | 新 |
+|---|---|
+| `detectionCache[bucket] = faces` | `cacheStore.store(faces, sourceID: currentSourceID, time: t)` |
+| `detectionCache[bucket]` （読み） | `cacheStore.faces(sourceID: currentSourceID, time: t)` |
+| `detectionCache[bucket] != nil` | `cacheStore.hasEntry(sourceID: currentSourceID, time: t)` |
+| `detectionCache.count` | `cacheStore.count` |
+| 近傍走査の手書きループ | `cacheStore.nearestFaces(sourceID:time:window:)` |
+
+**注意点:**
+
+- **丸めは `DetectionCacheStore` が内部で行う。** 呼び出し側で `liveBucket(_:)` に
+  通してから渡しても、生の時刻を渡しても同じキーになる。既存の `liveBucket` 呼び出しは
+  そのまま残してよい（挙動は変わらない）が、二重に丸める必要はない。
+  `DetectionCacheKey` の**生 init `init(sourceID:bucket:)` は使わないこと**。
+- **「エントリが無い」と「エントリはあるが空」の区別を絶対に壊さないこと。**
+  `faces()` は前者で `nil`、後者で `[]` を返す。`?? []` で潰すと
+  `test_preScanEmptyResultClearsLiveFalsePositive` と
+  `test_blinkDropoutIsBridgedOnFirstPlaythrough` が意味を失う。
+- 近傍走査を `nearestFaces` に置き換える際、**既存の時間窓の値を変えないこと**
+  （±0.1s / 0.75s / まばたき保持 0.25s）。既存ループが「非空の最近傍」以外の
+  条件を持っているなら、`nearestFaces` に置き換えず既存ロジックのまま
+  `cacheStore.allEntries` を走査してよい。**振る舞いの同一性が最優先**である。
+
+- [ ] **Step 4: `DetectionBridge` への受け渡しを合わせる**
+
+`DetectionBridge` は `[Double: [FaceLandmarkSet]]` を受け取る（実測 528 行目付近）。
+現在の素材のエントリを抜き出して従来の形に組み直す。
 
 ```swift
-        Task {
-            videoDuration = (try? await asset.load(.duration))?.seconds ?? 0
+        var sourceScoped: [Double: [FaceLandmarkSet]] = [:]
+        for (key, faces) in cacheStore.allEntries where key.sourceID == currentSourceID {
+            sourceScoped[key.bucket] = faces
         }
 ```
 
-変更後:
+フェーズ1では素材が 1 つしかないため、この抜き出しは全件コピーになる。
+毎フレーム呼ばれる経路であれば**コストが問題にならないか確認し、問題があれば
+レポートに書くこと**（当初計画はここを検討していない）。
+
+- [ ] **Step 5: テストの 1 行だけを直す**
+
+`MaskMeTests/DetectionCacheSyncTests.swift:46` の
+
+```swift
+        XCTAssertEqual(model.detectionCache.count, 1,
+```
+
+を
+
+```swift
+        XCTAssertEqual(model.cacheStore.count, 1,
+```
+
+に変える。**変更はこの 1 行のみ。** アサーションの意味・メッセージ・他の 3 件は
+一切触らないこと。他のテストを直したくなったら、それは実装側が間違っている合図である。
+
+- [ ] **Step 6: エクスポートへの受け渡しを合わせる**
+
+実測 1107 行目付近、`VideoMosaicExporter.export` に `detectionCache` を渡している箇所を、
+Step 4 と同じ方法で `[Double: [FaceLandmarkSet]]` に射影して渡す。
+**`export` のシグネチャは変更しない。**
+
+- [ ] **Step 7: テストを実行する**
+
+```bash
+cd /Users/tatsuki/Desktop/mirator/projects/Mask-Me && xcodebuild clean -workspace MaskMe.xcworkspace -scheme MaskMe > /dev/null 2>&1 && xcodebuild test -workspace MaskMe.xcworkspace -scheme MaskMe -destination 'platform=iOS Simulator,id=B418FA35-66F1-46C7-A314-EA162FC3D6CD' -skip-testing:MaskMeTests/SampleFalsePositiveTests -skip-testing:MaskMeTests/DiagLivePathDumpTests -skip-testing:MaskMeTests/DValidLiveModelTests 2>&1 | grep -E "Test Case.*(passed|failed)|Executed|TEST"
+```
+
+Expected: `DetectionCacheSyncTests` の **4 件が passed** の行が見えること。総件数も記録すること。
+`clean` を挟むのは、ビルドキャッシュが古いまま「新規テストが走らずに成功表示が出る」事故を防ぐため。
+
+- [ ] **Step 8: lint が Step 1 から悪化していないことを確認しコミット**
+
+```bash
+cd /Users/tatsuki/Desktop/mirator/projects/Mask-Me && swiftlint lint --quiet 2>&1 | tail -20
+```
+
+Step 1 で記録した違反から**増えていない**こと。増えていたら
+`MosaicEditorModel+Timeline.swift` に extension として切り出す。
+
+```bash
+cd /Users/tatsuki/Desktop/mirator/projects/Mask-Me && git add -A && git commit -m "refactor: 検出キャッシュを素材基準のキーに載せ替え
+
+キーを合成時刻から (素材ID, 素材内時刻) に変更した。クリップの分割・削除・
+並べ替えをしても検出結果が失われないようにするため。素材IDはクリップの有無とは
+独立にモデルが保持する。
+
+変換層 (TimelineMapping) の配線はフェーズ1では行わない。単一クリップでは
+恒等変換にしかならず、品質を作り込んできた検出経路を差し替える見返りがないため。
+配線はクリップが複数になるフェーズ2で行う。
+
+既存の DetectionCacheSyncTests 4件が引き続き通ることを合格条件とした。
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
+```
+
+---
+
+### Task 6: プレビューと書き出しを Composition 経由にする
+
+**Files:**
+- Modify: `MaskMe/Model/MosaicEditorModel.swift`（動画ロード箇所）
+- Modify: `MaskMe/Model/MosaicPreviewController.swift`（`init` と `setupPlayer`）
+
+**このタスクでやらないこと:**
+- 検出キャッシュに触らないこと（Task 5 で完了している）
+- `TimelineMapping` を使わないこと
+
+**このタスクの合格条件:** 実機・シミュレータで、プレビュー再生・シーク・書き出しが
+**フェーズ1着手前と見分けがつかないこと**。
+
+- [ ] **Step 1: 動画ロード時にクリップと Composition を作る**
+
+`load(videoURL:)` の中の `videoDuration` を読み込んでいる `Task` を次のようにする。
+**クリップ構築と Composition 構築は 1 つの `Task` にまとめること**（別々にすると順序が競合する）。
 
 ```swift
         Task {
@@ -867,70 +1049,37 @@ Expected: 9件 passed。**この9件が載せ替え後も全て通ることが T
             videoDuration = seconds
 
             // フェーズ1では素材全体を使う単一クリップ。
-            let sourceID = UUID()
-            sources = [sourceID: asset]
-            clips = [TimelineClip(sourceID: sourceID, sourceStart: 0, sourceEnd: seconds)]
-            timelineMapping = TimelineMapping(clips: clips)
+            sources = [currentSourceID: asset]
+            clips = [TimelineClip(sourceID: currentSourceID,
+                                  sourceStart: 0, sourceEnd: seconds)]
+
+            guard let r = renderer else { return }
+            do {
+                let composition = try await TimelineCompositionBuilder()
+                    .build(clips: clips, sources: sources)
+                previewController = MosaicPreviewController(
+                    renderer: r, asset: composition, model: self)
+            } catch {
+                errorMessage = "動画の読み込みに失敗しました"
+            }
         }
 ```
 
-- [ ] **Step 4: キャッシュ参照を変換層経由にする**
-
-`lookupFaces(at:)` の内部で、合成時刻を素材時刻に変換してから `cacheStore` を引くようにする。
-`MosaicEditorModel.swift` に次のヘルパを追加する（`lookupFaces` の直前）。
+対応するプロパティを追加する。
 
 ```swift
-    /// 合成時刻に対応する素材内の位置。クリップが未構築なら nil。
-    ///
-    /// フェーズ1では素材全体を使う単一クリップなので、実質的に恒等変換になる。
-    /// それでも変換層を通すのは、フェーズ2以降で分岐を増やさないためである。
-    func sourceLocation(at compositionTime: Double) -> TimelineMapping.SourceLocation? {
-        timelineMapping.sourceLocation(at: compositionTime)
-    }
+    /// タイムライン上のクリップ列。フェーズ1では常に1要素。
+    @Published private(set) var clips: [TimelineClip] = []
+    /// 素材IDから AVAsset への対応表。
+    private var sources: [UUID: AVAsset] = [:]
 ```
 
-そのうえで、`detectionCache` を直接読み書きしている全箇所を `cacheStore` 経由に置き換える。対象は次のとおり（行番号は変更前のもの）。
+**注意:** 既存の `previewController` 生成箇所（実測 252 行目付近）は削除すること。
+2 箇所で生成すると二重に作られる。
 
-- `230` — シード検出の格納
-- `528` — `DetectionBridge` への受け渡し
-- `601-613` — `nearestFlowFaces` / `nearestCachedFaces`
-- `703, 709` — `storePreScanResult` / `recordScannedEmptyForTesting`
-- `729` — 未検出判定
-- `774-775, 824` — ライブ検出結果の格納
-- `989` — 診断ログ
-- `1157` — エクスポートへの受け渡し
+- [ ] **Step 2: PreviewController を AVAsset 受け取りに変更する**
 
-各箇所で、合成時刻を `sourceLocation(at:)` で素材時刻に変換してから `cacheStore` の対応メソッドを呼ぶ。変換が nil を返した場合（範囲外）は、従来「キャッシュに無い」と同じ扱い（空を返す／何もしない）にする。
-
-- [ ] **Step 5: DetectionBridge への受け渡しを合わせる**
-
-`DetectionBridge` は `[Double: [FaceLandmarkSet]]` を受け取る（`MosaicEditorModel.swift:528`）。
-現在の素材の分だけを抜き出して従来の形に組み直して渡す。
-
-`lookupFaces(at:)` の中の該当箇所を次のようにする。
-
-```swift
-        guard let loc = sourceLocation(at: time) else { return [] }
-        // DetectionBridge は素材内時刻をキーとする辞書を期待する。
-        // 現在の素材のエントリだけを抜き出して渡す。
-        var sourceScoped: [Double: [FaceLandmarkSet]] = [:]
-        for (key, faces) in cacheStore.allEntries where key.sourceID == loc.sourceID {
-            sourceScoped[key.bucket] = faces
-        }
-        let bridged = DetectionBridge(interpolates: true).faces(in: sourceScoped, at: loc.time)
-```
-
-- [ ] **Step 6: PreviewController を AVAsset 受け取りに変更する**
-
-`MaskMe/Model/MosaicPreviewController.swift:78` の init を変更する。
-
-変更前:
-
-```swift
-    init(renderer: MosaicRenderer, url: URL, model: MosaicEditorModel) {
-```
-
-変更後:
+`MaskMe/Model/MosaicPreviewController.swift` の init を変更する。
 
 ```swift
     /// - Parameter asset: 合成済みの `AVMutableComposition` を受け取る。
@@ -939,90 +1088,34 @@ Expected: 9件 passed。**この9件が載せ替え後も全て通ることが T
     init(renderer: MosaicRenderer, asset: AVAsset, model: MosaicEditorModel) {
 ```
 
-同ファイル内の `setupPlayer(_ url: URL)` を `setupPlayer(_ asset: AVAsset)` に変更し、
+`setupPlayer(_ url: URL)` を `setupPlayer(_ asset: AVAsset)` に変更し、
 `AVPlayerItem(url:)` を `AVPlayerItem(asset:)` に置き換える。
 `private var videoURL: URL?` は使われなくなるため削除する。
 
-- [ ] **Step 7: モデル側の PreviewController 生成を合わせる**
+**呼び出し側が他にもないか `grep -n "MosaicPreviewController(" MaskMe/ -r` で確認すること。**
 
-`MosaicEditorModel.swift:252` 付近を次のように変更する。
+- [ ] **Step 3: 書き出しにも Composition を渡す**
 
-変更前:
+エクスポートに渡す `asset` を、素の `videoAsset` ではなく Composition に変更する。
+Composition を毎回作り直すのではなく、Step 1 で作ったものを保持して使い回すこと。
 
-```swift
-        if let r = renderer {
-            previewController = MosaicPreviewController(renderer: r, url: url, model: self)
-        }
-```
-
-変更後:
-
-```swift
-        if let r = renderer {
-            Task {
-                do {
-                    let composition = try await TimelineCompositionBuilder()
-                        .build(clips: clips, sources: sources)
-                    previewController = MosaicPreviewController(
-                        renderer: r, asset: composition, model: self)
-                } catch {
-                    errorMessage = "動画の読み込みに失敗しました"
-                }
-            }
-        }
-```
-
-**注意:** Step 3 でクリップを作る `Task` と、この `Task` の順序に依存がある。
-クリップ構築を先に完了させるため、Step 3 の `Task` の中で続けて Composition を
-構築し、この2つを1つの `Task` にまとめること。
-
-- [ ] **Step 8: エクスポートの受け渡しを合わせる**
-
-`MosaicEditorModel.swift:1157` 付近、エクスポート呼び出しで `detectionCache` を渡している箇所を、
-現在の素材のエントリを抜き出した `[Double: [FaceLandmarkSet]]` に変換して渡す。
-`VideoMosaicExporter.export` のシグネチャは変更しない（フェーズ1では書き出し結果を変えないため）。
-
-またエクスポートに渡す `asset` を、素の `videoAsset` ではなく Composition に変更する。
-
-- [ ] **Step 9: 既存テストが全て通ることを確認**
+- [ ] **Step 4: テストを実行する**
 
 ```bash
-cd /Users/tatsuki/Desktop/mirator/projects/Mask-Me && xcodebuild clean -workspace MaskMe.xcworkspace -scheme MaskMe > /dev/null 2>&1 && xcodebuild test -workspace MaskMe.xcworkspace -scheme MaskMe -destination 'platform=iOS Simulator,id=B418FA35-66F1-46C7-A314-EA162FC3D6CD' 2>&1 | grep -E "Test Case.*(passed|failed)|Executed|TEST"
+cd /Users/tatsuki/Desktop/mirator/projects/Mask-Me && xcodebuild clean -workspace MaskMe.xcworkspace -scheme MaskMe > /dev/null 2>&1 && xcodebuild test -workspace MaskMe.xcworkspace -scheme MaskMe -destination 'platform=iOS Simulator,id=B418FA35-66F1-46C7-A314-EA162FC3D6CD' -skip-testing:MaskMeTests/SampleFalsePositiveTests -skip-testing:MaskMeTests/DiagLivePathDumpTests -skip-testing:MaskMeTests/DValidLiveModelTests 2>&1 | grep -E "Test Case.*(passed|failed)|Executed|TEST"
 ```
 
-Expected: 全テスト passed。**`DetectionCacheSyncTests` の9件が含まれていることを目視で確認する**
+Expected: 全て passed。Task 5 と同じ総件数であること。
 
-`clean` を挟むのは、ビルドキャッシュが古いまま「新規テストが走らずに成功表示が出る」事故を防ぐため。
-
-- [ ] **Step 10: SwiftLint を通す**
-
-```bash
-cd /Users/tatsuki/Desktop/mirator/projects/Mask-Me && swiftlint lint --quiet 2>&1 | tail -20
-```
-
-Expected: 出力なし（違反ゼロ）。`file_length` 違反が出た場合は、追加したクリップ関連のコードを `MosaicEditorModel+Timeline.swift` に extension として切り出す。
-
-- [ ] **Step 11: コミット**
-
-```bash
-cd /Users/tatsuki/Desktop/mirator/projects/Mask-Me && git add -A && git commit -m "refactor: 編集モデルをクリップ基盤と素材基準キャッシュに載せ替え
-
-見た目と挙動は変えない内部移行。検出キャッシュのキーを合成時刻から
-(素材ID, 素材内時刻) に変更し、プレビューは Composition 経由にした。
-既存の DetectionCacheSyncTests 9件が引き続き通ることを合格条件とした。
-
-Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
-```
+- [ ] **Step 5: lint を確認しコミット**
 
 ---
 
-### Task 6: 実機確認とレビュー
+### Task 7: 実機確認とレビュー
 
 **Files:** なし（検証のみ）
 
 - [ ] **Step 1: シミュレータで動作確認**
-
-アプリを起動し、次を確認する。
 
 1. 動画を読み込む → プレビューが表示される
 2. 再生する → モザイクが顔に追従する
@@ -1035,48 +1128,30 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 
 - [ ] **Step 2: サブエージェントによる厳格レビュー**
 
-`feature-dev:code-reviewer` に `main...feat/timeline-phase1` の差分をレビューさせる。
-レビュー観点として次を明示的に伝えること。
+ブランチ全体の差分をレビューさせる。レビュー観点として次を明示的に伝えること。
 
-- 検出キャッシュの読み書きで、合成時刻と素材時刻を取り違えている箇所はないか
+- 検出キャッシュの読み書きで、素材 ID を取り違えている箇所はないか
 - 「エントリが無い」と「エントリはあるが空」の区別が失われていないか
-- 変換が nil を返す場合（範囲外）の扱いが、従来の「キャッシュに無い」と一致しているか
-- 単一クリップを特別扱いする分岐が紛れ込んでいないか
 - `liveFlowCache` と `livePropagatedFaces` の時間窓が維持されているか
-
-指摘が出たら修正し、再レビューする。
+- 単一クリップを特別扱いする分岐が紛れ込んでいないか
+- `previewController` が二重に生成されていないか
+- 各タスクのレビューで積み残した Minor 指摘（進捗台帳 `.superpowers/sdd/progress.md`
+  に一覧がある）のうち、マージ前に直すべきものはどれか
 
 - [ ] **Step 3: PR を作成**
 
-```bash
-cd /Users/tatsuki/Desktop/mirator/projects/Mask-Me && git push -u origin feat/timeline-phase1 && gh pr create --base main --title "refactor: タイムライン編集フェーズ1（クリップ基盤・素材基準キャッシュ）" --body "$(cat <<'BODY'
-## 概要
-
-`docs/superpowers/specs/2026-07-19-timeline-editing-design.md` のフェーズ1。
-画面の見た目と挙動は変えず、内部基盤のみを差し替える。
-
-## 変更点
-
-- クリップ列 (`TimelineClip`) と合成時刻⇄素材時刻の変換層 (`TimelineMapping`) を追加
-- 検出キャッシュのキーを合成時刻から `(素材ID, 素材内時刻)` に変更
-- プレビューと書き出しを `AVMutableComposition` 経由に統一（単一クリップでも）
-
-## 合格条件
-
-フェーズ1着手前と見分けがつかないこと。既存の `DetectionCacheSyncTests` 9件が
-引き続き通ることを回帰の指標とした。
-
-🤖 Generated with [Claude Code](https://claude.com/claude-code)
-BODY
-)"
-```
+`main` へ直接 push しないこと。PR 経由でマージすること。
 
 ---
 
-## セルフレビュー結果
+## フェーズ2に持ち越す論点
 
-**仕様カバレッジ:** 設計書のフェーズ1に挙げた3項目（クリップモデル導入・Composition 経由化・キャッシュキー再設計）は Task 1-5 で網羅した。フェーズ2以降の項目は本計画の対象外。
+改訂の過程で判明し、フェーズ1では決着させないと決めた事項。
 
-**型の一貫性:** `TimelineClip`（Task 1）→ `TimelineMapping`（Task 2）→ `DetectionCacheStore`（Task 3）→ `TimelineCompositionBuilder`（Task 4）→ `MosaicEditorModel`（Task 5）で、プロパティ名とシグネチャが一致していることを確認した。
-
-**既知の判断:** `VideoMosaicExporter.export` のシグネチャは変更しない。フェーズ1では書き出し結果を変えないことを優先し、エクスポータ側の型移行はフェーズ2で `trimRange` を廃止する際にまとめて行う。
+| 論点 | 内容 |
+|---|---|
+| `TimelineMapping` の配線 | 検出経路への配線はフェーズ2で行う。単一クリップでは恒等変換のため |
+| 境界の非対称 | `sourceLocation` は半開区間、`compositionTime` は閉区間。往復変換が境界で非対称。カット UI が `compositionTime` を使い始める前に決着させる |
+| `liveFlowCache` の基準 | フェーズ1では合成時刻キーのまま。`detectionCache` と対称に素材基準へ寄せる |
+| `DetectionCacheKey` の生 init | 丸めを通さない `init(sourceID:bucket:)` が残っている。丸め忘れ回帰の再発経路。使用箇所ゼロを維持できるか、削除するか |
+| `nearestFaces` の計算量 | 毎回全走査 O(n)。長尺・複数素材で重くなる |
