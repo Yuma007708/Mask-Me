@@ -5,25 +5,24 @@ import Foundation
 /// 「エントリが無い（未検出）」と「エントリはあるが空（検出したが顔なし）」を
 /// 区別する。この区別が壊れると、誤検出を空で上書きして消せなくなる。
 public final class DetectionCacheStore {
-    private var storage: [DetectionCacheKey: [FaceLandmarkSet]] = [:]
+    /// `didSet` でメモを破棄する。添字代入 (`storage[k] = v`) でも発火するため、
+    /// このクラス内のどこから storage を書き換えても無効化が漏れない。
+    /// 規律ではなく言語機能で保証している。
+    private var storage: [DetectionCacheKey: [FaceLandmarkSet]] = [:] {
+        didSet { projectionCache.removeAll() }
+    }
     private let bucketFPS: Double
 
     /// `projectedFaces(sourceID:)` の結果メモ。storage を変更したら必ず捨てる。
     ///
     /// 射影は `DetectionBridge` 用に毎フレーム呼ばれるため、エントリ数に比例した
     /// 辞書再構築が 60fps で走っていた（5分動画で約 0.5ms/フレーム）。
-    /// 無効化漏れは「古い検出結果が描かれ続ける」回帰になるので、storage への
-    /// 書き込みは必ず `mutateStorage(_:)` を通し、そこで一括破棄する。
+    /// 無効化漏れは「古い検出結果が描かれ続ける」回帰になるため、
+    /// `storage` の `didSet` で破棄する。
     private var projectionCache: [UUID: [Double: [FaceLandmarkSet]]] = [:]
 
     public init(bucketFPS: Double = 15.0) {
         self.bucketFPS = bucketFPS
-    }
-
-    /// storage を変更する唯一の入口。ここ以外で `storage` に代入しないこと。
-    private func mutateStorage(_ body: (inout [DetectionCacheKey: [FaceLandmarkSet]]) -> Void) {
-        body(&storage)
-        projectionCache.removeAll()
     }
 
     public var count: Int { storage.count }
@@ -35,8 +34,7 @@ public final class DetectionCacheStore {
     }
 
     public func store(_ faces: [FaceLandmarkSet], sourceID: UUID, time: Double) {
-        let k = key(sourceID, time)
-        mutateStorage { $0[k] = faces }
+        storage[key(sourceID, time)] = faces
     }
 
     /// 指定素材のエントリを `[素材内時刻: 顔]` へ射影する。
@@ -78,10 +76,10 @@ public final class DetectionCacheStore {
     }
 
     public func removeAll() {
-        mutateStorage { $0.removeAll() }
+        storage.removeAll()
     }
 
     public func removeAll(sourceID: UUID) {
-        mutateStorage { $0 = $0.filter { $0.key.sourceID != sourceID } }
+        storage = storage.filter { $0.key.sourceID != sourceID }
     }
 }
