@@ -191,7 +191,7 @@ final class LiveScenarioTests: XCTestCase {
         feed(model, faces: [fakeFace(cx: 0.5, cy: 0.4)], at: 0.0)
         // 横顔化: 実検出が全滅し、フローが位置を供給
         feedFlow(model, faces: [fakeFace(cx: 0.55, cy: 0.4)], at: step)
-        XCTAssertEqual(model.detectionCache[model.liveBucket(step)], [],
+        XCTAssertEqual(model.cacheStore.faces(sourceID: model.currentSourceID, time: step), [],
                        "フロー由来が実検出キャッシュに混入している（エクスポート汚染）")
         let looked = model.lookupFaces(at: step)
         XCTAssertFalse(looked.isEmpty, "プレビューがフロー位置を引けていない")

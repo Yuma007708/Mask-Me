@@ -160,7 +160,7 @@ final class SampleFalsePositiveTests: XCTestCase {
             // 顔が全く写らない動画（またはリールの一部で probe 範囲外まで顔が出ない
             // 動画）はシードなし＝そもそも検出対象がない扱いとしてスキップする。
             // これはバグではなく、実機でも同じ結果になる正当な状態。
-            guard let seedTime = model.detectionCache.keys.min() else {
+            guard let seedTime = model.cacheStore.allEntries.keys.map(\.bucket).min() else {
                 fputs("\(url.lastPathComponent): 顔検出できる範囲内に顔なし（スキップ）\n", stderr)
                 continue
             }

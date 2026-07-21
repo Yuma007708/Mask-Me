@@ -103,6 +103,30 @@ pod install
 open MaskMe.xcworkspace
 ```
 
+### ⚠️ `xcodegen generate` の後は必ず `pod install` を実行すること
+
+`xcodegen generate` は `project.yml` から `.xcodeproj` を作り直す。**CocoaPods の統合情報
+（Pods xcconfig の base configuration、`[CP]` ビルドフェーズ、リンカフラグ）は
+`project.yml` に存在しないため、再生成のたびに丸ごと消える。**
+
+このとき MediaPipe がリンクされなくなるが、MediaPipe を使うコードは
+`#if canImport(MediaPipeTasksVision)` でガードされているため、**ビルドは何事もなく成功し、
+顔検出だけが無言でゼロになる。** 動画編集・アプリ内カメラの両方が同時に検出不能になる。
+
+さらに厄介なことに、MediaPipe 依存のテストはコンパイル対象から外れるだけなので
+**テストは「失敗」せず、実行件数が静かに減るだけ**である。「TEST SUCCEEDED」も出る。
+
+**壊れているかの判定:**
+
+```bash
+grep -c "Pods-MaskMe" MaskMe.xcodeproj/project.pbxproj   # 0 なら統合が消えている
+```
+
+**テスト件数を検証の根拠にするときは、件数そのものを毎回確認すること。**
+`-skip-testing:` で禁止3スイートを除外した状態の正常値は **93 実行 / 46 スキップ / 0 失敗**。
+半分程度（45 前後）に落ちていたら、それは「テストが減った」のではなく
+**MediaPipe が外れている**サインである。
+
 アプリターゲットの実画像・実動画テスト（CI では実行されない。ローカル/Simulator 専用）:
 
 ```bash

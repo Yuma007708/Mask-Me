@@ -20,7 +20,6 @@ final class MosaicPreviewController {
     private var textureCache: CVMetalTextureCache?
     private var displayLink: CADisplayLink?
     private let ciContext: CIContext
-    private var videoURL: URL?
     #if canImport(Vision)
     private let segmenter = PersonSegmenter(quality: .balanced)
     #endif
@@ -37,20 +36,22 @@ final class MosaicPreviewController {
     /// DEBUG 診断用: copyPixelBuffer が nil を返した累計（間引きログの分母）。
     private var pixelBufferMissCount = 0
 
-    init(renderer: MosaicRenderer, url: URL, model: MosaicEditorModel) {
+    /// - Parameter asset: 合成済みの `AVMutableComposition` を受け取る。
+    ///   URL ではなく AVAsset を受けることで、クリップ編集の結果を
+    ///   そのまま再生できる。
+    init(renderer: MosaicRenderer, asset: AVAsset, model: MosaicEditorModel) {
         self.renderer = renderer
         self.model = model
-        self.videoURL = url
         self.ciContext = CIContext(mtlDevice: renderer.device, options: [.useSoftwareRenderer: false])
 
         var cache: CVMetalTextureCache?
         CVMetalTextureCacheCreate(kCFAllocatorDefault, nil, renderer.device, nil, &cache)
         self.textureCache = cache
 
-        setupPlayer(url)
+        setupPlayer(asset)
     }
 
-    private func setupPlayer(_ url: URL) {
+    private func setupPlayer(_ asset: AVAsset) {
         let settings: [String: Any] = [
             kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
             kCVPixelBufferMetalCompatibilityKey as String: true
@@ -58,7 +59,7 @@ final class MosaicPreviewController {
         let output = AVPlayerItemVideoOutput(pixelBufferAttributes: settings)
         self.videoOutput = output
 
-        let item = AVPlayerItem(url: url)
+        let item = AVPlayerItem(asset: asset)
         item.add(output)
 
         let player = AVPlayer(playerItem: item)

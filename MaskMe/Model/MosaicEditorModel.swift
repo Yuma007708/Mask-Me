@@ -85,7 +85,43 @@ public final class MosaicEditorModel: ObservableObject {
     private var videoAsset: AVAsset?
     /// Source video URL (for saving a resumable draft).
     public private(set) var sourceVideoURL: URL?
-    private(set) var detectionCache: [Double: [FaceLandmarkSet]] = [:]
+    /// この編集画面が扱う素材の識別子。クリップの有無とは独立に存在する。
+    ///
+    /// 素材の「同一性」は、その素材をどの範囲使うか（= クリップ）とは別の概念である。
+    /// 動画ロード前でもキャッシュ操作が成立するよう、init で確定させる。
+    let currentSourceID = UUID()
+    /// 素材基準の検出キャッシュ。クラス全体が @MainActor なので同期機構は不要。
+    let cacheStore = DetectionCacheStore(bucketFPS: 15.0)
+    /// タイムライン上のクリップ列。フェーズ1では常に1要素。
+    @Published private(set) var clips: [TimelineClip] = []
+    /// 素材IDから AVAsset への対応表。
+    private var sources: [UUID: AVAsset] = [:]
+    /// クリップ列から構築した合成結果。プレビューと書き出しで同じものを使い回す。
+    ///
+    /// **不変条件（フェーズ1限定）: `composition` は `videoAsset` と時間軸が一致する。**
+    /// フェーズ1のクリップ列は「素材全体を使う1本」しか無いため、
+    /// composition 上の時刻 t と videoAsset 上の時刻 t は同じフレームを指す。
+    /// この前提のもとで、資産を2つ並存させて用途で使い分けている:
+    ///
+    /// - `videoAsset`: サムネ生成とスクラブ時のフレーム抽出（`AVAssetImageGenerator`
+    ///   系の同期取り出し。Composition 経由より素材直読みのほうが速く確実）
+    /// - `composition`: 再生（`AVPlayerItem`）と書き出し（`AVAssetReader`）
+    ///
+    /// **フェーズ2でどこが壊れるか:**
+    /// トリム・並べ替え・複数素材のいずれかが入った瞬間に上の一致は崩れる。
+    /// 具体的には、composition 時刻 t に対応する素材と素材内時刻を解決する
+    /// 写像が必要になり、以下が全て誤フレームを返すようになる:
+    ///   - `seekTo(position:)` のフレーム抽出（`videoAsset` を composition 時刻で引く）
+    ///   - `redetect(at:)` の再検出フレーム
+    ///   - 検出キャッシュのキー（素材基準の時刻で持っているため、composition 時刻で
+    ///     引くと別クリップの結果を拾う）
+    ///   - `resolveRegion(_:referenceImage:)` / `findFaceInVideo(asset:rect:scanner:)`
+    ///     （矩形から動画全体を1fps走査する経路）。`videoAsset` を直接渡して素材全体を
+    ///     舐めるため、クリップ列が素材の一部しか使わなくなると「タイムラインに存在
+    ///     しない区間」で顔を拾い、composition 上に対応時刻の無い結果を返す
+    /// そのため、フェーズ2では `videoAsset` の直接参照を全て
+    /// `TimelineMapping.sourceLocation(at:)` 相当の写像経由に置き換える必要がある。
+    private var composition: AVMutableComposition?
     private(set) var previewController: MosaicPreviewController?
     private var cancellables: Set<AnyCancellable> = []
 
@@ -227,7 +263,7 @@ public final class MosaicEditorModel: ObservableObject {
             // にモザイクが乗る。t=0 に顔が無い事実はライブ検出が空エントリとして
             // 記録し、ホールドフォールバックはそれを尊重して描かない。
             if !faces.isEmpty {
-                detectionCache[liveBucket(seedTime)] = faces
+                cacheStore.store(faces, sourceID: currentSourceID, time: seedTime)
             }
             detectedFaces = faces.enumerated().map { idx, lm in
                 // 顔が1つだけならユーザーの意図として自動選択する（サムネを
@@ -242,17 +278,40 @@ public final class MosaicEditorModel: ObservableObject {
         manualRegions = []
 
         Task {
-            videoDuration = (try? await asset.load(.duration))?.seconds ?? 0
+            let seconds = (try? await asset.load(.duration))?.seconds ?? 0
+            videoDuration = seconds
+
+            // フェーズ1では素材全体を使う単一クリップ。
+            sources = [currentSourceID: asset]
+            clips = [TimelineClip(sourceID: currentSourceID,
+                                  sourceStart: 0, sourceEnd: seconds)]
+
+            // Composition の構築は renderer の有無と無関係に行う。
+            // renderer が nil でも書き出し（composition 依存）は成立させたいので、
+            // 「renderer が無い ＝ composition も無い」という巻き添えを作らない。
+            do {
+                let built = try await TimelineCompositionBuilder()
+                    .build(clips: clips, sources: sources)
+                composition = built
+                if let r = renderer {
+                    previewController = MosaicPreviewController(
+                        renderer: r, asset: built, model: self)
+                }
+            } catch {
+                errorMessage = "動画の読み込みに失敗しました"
+            }
+            // 成功・失敗どちらの経路でも必ず解除する。ここより前に解除すると
+            // 「読み込み完了表示なのに previewController がまだ nil」の窓ができ、
+            // 再生ボタンの表示と実挙動がずれる（togglePlayback 側でも二重に防ぐ）。
+            isLoading = false
         }
 
+        // 以下は Composition ではなく先頭フレーム（sourceTexture）に対する処理なので
+        // Composition 構築の完了を待たない。待たせるとプレビューの初期表示が
+        // 素材ロード遅延ぶん遅れて、静止画モードとの体感差になる。
         renderer?.reset()
         renderPreview()
         resetHistory()
-        isLoading = false
-
-        if let r = renderer {
-            previewController = MosaicPreviewController(renderer: r, url: url, model: self)
-        }
         // 事前スキャンは廃止。再生しながらプレビューのフレームに検出を相乗りさせて
         // detectionCache を埋める（ライブ検出）。詳細は「ライブ検出」セクション参照。
         resetLiveDetection()
@@ -386,11 +445,15 @@ public final class MosaicEditorModel: ObservableObject {
     // MARK: - 動画再生制御
 
     public func togglePlayback() {
+        // previewController が未構築（Composition 構築中）の間は状態を進めない。
+        // 進めると play() が no-op なのに isPlaying だけ true になり、
+        // 「UI は再生中・映像は停止」のずれが起きて2回押さないと復帰できない。
+        guard let controller = previewController else { return }
         if isPlaying {
-            previewController?.pause()
+            controller.pause()
             isPlaying = false
         } else {
-            previewController?.play()
+            controller.play()
             isPlaying = true
         }
     }
@@ -525,7 +588,7 @@ public final class MosaicEditorModel: ObservableObject {
     /// ホールドする。これは PREVIEW 専用で、エクスポート側は `VideoMosaicExporter` が
     /// 自前の bridge を持つため影響しない。
     func lookupFaces(at time: Double) -> [FaceLandmarkSet] {
-        let bridged = DetectionBridge(interpolates: true).faces(in: detectionCache, at: time)
+        let bridged = DetectionBridge(interpolates: true).faces(in: sourceScopedCache(), at: time)
         if !bridged.isEmpty { return bridged }
         // フロー橋渡し結果: 実検出の両側補間が成立しないバケットを追跡位置で埋める。
         // 実検出ホールド（nearest）より追従位置が新しいので先に引く。窓は±1バケット強
@@ -551,6 +614,17 @@ public final class MosaicEditorModel: ObservableObject {
     /// エクスポート（VideoMosaicExporter）はキャッシュヒットで自前検出をスキップする
     /// ので、フロー由来を detectionCache に混ぜると書き出し品質を汚染する。
     /// 参照するのはプレビューの `lookupFaces` のみ。動画切替（resetLiveDetection）で破棄。
+    ///
+    /// **⚠️ フェーズ2への申し送り: 時間基準が2つ並存している。**
+    /// このキャッシュのキーは **合成（composition）時刻**（プレビュー再生位置そのもの）
+    /// である一方、`cacheStore` のキーは **素材時刻** である。フェーズ1では
+    /// クリップが「素材全体を使う1本」しか無く両者が恒等変換で一致するため問題にならない。
+    /// フェーズ2でトリム・並べ替え・複数素材が入り、`lookupFaces` の入口で合成時刻を
+    /// 素材時刻へ写像するようにすると、`cacheStore` 側だけが正しくなり
+    /// **`liveFlowCache` だけが合成時刻キーのまま取り残されて誤フレームの顔を返す。**
+    /// 入口で一括変換して済ませず、このキャッシュの
+    /// 読み書き（`nearestFlowFaces` / `storeLiveDetection`）をどちらの基準に揃えるか
+    /// 明示的に決めること。
     private(set) var liveFlowCache: [Double: [FaceLandmarkSet]] = [:]
 
     /// `liveFlowCache` のうち `time` から±1バケット強（0.1s）以内で最も近い顔リスト。
@@ -567,13 +641,7 @@ public final class MosaicEditorModel: ObservableObject {
     /// `nearestCachedFaces` と異なり空エントリ（スキャン済み顔なし）を飛ばして、
     /// `window` 秒以内で最も近い「顔あり」バケットを返す。瞬きブリッジ専用。
     private func nearestNonEmptyCachedFaces(at time: Double, window: Double) -> [FaceLandmarkSet] {
-        var best: (dist: Double, faces: [FaceLandmarkSet])?
-        for (t, faces) in detectionCache where !faces.isEmpty {
-            let d = abs(t - time)
-            if d > window { continue }
-            if best == nil || d < best!.dist { best = (d, faces) }
-        }
-        return best?.faces ?? []
+        cacheStore.nearestFaces(sourceID: currentSourceID, time: time, window: window)
     }
 
     /// `detectionCache` のうち時刻 `time` から `window` 秒以内で最も近い
@@ -585,13 +653,26 @@ public final class MosaicEditorModel: ObservableObject {
     /// 動いている人の体の上にモザイクが乗る・位置がずれる誤描画の原因になる。
     /// window は「ライブ検出がまだ追いついていない直近区間」を埋めるためだけの短い値。
     private func nearestCachedFaces(at time: Double, window: Double) -> [FaceLandmarkSet] {
+        // 空エントリ（スキャン済み顔なし）も選択対象にするため、非空だけを見る
+        // `DetectionCacheStore.nearestFaces` は使えない。既存ロジックのまま走査する。
         var best: (dist: Double, faces: [FaceLandmarkSet])?
-        for (t, faces) in detectionCache {
-            let d = abs(t - time)
+        for (key, faces) in cacheStore.allEntries where key.sourceID == currentSourceID {
+            let d = abs(key.bucket - time)
             if d > window { continue }
             if best == nil || d < best!.dist { best = (d, faces) }
         }
         return best?.faces ?? []
+    }
+
+    /// 現在の素材のエントリを、`DetectionBridge` / `VideoMosaicExporter` が受け取る
+    /// 従来の `[素材内時刻: 顔]` 形式へ射影する。
+    ///
+    /// フェーズ1では素材が1つしかないため実質全件コピーになる。フェーズ2で
+    /// 複数素材になったときに初めてフィルタとして意味を持つ。
+    ///
+    /// 毎フレーム呼ばれるため射影の実体は `DetectionCacheStore` 側でメモ化してある。
+    private func sourceScopedCache() -> [Double: [FaceLandmarkSet]] {
+        cacheStore.projectedFaces(sourceID: currentSourceID)
     }
 
     /// 選択中の顔に対応する、指定時刻のランドマークセットを返す。
@@ -658,13 +739,13 @@ public final class MosaicEditorModel: ObservableObject {
     ///   無視するので追従率には影響せず、nearestCachedFaces のホールド抑止
     ///   （体への貼り付き防止）には効く。
     func storePreScanResult(_ faces: [FaceLandmarkSet], at rawTime: Double) {
-        detectionCache[liveBucket(rawTime)] = faces
+        cacheStore.store(faces, sourceID: currentSourceID, time: rawTime)
     }
 
     /// テスト専用: 「この時刻をスキャンしたが顔は無かった」状態を再現する。
     /// ライブ検出の空エントリ記録（storeLiveDetection）と同じ意味のキャッシュ状態を作る。
     func recordScannedEmptyForTesting(at timeSec: Double) {
-        detectionCache[liveBucket(timeSec)] = []
+        cacheStore.store([], sourceID: currentSourceID, time: timeSec)
     }
 
     /// 動画読み込み・顔追加時にライブ検出の集計状態をリセットする。
@@ -683,7 +764,7 @@ public final class MosaicEditorModel: ObservableObject {
     /// 既に同バケットを検出済み・検出中・顔タブOFF・写真モードのときはスキップ。
     func shouldDetectPreviewFrame(at timeSec: Double) -> Bool {
         guard mode == .video, faceMosaicOn, !liveDetectionInFlight else { return false }
-        return detectionCache[liveBucket(timeSec)] == nil
+        return !cacheStore.hasEntry(sourceID: currentSourceID, time: timeSec)
     }
 
     /// プレビューのデコード済みフレーム（検出用に縮小済み CGImage）を受け取り、
@@ -724,7 +805,7 @@ public final class MosaicEditorModel: ObservableObject {
             return
         }
         liveDetectionInFlight = false
-        detectionCache[t] = []
+        cacheStore.store([], sourceID: currentSourceID, time: t)
         liveFlowCache[t] = detection.faces
         #if DEBUG
         print("[MMLIVE] t=\(String(format: "%.2f", t)) flow faces=\(detection.faces.count)")
@@ -771,7 +852,7 @@ public final class MosaicEditorModel: ObservableObject {
         // 「体にモザイクが乗る／モザイクがずれる」誤描画になる。また、空を記録する
         // ことで shouldDetectPreviewFrame が同じ顔なしフレームを再スキャンし続ける
         // 無駄も止まる（DetectionBridge / nearestCachedFaces は空エントリを無視する）。
-        detectionCache[t] = faces
+        cacheStore.store(faces, sourceID: currentSourceID, time: t)
         // ポーズ中のシーク先で検出が終わったとき、次の displayLink を待たずに
         // モザイクを反映する（再生中は毎フレーム描画されるので実質無害）。
         previewController?.invalidate()
@@ -936,7 +1017,7 @@ public final class MosaicEditorModel: ObservableObject {
         let finalMatchCounts = matchCounts
         await MainActor.run { [weak self] in
             guard let self else { return }
-            print("[MMSCAN] DONE samples=\(finalSampleCount) cacheEntries=\(self.detectionCache.count) detectedFaces=\(self.detectedFaces.count)")
+            print("[MMSCAN] DONE samples=\(finalSampleCount) cacheEntries=\(self.cacheStore.count) detectedFaces=\(self.detectedFaces.count)")
             if finalSampleCount > 0 {
                 for i in 0..<min(finalMatchCounts.count, self.detectedFaces.count) {
                     self.detectedFaces[i].detectionRate =
@@ -1091,7 +1172,19 @@ public final class MosaicEditorModel: ObservableObject {
     }
 
     public func exportVideo() async {
-        guard let renderer, let videoAsset else { return }
+        // プレビューと同じ Composition を書き出す（素の素材ではなくクリップ編集の結果）。
+        //
+        // composition は `load(videoURL:)` 内の Task で2回の await（duration ロード＋
+        // loadTracks）を経てから入る。移行前は同期代入の `videoAsset` を見ていたため
+        // この窓が存在せず、押せば必ず書き出しが始まった。窓の中で無言 return すると
+        // 進捗もアラートも出ず「押しても何も起きない」になるので、必ず理由を出す。
+        // （`togglePlayback` の無言 no-op は「状態を進めない」ことが目的なので黙って
+        //   良いが、書き出しはユーザーが結果を待つ操作なので黙ってはいけない。）
+        guard let composition else {
+            errorMessage = "動画の読み込み中です。少し待ってからもう一度お試しください"
+            return
+        }
+        guard let renderer else { return }
         exportProgress = 0
         let exporter = VideoMosaicExporter(renderer: renderer, landmarker: landmarker)
         let selected = detectedFaces.filter(\.isSelected)
@@ -1101,10 +1194,10 @@ public final class MosaicEditorModel: ObservableObject {
         let targetsForExport = selected.count == detectedFaces.count ? [] : selected
         do {
             let url = try await exporter.export(
-                asset: videoAsset,
+                asset: composition,
                 selectedFaceTargets: targetsForExport,
                 manualRegions: manualRegions,
-                detectionCache: detectionCache,
+                detectionCache: sourceScopedCache(),
                 faceEnabled: faceMosaicOn,
                 backgroundEnabled: backgroundMosaicOn,
                 backgroundBlock: backgroundBlockSize,
