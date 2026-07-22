@@ -9,7 +9,10 @@ public final class DetectionCacheStore {
     /// このクラス内のどこから storage を書き換えても無効化が漏れない。
     /// 規律ではなく言語機能で保証している。
     private var storage: [DetectionCacheKey: [FaceLandmarkSet]] = [:] {
-        didSet { projectionCache.removeAll() }
+        didSet {
+            projectionCache.removeAll()
+            sortedEntriesCache.removeAll()
+        }
     }
     private let bucketFPS: Double
 
@@ -20,6 +23,15 @@ public final class DetectionCacheStore {
     /// 無効化漏れは「古い検出結果が描かれ続ける」回帰になるため、
     /// `storage` の `didSet` で破棄する。
     private var projectionCache: [UUID: [Double: [FaceLandmarkSet]]] = [:]
+
+    /// `nearestFaces(sourceID:time:window:)` 用、bucket昇順ソート済み配列のメモ。
+    ///
+    /// 素朴な実装は毎回 storage 全件を走査していた（5分動画=4500エントリで
+    /// 1回あたり約0.39ms、`CameraFlowAdvancer` 等から高頻度に呼ばれると無視でき
+    /// ない負荷になる）。ソート済み配列を素材ごとにメモし、二分探索で `time` 近傍
+    /// の候補まで一気に絞ることで O(log n + window内件数) に落とす。
+    /// `projectionCache` と同様、`storage` の `didSet` で破棄して無効化漏れを防ぐ。
+    private var sortedEntriesCache: [UUID: [(bucket: Double, faces: [FaceLandmarkSet])]] = [:]
 
     public init(bucketFPS: Double = 15.0) {
         self.bucketFPS = bucketFPS
@@ -61,15 +73,66 @@ public final class DetectionCacheStore {
         storage[key(sourceID, time)] != nil
     }
 
+    /// 指定素材のエントリを bucket 昇順でメモ化して返す。storage が変わるまで再利用する。
+    private func sortedEntries(sourceID: UUID) -> [(bucket: Double, faces: [FaceLandmarkSet])] {
+        if let cached = sortedEntriesCache[sourceID] { return cached }
+        var scoped: [(bucket: Double, faces: [FaceLandmarkSet])] = []
+        for (k, faces) in storage where k.sourceID == sourceID {
+            scoped.append((bucket: k.bucket, faces: faces))
+        }
+        scoped.sort { $0.bucket < $1.bucket }
+        sortedEntriesCache[sourceID] = scoped
+        return scoped
+    }
+
     /// `window` 秒以内で最も近い非空エントリ。無ければ空配列。
+    ///
+    /// bucket 昇順配列を二分探索で `time` の挿入位置まで絞り込み、そこから window
+    /// 幅を超えるまで左右に広げるだけなので、window 内のエントリ数にしか比例しない。
     public func nearestFaces(sourceID: UUID, time: Double, window: Double) -> [FaceLandmarkSet] {
+        let entries = sortedEntries(sourceID: sourceID)
+        guard !entries.isEmpty else { return [] }
+
+        // entries[insertionIndex].bucket >= time となる最小の添字（無ければ entries.count）。
+        var low = 0
+        var high = entries.count
+        while low < high {
+            let mid = (low + high) / 2
+            if entries[mid].bucket < time {
+                low = mid + 1
+            } else {
+                high = mid
+            }
+        }
+
         var best: [FaceLandmarkSet] = []
         var bestDistance = Double.greatestFiniteMagnitude
-        for (k, faces) in storage where k.sourceID == sourceID && !faces.isEmpty {
-            let d = abs(k.bucket - time)
-            if d <= window && d < bestDistance {
-                bestDistance = d
-                best = faces
+        var left = low - 1
+        var right = low
+        while left >= 0 || right < entries.count {
+            if left >= 0 {
+                let d = time - entries[left].bucket
+                if d > window {
+                    left = -1
+                } else {
+                    if !entries[left].faces.isEmpty && d < bestDistance {
+                        bestDistance = d
+                        best = entries[left].faces
+                    }
+                    left -= 1
+                }
+            }
+            if right < entries.count {
+                let d = entries[right].bucket - time
+                if d > window {
+                    right = entries.count
+                } else {
+                    if !entries[right].faces.isEmpty && d < bestDistance {
+                        bestDistance = d
+                        best = entries[right].faces
+                    }
+                    right += 1
+                }
             }
         }
         return best

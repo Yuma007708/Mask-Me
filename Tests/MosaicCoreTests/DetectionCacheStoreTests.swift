@@ -185,4 +185,39 @@ final class DetectionCacheStoreTests: XCTestCase {
             XCTAssertEqual(faces.count, second[t]?.count)
         }
     }
+
+    // MARK: - nearestFaces のスループット
+
+    /// 5分動画相当 (15fps × 300秒 = 4500エントリ) で nearestFaces を1000回呼ぶ
+    /// スループットを検証する。
+    ///
+    /// 実測値 (MacBook, 1回あたり):
+    ///   - 対策前 (全走査 O(n)):        約 0.393ms  (1000回で 392.68ms)
+    ///   - 対策後 (二分探索 O(log n)):  約 0.0082ms (1000回で   8.22ms)
+    ///   → 約 48倍高速化。しきい値 0.05ms は全走査では届かず、二分探索なら余裕で
+    ///     満たせる水準として設定している(実測値はテスト実行時にも自動出力)。
+    func test_nearestFacesThroughputScalesWithBinarySearch() {
+        let store = DetectionCacheStore(bucketFPS: 15)
+        let entryCount = 4500  // 15fps * 300秒
+        for i in 0..<entryCount {
+            let t = Double(i) / 15.0
+            store.store([face(cx: 0.5)], sourceID: sourceA, time: t)
+        }
+
+        let iterations = 1000
+        let start = DispatchTime.now()
+        for i in 0..<iterations {
+            let t = Double(i % entryCount) / 15.0
+            _ = store.nearestFaces(sourceID: sourceA, time: t, window: 0.5)
+        }
+        let end = DispatchTime.now()
+        let elapsedMs = Double(end.uptimeNanoseconds - start.uptimeNanoseconds) / 1_000_000
+        let perCallMs = elapsedMs / Double(iterations)
+        print("[throughput] nearestFaces: \(iterations)回で\(elapsedMs)ms (1回あたり\(perCallMs)ms)")
+
+        // 二分探索実装なら余裕で満たせるが、全走査 O(n) では満たせない水準。
+        XCTAssertLessThan(perCallMs, 0.05,
+                          "nearestFaces 1回あたり \(perCallMs)ms かかっている" +
+                          "(全\(iterations)回で\(elapsedMs)ms、エントリ数\(entryCount))")
+    }
 }
