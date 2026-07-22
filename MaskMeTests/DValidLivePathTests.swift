@@ -7,12 +7,22 @@ import MosaicCore
 
 #if canImport(MediaPipeTasksVision)
 
-/// ライブプレビュー経路の検出精度計測。
+/// IMAGE モード検出（timestamp 無しの `allLandmarks(in:)`）単体の検出精度計測。
 ///
-/// 実機/シミュレータの再生中モザイクは `MosaicPreviewController.detectionCGImage`
-/// （`MosaicEditorModel.liveDetectionTargetWidth` px 幅縮小）+ IMAGE モード
-/// スキャナーという「本スキャンより軽い経路」で検出される。本スキャン（フル解像度 VIDEO モード + enhance/ROI/flow）を測る
-/// DValidVideoTests とは別に、この経路単体の実力を同じ検証動画で計測する。
+/// **注意（実態に即した訂正）**: 本テストが呼ぶのは `scanner.allLandmarks(in: UIImage)`
+/// （IMAGE モード、timestamp 無し）であり、アプリの実際のライブ検出経路
+/// `MediaPipeFaceLandmarkerAdapter.liveLandmarks(in:atMediaSeconds:)`（Kalman予測 ROI
+/// 再検出 + オプティカルフロー橋渡しのテンポラル追跡込み）とは別物である。「ライブプレビュー
+/// 経路」を謳っているが、実際は `MosaicPreviewController.detectionCGImage`
+/// （`MosaicEditorModel.liveDetectionTargetWidth` px 幅縮小）と同じ縮小規則を適用した画像に
+/// 素の IMAGE モード検出をかけるだけの簡易計測であり、テンポラル追跡は一切含まない。
+/// 本スキャン（フル解像度 VIDEO モード + enhance/ROI/flow）を測る DValidVideoTests とは別に、
+/// この単純化した経路単体の実力を同じ検証動画で計測する。
+///
+/// 「体・首・肩への誤モザイク対策 第一弾」（`isSuspectBodyRegion` / `verifySuspiciousFaces`、
+/// コミット `a3556db`）は VIDEO モードとアプリの `liveLandmarks` 経路にのみ配線されており、
+/// この `allLandmarks(in:)` 経路には一切効かない。したがって本対策の効果はこのテストの
+/// `bodyFP` 数値には現れない（測っている経路が異なるため）。
 ///
 /// 出力: `[DVALLIVE] {json}` を stderr に 1 動画 1 行。
 ///   - liveRate: サンプルフレームのうちライブ検出が顔を返した割合
@@ -62,7 +72,9 @@ final class DValidLivePathTests: XCTestCase {
         gen.requestedTimeToleranceBefore = CMTime(seconds: 1.0 / Self.bucketFPS, preferredTimescale: 600)
         gen.requestedTimeToleranceAfter = CMTime(seconds: 1.0 / Self.bucketFPS, preferredTimescale: 600)
 
-        // アプリのライブ検出と同一: IMAGE モード + アプリ既定 DetectionSettings
+        // 素の IMAGE モード検出（timestamp 無し）+ アプリ既定 DetectionSettings。
+        // アプリの実際のライブ経路 `liveLandmarks(in:atMediaSeconds:)`
+        // （Kalman/ROI/オプティカルフローのテンポラル追跡込み）とは異なる簡易計測。
         let scanner = makeFaceLandmarker(forVideo: false, settings: DetectionSettings())
 
         var metrics = LiveMetrics()
