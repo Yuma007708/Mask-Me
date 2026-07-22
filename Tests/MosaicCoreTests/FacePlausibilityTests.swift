@@ -153,4 +153,33 @@ final class FacePlausibilityTests: XCTestCase {
         )
         XCTAssertTrue(collapsed.isBodyLikeShape(in: CGSize(width: 100, height: 100)))
     }
+
+    /// `stretchedFace` を丸ごと dy だけ縦に平行移動する（boundingBox.midY を動かすため）。
+    private func translated(_ face: FaceLandmarkSet, dy: Float) -> FaceLandmarkSet {
+        FaceLandmarkSet(
+            points: face.points.map { FaceLandmark(x: $0.x, y: $0.y + dy) },
+            confidence: face.confidence
+        )
+    }
+
+    /// 画面下半分（midY > suspectMidY）は、形状が正方形（実顔相当）でも疑わしいと判定する
+    /// （従来の位置だけによる疑わしさ判定を維持）。
+    func testSuspectBodyRegion_belowThreshold_isSuspectRegardlessOfShape() {
+        let square = stretchedFace(stretchY: 1.0) // boundingBox.midY == 0.5
+        XCTAssertTrue(square.isSuspectBodyRegion(in: CGSize(width: 1000, height: 1000), suspectMidY: 0.4))
+    }
+
+    /// 画面上半分（midY <= suspectMidY）かつ正方形形状（実顔相当）は疑わしくない。
+    func testSuspectBodyRegion_aboveThreshold_squareShapeIsNotSuspect() {
+        let square = translated(stretchedFace(stretchY: 1.0), dy: -0.3) // midY == 0.2
+        XCTAssertFalse(square.isSuspectBodyRegion(in: CGSize(width: 1000, height: 1000), suspectMidY: 0.4))
+    }
+
+    /// 画面上半分でも、縦長の体誤フィット形状（h/w > maxPixelAspect）なら疑わしいと判定する。
+    /// これが今回の追加ロジックの核心: 従来は位置のみで判定し、画面上部の体誤フィットを
+    /// 検証対象から漏らしていた。
+    func testSuspectBodyRegion_aboveThreshold_tallShapeIsSuspect() {
+        let tall = translated(stretchedFace(stretchY: 1.6), dy: -0.3) // midY == 0.2, h/w == 1.6
+        XCTAssertTrue(tall.isSuspectBodyRegion(in: CGSize(width: 1000, height: 1000), suspectMidY: 0.4))
+    }
 }

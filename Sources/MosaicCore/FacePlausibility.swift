@@ -53,6 +53,15 @@ extension FaceLandmarkSet {
         return aspect > Plausibility.maxPixelAspect
     }
 
+    /// 体誤フィット検証（タイト crop 再検出）に回すべき「疑わしい候補」かどうか。
+    /// 画面下半分（`midY > suspectMidY`）は従来どおり位置で疑う。
+    /// それに加えて、画面上半分でも縦長の体誤フィット形状（`isBodyLikeShape`）なら疑わしいと
+    /// 判定する。位置だけで判定すると、体・首・肩への誤フィットが画面上部で起きたときに
+    /// 検証パスをすり抜けてしまうため。
+    public func isSuspectBodyRegion(in imageSize: CGSize, suspectMidY: CGFloat) -> Bool {
+        boundingBox.midY > suspectMidY || isBodyLikeShape(in: imageSize)
+    }
+
     /// `true` when the landmarks form a geometrically plausible face.
     /// Uses the static `Plausibility` defaults — call `isPlausibleFace(minSpan:eyeRatioRange:)`
     /// to override them with user-defined settings.

@@ -624,13 +624,17 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
 
     /// タイムスタンプが巻き戻った（新ストリーム/リスタート）か 1 秒を超えて飛んだ
     /// （シーク）場合は、前フレームの顔位置がもう意味を持たないので track を捨てる。
-    /// 画面下寄りの採用候補に対する体誤フィット検証パス。s5 実測で誤モザイク（lowCy）の
-    /// 大半が画面下半分（胸・股への顔メッシュフィット)に集中し、mp/enhance 経路にも
-    /// baseline から存在するため、最終採用の直前に「疑わしい位置」の候補だけを再確認する:
-    /// bbox の 1.3 倍 crop を IMG モードで再検出し、eyeRatio ≥ 0.45（lowConf/タイルと同じ
-    /// 厳格値）+ 位置一致（IoU>0.3）を満たさなければ棄却。体フィットは文脈（video モードの
+    /// 採用候補に対する体誤フィット検証パス。s5 実測で誤モザイク（lowCy）の大半が
+    /// 画面下半分（胸・股への顔メッシュフィット)に集中し、mp/enhance 経路にも baseline
+    /// から存在するため、最終採用の直前に「疑わしい候補」だけを再確認する。「疑わしい」は
+    /// 位置（画面下半分）**または**縦長の体誤フィット形状（`isSuspectBodyRegion`）で判定する。
+    /// 位置だけで判定すると、体・首・肩への誤フィットが画面上部で起きたときに検証を
+    /// すり抜けてしまうため（首・肩は画面上半分にも及ぶ）。
+    /// 検証本体: bbox の 1.3 倍 crop を IMG モードで再検出し、eyeRatio ≥ 0.45（lowConf/タイルと
+    /// 同じ厳格値）+ 位置一致（IoU>0.3）を満たさなければ棄却。体フィットは文脈（video モードの
     /// 追跡状態）が切れたタイト crop では再現しにくく、実顔は再検出できるという非対称を使う。
-    /// 上半分の候補には一切触れないので、正位置の検出率への影響はない。
+    /// 縦長でない正方形〜横長の候補は、上半分では従来どおり検証をスキップする
+    /// （正位置・正形状の検出率への影響を最小にするため）。
     private let verifySuspectCy: CGFloat = 0.55
     private let verifyCropExpansion: CGFloat = 1.3
 
@@ -638,7 +642,7 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
         guard let cropLandmarker = landmarkerForCrop else { return faces }
         return faces.filter { face in
             let box = face.boundingBox
-            guard box.midY > verifySuspectCy else { return true }
+            guard face.isSuspectBodyRegion(in: image.size, suspectMidY: verifySuspectCy) else { return true }
             guard face.isPlausibleFace(minSpan: plausibilityMinSpan, eyeRatioRange: 0.45...1.0) else {
                 return false
             }
