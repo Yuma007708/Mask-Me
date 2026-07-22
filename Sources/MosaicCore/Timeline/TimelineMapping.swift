@@ -59,6 +59,8 @@ public struct TimelineMapping: Sendable {
 
     /// 素材内の時刻 → 合成時刻。
     /// そのクリップの使用範囲外の素材時刻を渡した場合は nil。
+    /// `sourceLocation` と対称に、クリップの使用範囲は半開区間 [sourceStart, sourceStart + duration)
+    /// として扱う（終端ちょうどの素材時刻は次のクリップ側に属するため nil）。
     public func compositionTime(clipID: UUID, sourceTime: Double) -> Double? {
         guard let entry = entries.first(where: { $0.clip.id == clipID }) else { return nil }
         let offset = sourceTime - entry.clip.sourceStart

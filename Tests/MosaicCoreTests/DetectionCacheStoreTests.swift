@@ -193,9 +193,12 @@ final class DetectionCacheStoreTests: XCTestCase {
     ///
     /// 実測値 (MacBook, 1回あたり):
     ///   - 対策前 (全走査 O(n)):        約 0.393ms  (1000回で 392.68ms)
-    ///   - 対策後 (二分探索 O(log n)):  約 0.0082ms (1000回で   8.22ms)
-    ///   → 約 48倍高速化。しきい値 0.05ms は全走査では届かず、二分探索なら余裕で
-    ///     満たせる水準として設定している(実測値はテスト実行時にも自動出力)。
+    ///   - 対策後 (二分探索 O(log n)):  約 0.0082〜0.05ms 程度(マシン負荷で変動、1000回で 8〜50ms)
+    ///   → 全走査に戻るリグレッション(約0.39ms/回)は確実に検出しつつ、マシン負荷による
+    ///     瞬間的な揺れ(GCやOS側の割り込みなど)を吸収するため、単発の絶対時間計測では
+    ///     なく複数試行のうち最良値(best-of-N)を採用し、しきい値にも余裕を持たせている。
+    ///     絶対時間の1回計測は他プロセスの割り込みで簡単に閾値超過する flaky テストに
+    ///     なるため、この2点をセットで行うこと。
     func test_nearestFacesThroughputScalesWithBinarySearch() {
         let store = DetectionCacheStore(bucketFPS: 15)
         let entryCount = 4500  // 15fps * 300秒
@@ -205,19 +208,25 @@ final class DetectionCacheStoreTests: XCTestCase {
         }
 
         let iterations = 1000
-        let start = DispatchTime.now()
-        for i in 0..<iterations {
-            let t = Double(i % entryCount) / 15.0
-            _ = store.nearestFaces(sourceID: sourceA, time: t, window: 0.5)
+        let trials = 5
+        var bestPerCallMs = Double.greatestFiniteMagnitude
+        for _ in 0..<trials {
+            let start = DispatchTime.now()
+            for i in 0..<iterations {
+                let t = Double(i % entryCount) / 15.0
+                _ = store.nearestFaces(sourceID: sourceA, time: t, window: 0.5)
+            }
+            let end = DispatchTime.now()
+            let elapsedMs = Double(end.uptimeNanoseconds - start.uptimeNanoseconds) / 1_000_000
+            let perCallMs = elapsedMs / Double(iterations)
+            bestPerCallMs = min(bestPerCallMs, perCallMs)
         }
-        let end = DispatchTime.now()
-        let elapsedMs = Double(end.uptimeNanoseconds - start.uptimeNanoseconds) / 1_000_000
-        let perCallMs = elapsedMs / Double(iterations)
-        print("[throughput] nearestFaces: \(iterations)回で\(elapsedMs)ms (1回あたり\(perCallMs)ms)")
+        print("[throughput] nearestFaces: \(trials)試行中の最良値、1回あたり\(bestPerCallMs)ms")
 
-        // 二分探索実装なら余裕で満たせるが、全走査 O(n) では満たせない水準。
-        XCTAssertLessThan(perCallMs, 0.05,
-                          "nearestFaces 1回あたり \(perCallMs)ms かかっている" +
-                          "(全\(iterations)回で\(elapsedMs)ms、エントリ数\(entryCount))")
+        // 二分探索実装なら余裕で満たせるが、全走査 O(n) (約0.39ms/回) では満たせない水準。
+        // マシン負荷による揺れを吸収しつつ、O(n)への退行は確実に検出できるマージンを取る。
+        XCTAssertLessThan(bestPerCallMs, 0.2,
+                          "nearestFaces 1回あたり(best-of-\(trials)) \(bestPerCallMs)ms かかっている" +
+                          "(1試行\(iterations)回、エントリ数\(entryCount))")
     }
 }
