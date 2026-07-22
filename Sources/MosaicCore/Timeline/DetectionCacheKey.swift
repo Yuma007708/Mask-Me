@@ -11,11 +11,6 @@ public struct DetectionCacheKey: Hashable, Sendable {
     /// 素材内での時刻を bucketFPS で丸めた値。
     public let bucket: Double
 
-    public init(sourceID: UUID, bucket: Double) {
-        self.sourceID = sourceID
-        self.bucket = bucket
-    }
-
     /// 素材内の生の時刻からキーを作る。時刻はバケットに丸められる。
     ///
     /// 丸めを init に閉じ込めることで、呼び出し側が丸め忘れて
