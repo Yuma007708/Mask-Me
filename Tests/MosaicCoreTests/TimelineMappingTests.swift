@@ -91,4 +91,30 @@ final class TimelineMappingTests: XCTestCase {
         // 合成時刻3.0 はクリップ2の先頭から1秒 = 素材時刻3.0
         XCTAssertEqual(mapping.sourceLocation(at: 3.0)?.time ?? 0, 3.0, accuracy: 1e-9)
     }
+
+    /// `sourceLocation(at:)` は境界(end)を次のクリップに属させる半開区間だが、
+    /// `compositionTime` がその境界(sourceEnd ちょうど)を受け入れてしまうと、
+    /// 素材時刻→合成時刻→素材時刻の往復が境界で非対称になる。
+    /// クリップAの sourceEnd(=3.0)は「クリップAの範囲外」として nil を返すべき。
+    func test_compositionTimeRejectsExactSourceEnd() {
+        let data = makeMapping()
+        XCTAssertNil(data.mapping.compositionTime(clipID: data.clipA.id, sourceTime: 3.0))
+    }
+
+    /// sourceLocation(at:) が返す複数の合成時刻について、
+    /// compositionTime(clipID:sourceTime:) に通すと元の合成時刻に戻ることを検証する。
+    /// 境界(3.0)を含めても対称性が崩れないことがポイント。
+    func test_roundTripIsSymmetric() {
+        let data = makeMapping()
+        let compositionTimes: [Double] = [0.0, 1.5, 2.999, 3.0, 4.0, 6.999]
+        for compositionTime in compositionTimes {
+            guard let loc = data.mapping.sourceLocation(at: compositionTime) else {
+                XCTFail("expected a location for \(compositionTime)")
+                continue
+            }
+            let roundTripped = data.mapping.compositionTime(clipID: loc.clipID, sourceTime: loc.time)
+            XCTAssertEqual(roundTripped ?? -1, compositionTime, accuracy: 1e-9,
+                           "round trip failed for compositionTime \(compositionTime)")
+        }
+    }
 }

@@ -62,7 +62,7 @@ public struct TimelineMapping: Sendable {
     public func compositionTime(clipID: UUID, sourceTime: Double) -> Double? {
         guard let entry = entries.first(where: { $0.clip.id == clipID }) else { return nil }
         let offset = sourceTime - entry.clip.sourceStart
-        guard offset >= 0, offset <= entry.clip.duration else { return nil }
+        guard offset >= 0, offset < entry.clip.duration else { return nil }
         return entry.start + offset
     }
 
