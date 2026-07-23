@@ -20,6 +20,8 @@ struct CompositeBBoxDetector: FaceBBoxDetecting {
         var accumulated: [CGRect] = []
         for detector in detectors {
             for box in detector.detectFaceBoundingBoxes(in: image) {
+                // フェーズ2でこのファイルに本格的に手を入れる際に解消する予定の構造的負債
+                // swiftlint:disable:next for_where
                 if !accumulated.contains(where: { iou($0, box) > iouThreshold }) {
                     accumulated.append(box)
                 }

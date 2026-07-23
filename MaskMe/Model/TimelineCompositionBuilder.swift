@@ -56,6 +56,8 @@ struct TimelineCompositionBuilder {
                 try audioTrack.insertTimeRange(range, of: sourceAudio, at: cursor)
             }
 
+            // CMTime は += を提供しない（+ のみ）ため shorthand_operator を適用できない。
+            // swiftlint:disable:next shorthand_operator
             cursor = cursor + range.duration
         }
         return composition

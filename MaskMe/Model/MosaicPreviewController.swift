@@ -151,6 +151,8 @@ final class MosaicPreviewController {
 
     // MARK: - レンダリング
 
+    // フェーズ2でこのファイルに本格的に手を入れる際に解消する予定の構造的負債
+    // swiftlint:disable:next cyclomatic_complexity
     private func renderCurrentFrame() {
         guard let player,
               let videoOutput,

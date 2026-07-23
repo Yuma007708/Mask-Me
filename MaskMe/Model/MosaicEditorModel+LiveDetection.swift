@@ -227,6 +227,8 @@ extension MosaicEditorModel {
         return best?.faces ?? []
     }
 
+    // フェーズ2でこのファイルに本格的に手を入れる際に解消する予定の構造的負債
+    // swiftlint:disable:next cyclomatic_complexity function_body_length
     nonisolated private func runPreScan(
         asset: AVAsset,
         scanner: FaceLandmarking,
@@ -278,14 +280,16 @@ extension MosaicEditorModel {
                     cg = try generator.copyCGImage(at: cmTime, actualTime: nil)
                 } catch {
                     let ns = error as NSError
-                    print("[MMSCAN] t=\(String(format: "%.2f", t)) copyCGImage=NIL domain=\(ns.domain) code=\(ns.code) desc=\(ns.localizedDescription)")
+                    print("[MMSCAN] t=\(String(format: "%.2f", t)) copyCGImage=NIL domain=\(ns.domain) " +
+                          "code=\(ns.code) desc=\(ns.localizedDescription)")
                     return nil
                 }
                 let img = UIImage(cgImage: cg)
                 // video モードで temporal tracking を活用しながら検出
                 var faces = scanner.allLandmarks(in: img, timestampMs: Int(t * 1000))
                 if sampleCount < 10 || sampleCount % 15 == 0 {
-                    print("[MMSCAN] t=\(String(format: "%.2f", t)) sample=\(sampleCount) faces=\(faces.count) imgPx=\(cg.width)x\(cg.height)")
+                    print("[MMSCAN] t=\(String(format: "%.2f", t)) sample=\(sampleCount) faces=\(faces.count) " +
+                          "imgPx=\(cg.width)x\(cg.height)")
                 }
 
                 // ManualRegion の矩形クロップでも検出を試みる（小さい顔や検出しにくい顔への対応）
@@ -347,7 +351,8 @@ extension MosaicEditorModel {
         let finalMatchCounts = matchCounts
         await MainActor.run { [weak self] in
             guard let self else { return }
-            print("[MMSCAN] DONE samples=\(finalSampleCount) cacheEntries=\(self.cacheStore.count) detectedFaces=\(self.detectedFaces.count)")
+            print("[MMSCAN] DONE samples=\(finalSampleCount) cacheEntries=\(self.cacheStore.count) " +
+                  "detectedFaces=\(self.detectedFaces.count)")
             if finalSampleCount > 0 {
                 for i in 0..<min(finalMatchCounts.count, self.detectedFaces.count) {
                     self.detectedFaces[i].detectionRate =

@@ -115,8 +115,10 @@ final class DraftStore: ObservableObject {
 
     // MARK: - Save
 
+    // フェーズ2でこのファイルに本格的に手を入れる際に解消する予定の構造的負債
     /// Saves / updates a video draft (copying the source video for durability).
     @discardableResult
+    // swiftlint:disable:next function_parameter_count
     func saveVideoDraft(
         existing: UUID?,
         sourceURL: URL,
@@ -149,6 +151,8 @@ final class DraftStore: ObservableObject {
         return draft
     }
 
+    // フェーズ2でこのファイルに本格的に手を入れる際に解消する予定の構造的負債
+    // swiftlint:disable function_parameter_count
     /// Saves / replaces the photo draft (writes the source image as JPEG).
     func savePhotoDraft(
         existing: UUID?,
@@ -177,6 +181,7 @@ final class DraftStore: ObservableObject {
         )
         savePhotoIndex()
     }
+    // swiftlint:enable function_parameter_count
 
     // MARK: - Delete
 

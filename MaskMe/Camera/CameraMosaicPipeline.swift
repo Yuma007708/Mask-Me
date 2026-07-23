@@ -7,6 +7,9 @@ import MosaicCore
 #if canImport(Metal)
 import Metal
 
+// フェーズ2でこのファイルに本格的に手を入れる際に解消する予定の構造的負債
+// swiftlint:disable type_body_length
+
 /// リアルタイム撮影のフレーム処理層。カメラの生フレームを受け取り、
 /// ライブ顔検出（`liveLandmarks`: ROI 再検出 + フロー橋渡し）→ オプトアウト選択
 /// フィルタ → Metal モザイク描画、をフレームごとに行い、プレビュー画像と
@@ -143,6 +146,8 @@ final class CameraMosaicPipeline {
 
     // MARK: - フレーム処理（映像キャプチャキュー）
 
+    // フェーズ2でこのファイルに本格的に手を入れる際に解消する予定の構造的負債
+    // swiftlint:disable:next cyclomatic_complexity
     func process(sampleBuffer: CMSampleBuffer) {
         guard let rawBuffer = CMSampleBufferGetImageBuffer(sampleBuffer),
               let cache = textureCache else { return }
@@ -347,6 +352,8 @@ final class CameraMosaicPipeline {
 
     // MARK: - レンダリング
 
+    // フェーズ2でこのファイルに本格的に手を入れる際に解消する予定の構造的負債
+    // swiftlint:disable function_parameter_count
     /// 録画中: フル解像度でレコーダーのプールへ焼き込み、同じバッファから
     /// プレビュー（と要求があれば写真）を作る。
     private func renderRecordingFrame(
@@ -376,6 +383,7 @@ final class CameraMosaicPipeline {
             photoCompletion(image)
         }
     }
+    // swiftlint:enable function_parameter_count
 
     /// 写真撮影: フル解像度で新規テクスチャへ描画して UIImage 化する。
     private func renderPhotoFrame(
@@ -473,4 +481,5 @@ final class CameraMosaicPipeline {
         return body()
     }
 }
+// swiftlint:enable type_body_length
 #endif

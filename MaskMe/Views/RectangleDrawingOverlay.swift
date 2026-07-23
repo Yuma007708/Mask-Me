@@ -65,7 +65,7 @@ struct RectangleDrawingOverlay: View {
                                 )
                                 dragging = CGRect(origin: origin, size: size)
                             }
-                            .onEnded { value in
+                            .onEnded { _ in
                                 guard let rect = dragging, rect.width > 10, rect.height > 10 else {
                                     dragging = nil
                                     return

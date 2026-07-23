@@ -7,6 +7,9 @@ import MosaicCore
 #if canImport(Metal)
 import Metal
 
+// フェーズ2でこのファイルに本格的に手を入れる際に解消する予定の構造的負債
+// swiftlint:disable file_length type_body_length
+
 /// 編集セッション全体を管理するモデル。UI は Published プロパティを購読する。
 @MainActor
 public final class MosaicEditorModel: ObservableObject {
@@ -958,6 +961,7 @@ public final class MosaicEditorModel: ObservableObject {
         return UIImage(cgImage: out, scale: 1, orientation: image.imageOrientation)
     }
 }
+// swiftlint:enable type_body_length
 
 private extension UIImage {
     func normalizedUp() -> UIImage {
@@ -969,3 +973,4 @@ private extension UIImage {
     }
 }
 #endif
+// swiftlint:enable file_length

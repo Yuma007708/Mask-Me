@@ -47,6 +47,9 @@ public enum ExportSpeed: Sendable, CaseIterable {
 #if canImport(Metal)
 import Metal
 
+// フェーズ2でこのファイルに本格的に手を入れる際に解消する予定の構造的負債
+// swiftlint:disable file_length type_body_length
+
 /// 動画をフレームごとに処理してモザイクを適用し、新しい .mp4 ファイルを生成する。
 /// 元動画の音声トラックはそのまま（再エンコードせず）保持する。
 public final class VideoMosaicExporter: @unchecked Sendable {
@@ -117,6 +120,8 @@ public final class VideoMosaicExporter: @unchecked Sendable {
         )
     }
 
+    // フェーズ2でこのファイルに本格的に手を入れる際に解消する予定の構造的負債
+    // swiftlint:disable cyclomatic_complexity function_body_length
     /// 動画をエクスポートして一時 URL を返す。
     /// - Parameters:
     ///   - selectedFaceTargets: モザイク対象として選択された顔。空の場合は全顔に適用。
@@ -242,9 +247,11 @@ public final class VideoMosaicExporter: @unchecked Sendable {
             progress: progress
         )
     }
+    // swiftlint:enable cyclomatic_complexity function_body_length
 
     // MARK: - Pump（ビジーウェイトなしの読み書き）
 
+    // フェーズ2でこのファイルに本格的に手を入れる際に解消する予定の構造的負債
     // swiftlint:disable:next function_parameter_count function_body_length
     private func pump(
         reader: AVAssetReader,
@@ -363,6 +370,7 @@ public final class VideoMosaicExporter: @unchecked Sendable {
         }
     }
 
+    // フェーズ2でこのファイルに本格的に手を入れる際に解消する予定の構造的負債
     // swiftlint:disable:next function_parameter_count
     private func processVideoSample(
         _ sample: CMSampleBuffer,
@@ -463,6 +471,8 @@ public final class VideoMosaicExporter: @unchecked Sendable {
         progress(min(progressSec / totalSeconds, 1.0))
     }
 
+    // フェーズ2でこのファイルに本格的に手を入れる際に解消する予定の構造的負債
+    // swiftlint:disable:next function_parameter_count
     private func mosaicFrame(
         sourceBuffer: CVPixelBuffer,
         pts: CMTime,
@@ -662,4 +672,6 @@ public final class VideoMosaicExporter: @unchecked Sendable {
         return copyStatus == noErr ? out : nil
     }
 }
+// swiftlint:enable type_body_length
 #endif
+// swiftlint:enable file_length

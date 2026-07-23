@@ -33,6 +33,9 @@ public func makeFaceLandmarker(
 
 #if canImport(MediaPipeTasksVision)
 import MediaPipeTasksVision
+
+// フェーズ2でこのファイルに本格的に手を入れる際に解消する予定の構造的負債
+// swiftlint:disable file_length
 import CoreImage.CIFilterBuiltins
 
 /// フレームの顔をどの検出経路が最初に拾ったか。精度計測（DValid）で
@@ -59,6 +62,8 @@ public struct FaceDetectionSourceStats {
     public var flowFrames = 0
 }
 
+// フェーズ2でこのファイルに本格的に手を入れる際に解消する予定の構造的負債
+// swiftlint:disable type_body_length
 /// Thin wrapper around MediaPipe's `FaceLandmarker` that produces the
 /// framework-agnostic `FaceLandmarkSet` consumed by `MosaicRenderer`.
 public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
@@ -254,8 +259,8 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
         // Apple Vision は削除済み: 実機で torso・首・肩を顔 bbox として拾い体モザイクの
         // 原因になった上、Simulator では 0 検出でシミュレータ検証が不可能だった。
         var detectors: [FaceBBoxDetecting] = []
-        if useFaceDetector   { detectors.append(MediaPipeFaceBBoxDetector()) }
-        if useYunet          { detectors.append(YuNetFaceDetector()) }
+        if useFaceDetector { detectors.append(MediaPipeFaceBBoxDetector()) }
+        if useYunet { detectors.append(YuNetFaceDetector()) }
         switch detectors.count {
         case 0:  return nil
         case 1:  return detectors[0]
@@ -297,6 +302,8 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
         return result
     }
 
+    // フェーズ2でこのファイルに本格的に手を入れる際に解消する予定の構造的負債
+    // swiftlint:disable:next cyclomatic_complexity
     public func allLandmarks(in image: UIImage, timestampMs: Int) -> [FaceLandmarkSet] {
         resetTracksIfNeeded(timestampMs: timestampMs)
         var result: [FaceLandmarkSet]
@@ -479,6 +486,8 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
         lastLiveSeconds = t
     }
 
+    // フェーズ2でこのファイルに本格的に手を入れる際に解消する予定の構造的負債
+    // swiftlint:disable:next cyclomatic_complexity
     public func liveLandmarks(in image: UIImage, atMediaSeconds t: Double) -> LiveDetectionResult {
         resetLiveTracksIfNeeded(mediaSeconds: t)
         var result: [FaceLandmarkSet]
@@ -940,43 +949,43 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
             ci = ci
                 .applyingFilter("CIHighlightShadowAdjust", parameters: [
                     "inputHighlightAmount": 0.6,
-                    "inputShadowAmount":    0.5,
+                    "inputShadowAmount": 0.5
                 ])
                 .applyingFilter("CISharpenLuminance", parameters: [
                     "inputSharpness": 0.5,
-                    "inputRadius":    1.5,
+                    "inputRadius": 1.5
                 ])
         case .aggressive:
             ci = ci
                 .applyingFilter("CIExposureAdjust", parameters: [
-                    "inputEV": 1.5,           // +1.5段分（約2.8倍）明るく
+                    "inputEV": 1.5           // +1.5段分（約2.8倍）明るく
                 ])
                 .applyingFilter("CIHighlightShadowAdjust", parameters: [
                     "inputHighlightAmount": 0.8,
-                    "inputShadowAmount":    0.9,
+                    "inputShadowAmount": 0.9
                 ])
                 .applyingFilter("CIColorControls", parameters: [
-                    "inputContrast":   1.1,
+                    "inputContrast": 1.1,
                     "inputBrightness": 0.05,
-                    "inputSaturation": 1.0,
+                    "inputSaturation": 1.0
                 ])
                 .applyingFilter("CISharpenLuminance", parameters: [
                     "inputSharpness": 0.7,
-                    "inputRadius":    1.5,
+                    "inputRadius": 1.5
                 ])
         case .backlight:
             // 逆光対策: 明部を抑え、暗部を最大に持ち上げ、ガンマでさらに暗部ディテールを引き出す。
             ci = ci
                 .applyingFilter("CIHighlightShadowAdjust", parameters: [
                     "inputHighlightAmount": 0.3,
-                    "inputShadowAmount":    1.0,
+                    "inputShadowAmount": 1.0
                 ])
                 .applyingFilter("CIGammaAdjust", parameters: [
-                    "inputPower": 0.65,    // < 1.0 で暗部側を強く持ち上げる
+                    "inputPower": 0.65    // < 1.0 で暗部側を強く持ち上げる
                 ])
                 .applyingFilter("CISharpenLuminance", parameters: [
                     "inputSharpness": 0.6,
-                    "inputRadius":    1.2,
+                    "inputRadius": 1.2
                 ])
         }
         guard let out = ciContext.createCGImage(ci, from: ci.extent) else { return nil }
@@ -1017,4 +1026,6 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
         return FaceLandmarkSet(points: points, confidence: confidence)
     }
 }
+// swiftlint:enable type_body_length
 #endif
+// swiftlint:enable file_length
