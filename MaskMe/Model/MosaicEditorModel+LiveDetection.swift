@@ -62,6 +62,10 @@ extension MosaicEditorModel {
         liveMatchCounts = []
         liveSampleCount = 0
         liveDetectionInFlight = false
+        // 意図的に scoped-clear（現在の sourceID だけ削除）にしない: `cacheStore` は
+        // 素材ロードのたびにクリアされない設計だが、`liveFlowCache` は動画切替のたびに
+        // フロー追跡状態ごと全消去する非対称は既存仕様。他素材のエントリが万一残っていても
+        // 一緒に破棄して構わない。
         liveFlowCache.removeAll()
         // 別動画の時系列を追跡しないよう、scanner 側の track / flow 状態も破棄する
         liveDetectionQueue.async { [liveScanner] in
@@ -115,7 +119,8 @@ extension MosaicEditorModel {
         }
         liveDetectionInFlight = false
         cacheStore.store([], sourceID: currentSourceID, time: t)
-        liveFlowCache[t] = detection.faces
+        liveFlowCache[DetectionCacheKey(sourceID: currentSourceID, time: t, bucketFPS: liveBucketFPS)] =
+            detection.faces
         #if DEBUG
         print("[MMLIVE] t=\(String(format: "%.2f", t)) flow faces=\(detection.faces.count)")
         #endif
@@ -207,14 +212,15 @@ extension MosaicEditorModel {
     }
 
     /// `liveFlowCache` のうち `time` から±1バケット強（0.1s）以内で最も近い顔リスト。
+    /// 現在の素材（`currentSourceID`）のエントリのみを対象にする（他素材混入防止）。
     ///
     /// **アクセスレベル変更**: 元は `private func` だったが、
     /// `lookupFaces`（`MosaicEditorModel+DetectionCache.swift`）から呼ばれるため
     /// `internal`（無印）にした。
     func nearestFlowFaces(at time: Double) -> [FaceLandmarkSet] {
         var best: (dist: Double, faces: [FaceLandmarkSet])?
-        for (t, faces) in liveFlowCache where !faces.isEmpty {
-            let d = abs(t - time)
+        for (key, faces) in liveFlowCache where key.sourceID == currentSourceID && !faces.isEmpty {
+            let d = abs(key.bucket - time)
             if d > 1.5 / liveBucketFPS { continue }
             if best == nil || d < best!.dist { best = (d, faces) }
         }

@@ -600,22 +600,23 @@ public final class MosaicEditorModel: ObservableObject {
     /// ので、フロー由来を detectionCache に混ぜると書き出し品質を汚染する。
     /// 参照するのはプレビューの `lookupFaces` のみ。動画切替（resetLiveDetection）で破棄。
     ///
-    /// **⚠️ フェーズ2への申し送り: 時間基準が2つ並存している。**
-    /// このキャッシュのキーは **合成（composition）時刻**（プレビュー再生位置そのもの）
-    /// である一方、`cacheStore` のキーは **素材時刻** である。フェーズ1では
-    /// クリップが「素材全体を使う1本」しか無く両者が恒等変換で一致するため問題にならない。
-    /// フェーズ2でトリム・並べ替え・複数素材が入り、`lookupFaces` の入口で合成時刻を
-    /// 素材時刻へ写像するようにすると、`cacheStore` 側だけが正しくなり
-    /// **`liveFlowCache` だけが合成時刻キーのまま取り残されて誤フレームの顔を返す。**
-    /// 入口で一括変換して済ませず、このキャッシュの
-    /// 読み書き（`nearestFlowFaces` / `storeLiveDetection`）をどちらの基準に揃えるか
-    /// 明示的に決めること。
+    /// **素材基準キー化（解決済み・フェーズ2地ならし）**: このキャッシュは `cacheStore`
+    /// と同じ `DetectionCacheKey`（sourceID + bucket）でキーする。以前は合成
+    /// （composition）時刻の生 `Double` でキーしており、`cacheStore` 側だけが素材基準に
+    /// なった場合に取り残されて誤フレームの顔を返す懸念があったが、キーの型を揃えたことで
+    /// 解消した。ただし合成時刻→素材時刻の写像（`TimelineMapping` 経由）はまだ配線して
+    /// いない。`currentSourceID` が固定値である間は、書き込み側が受け取る `t`
+    /// （合成時刻＝素材時刻、フェーズ1の恒等写像下）をそのまま
+    /// `DetectionCacheKey(sourceID: currentSourceID, time: t, bucketFPS: liveBucketFPS)` の
+    /// `time` に渡している。フェーズ2で `lookupFaces` の入口に合成時刻→素材時刻の写像が
+    /// 入ったときは、その写像済みの時刻をこの同じキー構築に渡すだけで済む
+    /// （`liveFlowCache` 自体のストレージ形状はこれで完成している）。
     ///
     /// **アクセスレベル変更**: 元は `private(set)` だったが、読み書きする
     /// `nearestFlowFaces` / `resetLiveDetection` / `storeLiveDetection` が
     /// `MosaicEditorModel+LiveDetection.swift` に切り出されたため `internal`
     /// （読み書き無印）にした。
-    var liveFlowCache: [Double: [FaceLandmarkSet]] = [:]
+    var liveFlowCache: [DetectionCacheKey: [FaceLandmarkSet]] = [:]
 
     /// 選択中の顔に対応する、指定時刻のランドマークセットを返す。
     func selectedLandmarks(at time: Double) -> [FaceLandmarkSet] {
