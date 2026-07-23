@@ -39,9 +39,11 @@ struct TimelineCompositionBuilder {
                 throw BuildError.noVideoTrack
             }
 
+            // 素材側のレンジなので素材内の長さを使う（`clip.duration` は rate で割った合成尺のため不可）。
+            // rate ≠ 1 の反映（scaleTimeRange）は S4 で対応する。
             let range = CMTimeRange(
                 start: CMTime(seconds: clip.sourceStart, preferredTimescale: 600),
-                duration: CMTime(seconds: clip.duration, preferredTimescale: 600))
+                duration: CMTime(seconds: clip.sourceEnd - clip.sourceStart, preferredTimescale: 600))
 
             try videoTrack.insertTimeRange(range, of: sourceVideo, at: cursor)
 
