@@ -106,4 +106,45 @@ final class DetectionCacheSyncTests: XCTestCase {
                       "ホールド窓（0.25s）を超えても古い顔位置を描き続けている")
         XCTAssertTrue(model.lookupFaces(at: t0 + 1.0).isEmpty)
     }
+
+    // MARK: - mapping（TimelineMapping 配線準備。フェーズ2a）
+    //
+    // `mapping` は `clips` から再構築される合成時刻⇔素材時刻の変換層で、
+    // まだ `lookupFaces` 等の既存経路からは参照されない（配線は次タスク）。
+    // ここでは `clips` の変更を `mapping` が正しく追随することだけを確認する。
+
+    /// フェーズ1と同じ単一クリップ（素材全体を1本使う）状態では、
+    /// 合成時刻と素材時刻が一致する恒等写像になること。
+    func test_mapping_singleClip_isIdentityMappingToCurrentSource() {
+        let model = makeModel()
+        let clip = TimelineClip(sourceID: model.currentSourceID, sourceStart: 0, sourceEnd: 10)
+        model.setClipsForTesting([clip])
+
+        let location = model.mapping.sourceLocation(at: 3.0)
+
+        XCTAssertEqual(location?.sourceID, model.currentSourceID)
+        XCTAssertEqual(location?.time ?? -1, 3.0, accuracy: 1e-9)
+    }
+
+    /// 2クリップ（うち1本は別素材）を `clips` に直接セットしたとき、
+    /// 合成時刻がどちらのクリップに属するかで正しい素材IDと素材内時刻を返すこと。
+    func test_mapping_twoClips_resolvesEachClipsSourceAndTime() {
+        let model = makeModel()
+        let sourceA = model.currentSourceID
+        let sourceB = UUID()
+        // 合成タイムライン: [0,5) が clipA（sourceA の 0...5）、
+        //                   [5,11) が clipB（sourceB の 2...8、オフセット+2）
+        let clipA = TimelineClip(sourceID: sourceA, sourceStart: 0, sourceEnd: 5)
+        let clipB = TimelineClip(sourceID: sourceB, sourceStart: 2, sourceEnd: 8)
+        model.setClipsForTesting([clipA, clipB])
+
+        let front = model.mapping.sourceLocation(at: 1.0)
+        XCTAssertEqual(front?.sourceID, sourceA, "前半クリップの区間で素材IDを取り違えている")
+        XCTAssertEqual(front?.time ?? -1, 1.0, accuracy: 1e-9)
+
+        let back = model.mapping.sourceLocation(at: 6.0)
+        XCTAssertEqual(back?.sourceID, sourceB, "後半クリップの区間で素材IDを取り違えている")
+        XCTAssertEqual(back?.time ?? -1, 3.0, accuracy: 1e-9,
+                       "後半クリップの素材内時刻（sourceStart オフセット込み）がずれている")
+    }
 }

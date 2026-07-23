@@ -100,7 +100,21 @@ public final class MosaicEditorModel: ObservableObject {
     /// 素材基準の検出キャッシュ。クラス全体が @MainActor なので同期機構は不要。
     let cacheStore = DetectionCacheStore(bucketFPS: 15.0)
     /// タイムライン上のクリップ列。フェーズ1では常に1要素。
-    @Published private(set) var clips: [TimelineClip] = []
+    @Published private(set) var clips: [TimelineClip] = [] {
+        didSet { mapping = TimelineMapping(clips: clips) }
+    }
+    /// `clips` から再構築される合成時刻⇔素材時刻の変換層（`clips` の didSet で追随）。
+    ///
+    /// **フェーズ2a時点ではまだどこからも参照されない。** `lookupFaces` 等の既存経路を
+    /// この写像経由に置き換える配線は次タスクのスコープ（詳細は `composition` プロパティの
+    /// doc コメントを参照）。ここでは `mapping` が `clips` と整合していることだけを保証する。
+    private(set) var mapping = TimelineMapping(clips: [])
+    /// テスト専用: `clips` を直接差し替える（`didSet` 経由で `mapping` も再構築される）。
+    /// `clips` の setter は `private(set)` のため、`@testable import` 越しでも
+    /// テストから直接代入できない。複数クリップ状態を再現するためのバックドア。
+    func setClipsForTesting(_ clips: [TimelineClip]) {
+        self.clips = clips
+    }
     /// 素材IDから AVAsset への対応表。
     private var sources: [UUID: AVAsset] = [:]
     /// クリップ列から構築した合成結果。プレビューと書き出しで同じものを使い回す。
