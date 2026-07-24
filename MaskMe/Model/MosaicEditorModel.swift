@@ -92,11 +92,18 @@ public final class MosaicEditorModel: ObservableObject {
     private var videoAsset: AVAsset?
     /// Source video URL (for saving a resumable draft).
     public private(set) var sourceVideoURL: URL?
-    /// この編集画面が扱う素材の識別子。クリップの有無とは独立に存在する。
+    /// 最後に `load(videoURL:)` した素材の識別子。クリップの有無とは独立に存在する。
     ///
     /// 素材の「同一性」は、その素材をどの範囲使うか（= クリップ）とは別の概念である。
-    /// 動画ロード前でもキャッシュ操作が成立するよう、init で確定させる。
-    let currentSourceID = UUID()
+    /// 動画ロード前でもキャッシュ操作が成立するよう、init 時点で初期値を持ち、
+    /// `load(videoURL:)` のたびに新規発行して差し替える（同一モデルで別動画を
+    /// ロードし直しても前の素材のキャッシュと混ざらない）。
+    ///
+    /// **S3 で「固定 sourceID」の役割は終了**: 検出キャッシュ等の各経路は合成時刻を
+    /// `resolveSourceTime(atComposition:)` で写像した素材IDを使う。このプロパティは
+    /// 「クリップ未構築時（ロード直後・写真モード・テスト直注入）のフォールバック先」
+    /// と「新規ロード素材の登録名」としてだけ残っている。
+    private(set) var currentSourceID = UUID()
     /// 素材基準の検出キャッシュ。クラス全体が @MainActor なので同期機構は不要。
     let cacheStore = DetectionCacheStore(bucketFPS: 15.0)
     /// タイムライン上のクリップ列。フェーズ1では常に1要素。
@@ -105,9 +112,10 @@ public final class MosaicEditorModel: ObservableObject {
     }
     /// `clips` から再構築される合成時刻⇔素材時刻の変換層（`clips` の didSet で追随）。
     ///
-    /// **フェーズ2a時点ではまだどこからも参照されない。** `lookupFaces` 等の既存経路を
-    /// この写像経由に置き換える配線は次タスクのスコープ（詳細は `composition` プロパティの
-    /// doc コメントを参照）。ここでは `mapping` が `clips` と整合していることだけを保証する。
+    /// S3 で配線済み: 検出キャッシュの読み書き・フレーム抽出・矩形サーチ・顔選択照合は
+    /// すべて `resolveSourceTime(atComposition:)`（`MosaicEditorModel+DetectionCache.swift`）
+    /// を経由してこの写像を参照する。フェーズ1相当の「素材全体1クリップ」では恒等写像に
+    /// なるため、配線前と観測可能な挙動は変わらない。
     private(set) var mapping = TimelineMapping(clips: [])
     /// テスト専用: `clips` を直接差し替える（`didSet` 経由で `mapping` も再構築される）。
     /// `clips` の setter は `private(set)` のため、`@testable import` 越しでも
@@ -124,24 +132,19 @@ public final class MosaicEditorModel: ObservableObject {
     /// composition 上の時刻 t と videoAsset 上の時刻 t は同じフレームを指す。
     /// この前提のもとで、資産を2つ並存させて用途で使い分けている:
     ///
-    /// - `videoAsset`: サムネ生成とスクラブ時のフレーム抽出（`AVAssetImageGenerator`
-    ///   系の同期取り出し。Composition 経由より素材直読みのほうが速く確実）
+    /// - `videoAsset`: サムネ生成とスクラブ時のフレーム抽出の**素材側フォールバック**
+    ///   （`AVAssetImageGenerator` 系の同期取り出し。Composition 経由より素材直読みの
+    ///   ほうが速く確実。クリップ未構築の間だけ恒等時刻で直接使われる）
     /// - `composition`: 再生（`AVPlayerItem`）と書き出し（`AVAssetReader`）
     ///
-    /// **フェーズ2でどこが壊れるか:**
-    /// トリム・並べ替え・複数素材のいずれかが入った瞬間に上の一致は崩れる。
-    /// 具体的には、composition 時刻 t に対応する素材と素材内時刻を解決する
-    /// 写像が必要になり、以下が全て誤フレームを返すようになる:
-    ///   - `seekTo(position:)` のフレーム抽出（`videoAsset` を composition 時刻で引く）
-    ///   - `redetect(at:)` の再検出フレーム
-    ///   - 検出キャッシュのキー（素材基準の時刻で持っているため、composition 時刻で
-    ///     引くと別クリップの結果を拾う）
-    ///   - `resolveRegion(_:referenceImage:)` / `findFaceInVideo(asset:rect:scanner:)`
-    ///     （矩形から動画全体を1fps走査する経路）。`videoAsset` を直接渡して素材全体を
-    ///     舐めるため、クリップ列が素材の一部しか使わなくなると「タイムラインに存在
-    ///     しない区間」で顔を拾い、composition 上に対応時刻の無い結果を返す
-    /// そのため、フェーズ2では `videoAsset` の直接参照を全て
-    /// `TimelineMapping.sourceLocation(at:)` 相当の写像経由に置き換える必要がある。
+    /// **S3 で写像を配線済み:** かつてここに列挙していた「composition 時刻で
+    /// `videoAsset` / 検出キャッシュを直接引くと誤フレームになる箇所」
+    /// （`seekTo` / `redetect` のフレーム抽出、検出キャッシュのキー、
+    /// `resolveRegion` / `findFaceInVideo` の全体走査）は、すべて
+    /// `resolveSourceTime(atComposition:)` / `frameAtCompositionTime(_:)` /
+    /// クリップ使用区間走査（`scanSegments()`）経由に置き換えた。
+    /// 残る作業は S4 のマルチクリップ実行系（builder の rate 反映・複数素材、
+    /// exporter の素材別キャッシュ辞書 + mapping 対応）。
     private var composition: AVMutableComposition?
     private(set) var previewController: MosaicPreviewController?
     private var cancellables: Set<AnyCancellable> = []
@@ -231,6 +234,9 @@ public final class MosaicEditorModel: ObservableObject {
         sourceVideoURL = url
         // 新しい動画では全長を選択に戻す。前の動画のトリムが残ると意図しない範囲書き出しになる。
         trimRange = 0...1
+        // 素材ごとに新規 sourceID を発行する。init 固定のままだと、同一モデルで
+        // 別動画をロードし直したとき前の素材の検出キャッシュと同じキー空間に混ざる。
+        currentSourceID = UUID()
         let asset = AVAsset(url: url)
         videoAsset = asset
 
@@ -293,7 +299,8 @@ public final class MosaicEditorModel: ObservableObject {
                 let autoSelect = faces.count == 1 && idx == 0
                 return FaceTarget(id: UUID(), landmarks: lm,
                            thumbnail: generateThumbnail(for: lm, from: seedFrame),
-                           isSelected: autoSelect)
+                           isSelected: autoSelect,
+                           sourceID: currentSourceID)
             }
         }
         manualRegions = []
@@ -375,12 +382,18 @@ public final class MosaicEditorModel: ObservableObject {
         let found = scanner.allLandmarks(in: croppedImage)
 
         if !found.isEmpty {
+            // 動画では「いま表示中のフレームが属する素材」を顔の帰属先にする
+            // （恒等写像下では常に currentSourceID）。写真は素材の概念が無いので nil。
+            let faceSourceID: UUID? = mode == .video
+                ? resolveSourceTime(atComposition: playbackPosition * videoDuration).sourceID
+                : nil
             let newFaces = found.map { lm -> FaceTarget in
                 let remapped = lm.remapped(into: normalizedRect)
                 let thumb = generateThumbnail(for: remapped, from: img)
                 // ユーザーが矩形を描いた意図は「この顔にモザイクを掛けたい」なので
                 // 即選択する（false だとサムネをもう一度タップするまで何も起きない）。
-                return FaceTarget(id: UUID(), landmarks: remapped, thumbnail: thumb, isSelected: true)
+                return FaceTarget(id: UUID(), landmarks: remapped, thumbnail: thumb,
+                                  isSelected: true, sourceID: faceSourceID)
             }
             detectedFaces += newFaces
         } else {
@@ -393,44 +406,103 @@ public final class MosaicEditorModel: ObservableObject {
         if mode == .video { resetLiveDetection() }
     }
 
-    /// 矩形内クロップが現在フレームで失敗したとき: 動画全体を1fpsでサーチして顔を探す。
-    /// 見つかれば FaceTarget として追加（追跡可能）。全フレームで失敗なら固定矩形マスク。
+    /// 矩形サーチ（`resolveRegion`）の走査対象1件。素材と、その中で走査する区間。
+    private struct RegionScanSegment {
+        let asset: AVAsset
+        /// nil は素材全体（`findFaceInVideo` が duration をロードして決める）。
+        let range: ClosedRange<Double>?
+        let sourceID: UUID
+    }
+
+    /// 矩形サーチの検出結果。どの素材で見つかったかを顔の帰属（`FaceTarget.sourceID`）
+    /// に引き継ぐため、ランドマークとフレームに素材IDを添える。
+    private struct RegionScanHit {
+        let landmarks: FaceLandmarkSet
+        let frame: UIImage
+        let sourceID: UUID
+    }
+
+    /// 矩形内クロップが現在フレームで失敗したとき: クリップが使う素材区間を1fpsで
+    /// サーチして顔を探す（タイムラインに存在しない区間で顔を拾い、composition 上に
+    /// 対応時刻の無い結果を返さないため。恒等＝素材全体1クリップでは従来の全体走査と
+    /// 同一の時刻列になる）。見つかれば FaceTarget として追加（追跡可能）。
+    /// 全フレームで失敗なら固定矩形マスク。
     private func resolveRegion(_ rect: CGRect, referenceImage: UIImage?) async {
-        guard mode == .video, let asset = videoAsset else {
+        guard mode == .video, videoAsset != nil else {
             appendManualRect(rect)
             return
         }
         isScanning = true
         let scanner = makeFaceLandmarker(forVideo: false, settings: detectionSettings)
-        let result = await Task.detached(priority: .userInitiated) { [scanner, asset, rect] in
-            await Self.findFaceInVideo(asset: asset, rect: rect, scanner: scanner)
+        let segments = scanSegments()
+        let result: RegionScanHit? = await Task.detached(
+            priority: .userInitiated
+        ) { [scanner, segments, rect] in
+            // タイムライン順に各クリップの使用区間を走査し、最初の検出を採用する。
+            for segment in segments {
+                guard !Task.isCancelled else { return nil }
+                if let (landmarks, frame) = await Self.findFaceInVideo(
+                    asset: segment.asset, rect: rect, scanner: scanner, scanRange: segment.range) {
+                    return RegionScanHit(landmarks: landmarks, frame: frame, sourceID: segment.sourceID)
+                }
+            }
+            return nil
         }.value
         isScanning = false
 
-        if let (landmarks, foundFrame) = result {
-            let thumbSource = referenceImage ?? foundFrame
-            let thumb = generateThumbnail(for: landmarks, from: thumbSource)
+        if let hit = result {
+            let thumbSource = referenceImage ?? hit.frame
+            let thumb = generateThumbnail(for: hit.landmarks, from: thumbSource)
             // 矩形を描いた意図に合わせて即選択（上の resolveRegion 直検出と同じ理由）。
-            detectedFaces.append(FaceTarget(id: UUID(), landmarks: landmarks, thumbnail: thumb, isSelected: true))
+            detectedFaces.append(FaceTarget(id: UUID(), landmarks: hit.landmarks, thumbnail: thumb,
+                                            isSelected: true, sourceID: hit.sourceID))
         } else {
             // どのフレームでも検出できなかった: 固定矩形マスクにフォールバック
             appendManualRect(rect)
         }
     }
 
-    /// 動画を1fpsでサンプリングし、矩形クロップ内で顔を探す。最初の検出結果を返す。
+    /// 矩形サーチ（`resolveRegion`）が走査すべき素材と使用区間の列。
+    /// クリップ列があればその使用区間のみ。クリップ未構築（Composition 構築前）の間は
+    /// 従来どおり素材全体。
+    private func scanSegments() -> [RegionScanSegment] {
+        guard !clips.isEmpty else {
+            guard let asset = videoAsset else { return [] }
+            return [RegionScanSegment(asset: asset, range: nil, sourceID: currentSourceID)]
+        }
+        return clips.compactMap { clip in
+            guard let asset = sources[clip.sourceID], clip.sourceEnd > clip.sourceStart else { return nil }
+            return RegionScanSegment(asset: asset,
+                                     range: clip.sourceStart...clip.sourceEnd,
+                                     sourceID: clip.sourceID)
+        }
+    }
+
+    /// 素材の指定区間（nil なら全体）を1fpsでサンプリングし、矩形クロップ内で顔を探す。
+    /// 最初の検出結果を返す。
     nonisolated private static func findFaceInVideo(
         asset: AVAsset,
         rect: CGRect,
-        scanner: FaceLandmarking
+        scanner: FaceLandmarking,
+        scanRange: ClosedRange<Double>? = nil
     ) async -> (FaceLandmarkSet, UIImage)? {
-        guard let dur = try? await asset.load(.duration).seconds, dur > 0 else { return nil }
+        let start: Double
+        let end: Double
+        if let scanRange {
+            start = scanRange.lowerBound
+            end = scanRange.upperBound
+        } else {
+            guard let dur = try? await asset.load(.duration).seconds else { return nil }
+            start = 0
+            end = dur
+        }
+        guard end > start else { return nil }
         let generator = AVAssetImageGenerator(asset: asset)
         generator.appliesPreferredTrackTransform = true
         generator.requestedTimeToleranceBefore = CMTime(seconds: 0.5, preferredTimescale: 600)
         generator.requestedTimeToleranceAfter  = CMTime(seconds: 0.5, preferredTimescale: 600)
-        var t = 0.0
-        while t <= dur {
+        var t = start
+        while t <= end {
             guard !Task.isCancelled else { return nil }
             if let cg = try? generator.copyCGImage(at: CMTime(seconds: t, preferredTimescale: 600), actualTime: nil) {
                 let pixelRect = CGRect(
@@ -483,13 +555,16 @@ public final class MosaicEditorModel: ObservableObject {
         playbackPosition = position
         Task {
             await previewController?.seek(to: position)
-            // シーク後のフレームで sourceTexture を更新してプレビューに反映
-            if let asset = videoAsset, videoDuration > 0 {
-                let t = position * videoDuration
-                if let frame = Self.frame(of: asset, at: t) {
-                    sourceTexture = makeTexture(from: frame)
-                    updateBackgroundMask(from: frame)
-                }
+            // シーク後のフレームで sourceTexture を更新してプレビューに反映。
+            // 合成時刻を素材＋素材時刻へ写像して抽出する（videoAsset 直参照だと
+            // トリム・並べ替え後に誤フレームを返す。恒等では従来と同一フレーム）。
+            // TODO(S4): `videoDuration` は素材尺のため、マルチクリップ・rate≠1 では
+            // `mapping.totalDuration` と一致しない。S4 で位置→合成時刻の変換を
+            // totalDuration 基準のヘルパ 1 箇所に集約すること（redetect・detectInRegion も同様）。
+            if videoDuration > 0,
+               let frame = frameAtCompositionTime(position * videoDuration) {
+                sourceTexture = makeTexture(from: frame)
+                updateBackgroundMask(from: frame)
             }
         }
     }
@@ -505,14 +580,15 @@ public final class MosaicEditorModel: ObservableObject {
     // MARK: - 手動再検出（動画: 現在シーク位置で再検出）
 
     public func redetect(at position: Double) async {
-        guard let asset = videoAsset, videoDuration > 0 else { return }
+        guard videoAsset != nil, videoDuration > 0 else { return }
         let t = position * videoDuration
-        guard let frame = Self.frame(of: asset, at: t) else { return }
+        // 合成時刻 t を素材＋素材時刻へ写像してフレームを取り出す（恒等では従来と同一）。
+        guard let frame = frameAtCompositionTime(t) else { return }
 
         let scanner = makeFaceLandmarker(forVideo: false, settings: detectionSettings)
         let found = scanner.allLandmarks(in: frame)
-        // キーはライブ検出と同じ 15fps バケットに正規化する（storePreScanResult の
-        // doc コメント参照。生 t のままだとライブの空エントリを上書きできない）。
+        // storePreScanResult が合成時刻→素材キーの写像と 15fps バケット正規化を行う
+        // （doc コメント参照。生 t のままだとライブの空エントリを上書きできない）。
         storePreScanResult(found, at: t)
 
         if !found.isEmpty {
@@ -521,11 +597,13 @@ public final class MosaicEditorModel: ObservableObject {
             // 実機報告の直接原因だった。選択状態は重心マッチで引き継ぎ、誰も選択
             // されない結果になる場合は全選択にフォールバックする（このボタンを押す
             // 意図は常に「顔にモザイクを掛けたい」なので、消える方向に倒さない）。
+            let faceSourceID = resolveSourceTime(atComposition: t).sourceID
             detectedFaces = carryingOverSelection(
                 found.map { lm in
                     FaceTarget(id: UUID(), landmarks: lm,
                                thumbnail: generateThumbnail(for: lm, from: frame),
-                               isSelected: false)
+                               isSelected: false,
+                               sourceID: faceSourceID)
                 },
                 previousSelected: detectedFaces.filter(\.isSelected)
             )
@@ -598,7 +676,8 @@ public final class MosaicEditorModel: ObservableObject {
     // MARK: - 検出キャッシュ参照
     //
     // 検出キャッシュそのものを引く実装（lookupFaces / nearestCachedFaces /
-    // nearestNonEmptyCachedFaces / sourceScopedCache）は
+    // sourceScopedCache(for:)）と、合成時刻→素材時刻の写像ヘルパ
+    // （resolveSourceTime(atComposition:)）は
     // `MosaicEditorModel+DetectionCache.swift` に切り出した。
     // `blinkHoldWindow` と `liveFlowCache` は格納プロパティのため（Swift の
     // extension は格納インスタンスプロパティを持てない）、参照元の
@@ -617,17 +696,12 @@ public final class MosaicEditorModel: ObservableObject {
     /// ので、フロー由来を detectionCache に混ぜると書き出し品質を汚染する。
     /// 参照するのはプレビューの `lookupFaces` のみ。動画切替（resetLiveDetection）で破棄。
     ///
-    /// **素材基準キー化（解決済み・フェーズ2地ならし）**: このキャッシュは `cacheStore`
-    /// と同じ `DetectionCacheKey`（sourceID + bucket）でキーする。以前は合成
-    /// （composition）時刻の生 `Double` でキーしており、`cacheStore` 側だけが素材基準に
-    /// なった場合に取り残されて誤フレームの顔を返す懸念があったが、キーの型を揃えたことで
-    /// 解消した。ただし合成時刻→素材時刻の写像（`TimelineMapping` 経由）はまだ配線して
-    /// いない。`currentSourceID` が固定値である間は、書き込み側が受け取る `t`
-    /// （合成時刻＝素材時刻、フェーズ1の恒等写像下）をそのまま
-    /// `DetectionCacheKey(sourceID: currentSourceID, time: t, bucketFPS: liveBucketFPS)` の
-    /// `time` に渡している。フェーズ2で `lookupFaces` の入口に合成時刻→素材時刻の写像が
-    /// 入ったときは、その写像済みの時刻をこの同じキー構築に渡すだけで済む
-    /// （`liveFlowCache` 自体のストレージ形状はこれで完成している）。
+    /// **素材基準キー化（S3 で写像まで配線済み）**: このキャッシュは `cacheStore`
+    /// と同じ `DetectionCacheKey`（sourceID + bucket）でキーする。書き込み
+    /// （`storeLiveDetection`）と参照（`nearestFlowFaces`）の入口で合成時刻を
+    /// `resolveSourceTime(atComposition:)` により素材ID・素材時刻へ写像し、その
+    /// **写像済み**の時刻でキーを構築する（丸めは `DetectionCacheKey.init`。
+    /// 必ず写像の後）。detectionCache（`cacheStore`）と混ぜない規約は従来どおり。
     ///
     /// **アクセスレベル変更**: 元は `private(set)` だったが、読み書きする
     /// `nearestFlowFaces` / `resetLiveDetection` / `storeLiveDetection` が
@@ -635,7 +709,7 @@ public final class MosaicEditorModel: ObservableObject {
     /// （読み書き無印）にした。
     var liveFlowCache: [DetectionCacheKey: [FaceLandmarkSet]] = [:]
 
-    /// 選択中の顔に対応する、指定時刻のランドマークセットを返す。
+    /// 選択中の顔に対応する、指定した合成時刻のランドマークセットを返す。
     func selectedLandmarks(at time: Double) -> [FaceLandmarkSet] {
         guard faceMosaicOn else { return [] }
         let cached = lookupFaces(at: time)
@@ -643,10 +717,17 @@ public final class MosaicEditorModel: ObservableObject {
         if selected.isEmpty { return [] }
         if selected.count == detectedFaces.count { return cached }
 
+        // 照合対象をこの合成時刻が属する素材の顔に限定する（別素材の「似た位置の顔」
+        // との誤マッチ防止）。sourceID が nil の顔（写真モード・素材ID導入前の経路・
+        // テスト直注入）は従来どおり素材不問で照合する。恒等（単一素材）では
+        // 全員が同一 sourceID なのでスコープは何も落とさない（挙動不変）。
+        let sourceID = resolveSourceTime(atComposition: time).sourceID
+        let scoped = selected.filter { $0.sourceID == nil || $0.sourceID == sourceID }
+
         // 重心の近さで選択顔とキャッシュ顔を照合する（閾値0.5: 広め）
         return cached.filter { face in
             let fc = normalizedCentroid(of: face)
-            return selected.contains { target in
+            return scoped.contains { target in
                 let tc = normalizedCentroid(of: target.landmarks)
                 return hypot(fc.x - tc.x, fc.y - tc.y) < 0.5
             }
@@ -858,12 +939,16 @@ public final class MosaicEditorModel: ObservableObject {
         // （exporter は空配列を「全顔に適用」と解釈する）。追跡マッチングの誤棄却で
         // 書き出しからモザイクが消える余地を残さないフェイルクローズ。
         let targetsForExport = selected.count == detectedFaces.count ? [] : selected
+        // exporter は現状「単一素材の素材時刻辞書」を受け取る（複数素材・mapping 対応の
+        // シグネチャ変更は S4）。恒等写像下ではタイムライン先頭の素材＝唯一の素材なので、
+        // 先頭クリップの素材IDでスコープする（クリップ未構築時は currentSourceID）。
+        let exportSourceID = clips.first?.sourceID ?? currentSourceID
         do {
             let url = try await exporter.export(
                 asset: composition,
                 selectedFaceTargets: targetsForExport,
                 manualRegions: manualRegions,
-                detectionCache: sourceScopedCache(),
+                detectionCache: sourceScopedCache(for: exportSourceID),
                 faceEnabled: faceMosaicOn,
                 backgroundEnabled: backgroundMosaicOn,
                 backgroundBlock: backgroundBlockSize,
@@ -950,6 +1035,17 @@ public final class MosaicEditorModel: ObservableObject {
         let t = CMTime(seconds: time, preferredTimescale: 600)
         guard let cg = try? gen.copyCGImage(at: t, actualTime: nil) else { return nil }
         return UIImage(cgImage: cg)
+    }
+
+    /// 合成時刻に対応するフレームを「写像した素材 asset ＋ 素材内時刻」から取り出す。
+    /// Composition 経由の抽出より素材直読みのほうが速く確実、という従来方針を
+    /// 写像込みで維持する（`composition` プロパティの doc コメント参照）。
+    /// クリップ未構築（Composition 構築前の窓・`sources` 未登録）の間は従来どおり
+    /// `videoAsset` の恒等参照にフォールバックする。
+    func frameAtCompositionTime(_ compositionTime: Double) -> UIImage? {
+        let (sourceID, sourceTime) = resolveSourceTime(atComposition: compositionTime)
+        guard let asset = sources[sourceID] ?? videoAsset else { return nil }
+        return Self.frame(of: asset, at: sourceTime)
     }
 
     /// ライブ検出・初期スキャンで使う検出入力の目標幅（px）。

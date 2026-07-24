@@ -203,6 +203,10 @@ final class MosaicPreviewController {
 
         // 描画中のフレームの実際の時刻（理想時刻ではなく）で landmarks を引く。
         // これにより「顔の動きにモザイクが一拍遅れる」現象を解消する。
+        // timeSec は AVPlayerItem＝Composition の**合成タイムライン時刻**。
+        // 素材ID・素材時刻への写像は model 側（resolveSourceTime）が一手に担うため、
+        // プレビューは素材時刻を一切仮定せず、合成時刻のまま検出 submit と
+        // ランドマーク検索（selectedLandmarks）に渡す。
         let timeSec = actualItemTime.isValid ? actualItemTime.seconds : currentTime.seconds
         // 事前スキャン廃止: 再生・シークで表示中のこのフレームに顔検出を相乗りさせ、
         // detectionCache を埋める。表示スレッドを塞がないよう、検出すべきときだけ

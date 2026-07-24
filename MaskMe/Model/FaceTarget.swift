@@ -11,9 +11,15 @@ public struct FaceTarget: Identifiable {
     public var isSelected: Bool
     /// 動画のみ: 事前スキャンで算出した検出率（0-100%）。スキャン前は nil。
     public var detectionRate: Double?
+    /// この顔が検出された素材の識別子。`selectedLandmarks` の重心マッチングを
+    /// 同一素材の顔に限定するために使う（別素材の似た位置の顔との誤マッチ防止）。
+    /// nil は素材不問（写真モード・テスト直注入・素材ID導入前の経路）で、
+    /// 従来どおり全素材の顔と照合される。
+    public var sourceID: UUID?
 
-    public init(id: UUID, landmarks: FaceLandmarkSet, thumbnail: UIImage, isSelected: Bool, detectionRate: Double? = nil) {
+    public init(id: UUID, landmarks: FaceLandmarkSet, thumbnail: UIImage, isSelected: Bool,
+                detectionRate: Double? = nil, sourceID: UUID? = nil) {
         self.id = id; self.landmarks = landmarks; self.thumbnail = thumbnail
-        self.isSelected = isSelected; self.detectionRate = detectionRate
+        self.isSelected = isSelected; self.detectionRate = detectionRate; self.sourceID = sourceID
     }
 }
