@@ -127,23 +127,35 @@ extension MosaicEditorModel {
     /// 閾値 0.5 が緩くなり未選択の顔まで通る。閾値は素材座標で調整されてきた値なので、
     /// **素材座標で照合して、それから写す**のが座標系・閾値の意味を両方保つ唯一の順序である。
     ///
+    /// **モザイク適用区間のゲート（S10）はこの関数の中、素材ごとに置く。**
+    /// 区間外の素材の顔は空になり、その素材の映像は素のまま残る。重なり区間で
+    /// 片方の素材だけが区間内なら、**区間内の素材の顔にだけ**モザイクが乗る
+    /// （両者をまとめて ON/OFF してはならない）。判定に渡す素材時刻は、その素材
+    /// ブランチが `lookupFaces` に使ったのと**同じ値**である（合成時刻ではない。
+    /// rate ≠ 1 のクリップで区間の位置がずれるため）。
+    /// ゲートを `lookupFaces` 側に入れないこと: 区間外でもライブ検出は継続して
+    /// 検出キャッシュを埋める（後から区間を広げたときに再検出させないため）。
+    ///
     /// - Parameter targets: nil なら絞り込みなし（＝`displayFaces(at:)`）。
     func displayFaces(at time: Double, matching targets: [FaceTarget]?) -> [FaceLandmarkSet] {
         let locations = mapping.sourceLocations(at: time)
         guard locations.count >= 2, let overlap = mapping.overlap(at: time) else {
             let clipID = mapping.sourceLocation(at: time)?.clipID
-            // 重なり外なので素材位置は高々 1 つ。写像範囲外（locations が空）のときだけ、
-            // lookupFaces(at:) と同じクランプ付き解決へ落ちる（?? は遅延評価なので
-            // 通常経路では走らない）。
-            let sourceID = locations.first?.location.sourceID
-                ?? resolveSourceTime(atComposition: time).sourceID
-            let faces = selecting(lookupFaces(at: time), sourceID: sourceID, targets: targets)
+            // 重なり外なので素材位置は高々 1 つ。`resolveSourceTime` は写像範囲外
+            // （locations が空）でも lookupFaces(at:) と同じクランプ付き解決へ落ちるため、
+            // 素材ID・素材時刻をここで一度だけ解決し、ゲートと lookup の両方に使い回す
+            // （両者で別々に解決すると境界フレームで食い違う）。
+            let resolved = resolveSourceTime(atComposition: time)
+            guard isMosaicActive(sourceID: resolved.sourceID, sourceTime: resolved.time) else { return [] }
+            let faces = selecting(lookupFaces(sourceID: resolved.sourceID, sourceTime: resolved.time),
+                                  sourceID: resolved.sourceID, targets: targets)
             return renderLayout.remap(faces, clipID: clipID)
         }
         return locations.flatMap { entry -> [FaceLandmarkSet] in
             guard let side = entry.side, let progress = entry.progress else { return [] }
             let sourceTime = timeline.clampedSourceTime(entry.location.time,
                                                         sourceID: entry.location.sourceID)
+            guard isMosaicActive(sourceID: entry.location.sourceID, sourceTime: sourceTime) else { return [] }
             let faces = selecting(lookupFaces(sourceID: entry.location.sourceID, sourceTime: sourceTime),
                                   sourceID: entry.location.sourceID, targets: targets)
             let placed = renderLayout.remap(faces, clipID: entry.location.clipID)

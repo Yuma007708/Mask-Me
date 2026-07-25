@@ -125,7 +125,7 @@ extension MosaicEditorModel {
         applyTimelineEdit { $0.removingTransition(afterClipID: id) }
     }
 
-    // MARK: - モザイク適用区間（S9。状態編集と表示まで。描画ゲートの配線は S10）
+    // MARK: - モザイク適用区間（S9 で状態編集と表示、S10 で描画ゲートを配線）
 
     /// 合成時刻の区間 [from, to) をモザイク適用区間として追加する。
     ///
@@ -147,6 +147,53 @@ extension MosaicEditorModel {
     /// マージで id が変わり得るので、UI は編集後に区間を引き直すこと。
     public func setMosaicApplyRange(id: UUID, clipID: UUID, interval: CompositionInterval) {
         applyTimelineEdit { $0.replacingApplyRange(id: id, clipID: clipID, compositionInterval: interval) }
+    }
+
+    // MARK: - 描画ゲート（S10）
+    //
+    // 判定ロジックの単一情報源は `MosaicApplyGate` であり、ここは
+    // 「モデルが持つ状態（applyRanges / mapping / photoSourceIDs）を束ねて渡すだけ」の
+    // 薄い入口である。**数式・判定の二重実装は禁止**（プレビューとエクスポートで
+    // 同じ純関数を通すこと。境界フレームで結果が食い違う実装は不可）。
+    //
+    // ゲートは検出 lookup の**後段・描画直前**にしか置かない。区間外でもライブ検出は
+    // 継続して検出キャッシュを埋める（区間を後から広げたときに再検出させないため）。
+    // `lookupFaces` / `shouldDetectPreviewFrame` / `storeLiveDetection` /
+    // `storePreScanResult` にゲートを入れてはならない。
+    //
+    // 判定に渡す区間は必ず `effectiveApplyRanges`（孤児区間を除いた有効区間）である。
+    // 生の `timeline.applyRanges` をゲートへ渡してはならない（`effectiveApplyRanges` の
+    // doc 参照。帯 UI と挙動が食い違い、復帰不能な全区間 OFF になる）。
+
+    /// **素材時刻**がモザイク適用区間内かを返す（顔ランドマークの素材別ゲート）。
+    ///
+    /// 呼び出し元は `displayFaces(at:matching:)` だけ。トランジションの重なり区間では
+    /// 素材ごとにこれを通すので、片方の素材が区間内・もう片方が区間外なら
+    /// **区間内の素材の顔にだけ**モザイクが乗る。
+    ///
+    /// 渡す `sourceTime` は必ず「その素材ブランチが lookup に使ったのと同じ素材時刻」。
+    /// 合成時刻を渡してはならない（rate ≠ 1 のクリップで区間の位置がずれる）。
+    func isMosaicActive(sourceID: UUID, sourceTime: Double) -> Bool {
+        MosaicApplyGate.isActive(ranges: effectiveApplyRanges,
+                                 sourceID: sourceID, sourceTime: sourceTime)
+    }
+
+    /// **合成時刻**でモザイクを適用すべきかを返す（素材アンカーを持たない効果のゲート）。
+    ///
+    /// 手動矩形（`manualRegions`）と背景モザイクは合成タイムライン全体に対する設定で
+    /// 素材アンカーを持たないため、素材別には分けられない。判定規則
+    /// 「映っている素材のうち 1 つでも区間内なら適用」と、写像範囲外時刻のクランプ規則は
+    /// `MosaicApplyGate.isActive(ranges:mapping:compositionTime:photoSourceIDs:)` に
+    /// 集約してある（エクスポート `VideoMosaicExporter` も同じ関数を呼ぶ）。
+    ///
+    /// 渡す時刻は「いま描こうとしているフレームの合成時刻」。プレビューは
+    /// `copyPixelBuffer(forItemTime:itemTimeForDisplay:)` が返した**実フレーム時刻**、
+    /// エクスポートは**シフト前の PTS** がそれにあたる（ランドマーク検索に使う時刻と
+    /// 必ず同じものを渡すこと。食い違うと境界フレームで両経路の結果がずれる）。
+    public func isMosaicActive(atComposition time: Double) -> Bool {
+        MosaicApplyGate.isActive(ranges: effectiveApplyRanges, mapping: mapping,
+                                 compositionTime: time,
+                                 photoSourceIDs: timeline.photoSourceIDs)
     }
 
     // MARK: - 写真クリップ（S6）

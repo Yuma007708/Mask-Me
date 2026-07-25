@@ -234,6 +234,17 @@ public final class VideoMosaicExporter: @unchecked Sendable {
     /// 同一なので、区間内で実検出を繰り返さない）。
     private var photoSourceIDs: Set<UUID> = []
 
+    /// モザイク適用区間（素材時刻アンカー。S10）。export 開始時に
+    /// `MosaicApplyGate.effectiveRanges(_:mapping:)` を通してから設定する
+    /// （孤児区間を残すと全区間 OFF になる。プロパティ doc は同関数を参照）。
+    ///
+    /// 空なら全区間適用（範囲指定なしの既存挙動と bit 同一）。非空なら、区間外の
+    /// フレームは顔・手動矩形・背景モザイクのすべてを止めて**入力フレームをそのまま**
+    /// 書き出す（フレームを落とさない・pts を変えないので出力尺は区間の有無で不変）。
+    /// 判定は `MosaicApplyGate` の純関数だけを通し、プレビュー経路
+    /// （`MosaicEditorModel.isMosaicActive(atComposition:)`）と同じ規則を共有する。
+    private var applyRanges: [MosaicApplyRange] = []
+
     /// 素材フレーム基準の顔座標 → 合成フレーム基準の写像（S8）。export 開始時に設定する。
     /// 解像度混在タイムラインではクリップがレターボックスで配置されるため、
     /// 検出キャッシュ由来の顔だけこの写像を通す（その場検出は合成済みフレームに
@@ -309,6 +320,9 @@ public final class VideoMosaicExporter: @unchecked Sendable {
         detectionCaches: [UUID: [Double: [FaceLandmarkSet]]] = [:],
         mapping: TimelineMapping = TimelineMapping(clips: []),
         photoSourceIDs: Set<UUID> = [],
+        /// モザイク適用区間（素材時刻アンカー。既定の空は「全区間適用」＝従来挙動）。
+        /// `MosaicEditorModel` は `timeline.applyRanges` を渡す。
+        applyRanges: [MosaicApplyRange] = [],
         videoComposition: AVVideoComposition? = nil,
         audioMix: AVAudioMix? = nil,
         renderLayout: TimelineRenderLayout = .identity,
@@ -332,6 +346,11 @@ public final class VideoMosaicExporter: @unchecked Sendable {
         progress: @Sendable @escaping (Double) -> Void
     ) async throws -> URL {
         self.photoSourceIDs = photoSourceIDs
+        // 孤児区間（どのクリップの使用範囲とも交差しない適用区間）をここで 1 回だけ落とす。
+        // O(クリップ数 × 区間数) を全フレームで回さないためのキャッシュであり、
+        // プレビュー側（`MosaicEditorModel.effectiveApplyRanges`）と**同じ純関数**を通す
+        // ので、両経路のゲート結果が必ず一致する。
+        self.applyRanges = MosaicApplyGate.effectiveRanges(applyRanges, mapping: mapping)
         self.renderLayout = renderLayout
         let videoTracks = try await asset.loadTracks(withMediaType: .video)
         guard let videoTrack = videoTracks.first else {
@@ -585,11 +604,7 @@ public final class VideoMosaicExporter: @unchecked Sendable {
             let group = DispatchGroup()
 
             // 映像：必要になったタイミングでだけコールバックが呼ばれる（Thread.sleep 不要）。
-            var frameIndex = 0
-            // 直前フレームが属していたクリップ（境界跨ぎの時系列リセット判定用）。
-            var previousClipID: UUID?
-            var cachedLandmarkSets: [FaceLandmarkSet] = []
-            var cachedBackgroundMask: MaskBuffer?
+            var loop = FrameLoopState()
             let videoQueue = DispatchQueue(label: "mask-me.export.video")
             group.enter()
             videoInput.requestMediaDataWhenReady(on: videoQueue) { [self] in
@@ -606,10 +621,7 @@ public final class VideoMosaicExporter: @unchecked Sendable {
                     autoreleasepool {
                         processVideoSample(
                             sample,
-                            frameIndex: &frameIndex,
-                            previousClipID: &previousClipID,
-                            cachedLandmarkSets: &cachedLandmarkSets,
-                            cachedBackgroundMask: &cachedBackgroundMask,
+                            loop: &loop,
                             detectionInterval: detectionInterval,
                             selectedFaceTargets: selectedFaceTargets,
                             manualRegions: manualRegions,
@@ -733,14 +745,35 @@ public final class VideoMosaicExporter: @unchecked Sendable {
 
     // swiftlint:enable function_parameter_count
 
+    /// 映像ループがフレーム間で持ち越す状態。`pump` がローカルに 1 つ持ち、
+    /// `processVideoSample` が毎フレーム更新する（export ごとに作り直す）。
+    ///
+    /// 「直前フレームとの差分で判断する」項目だけを集めてある。個別の inout 引数で
+    /// 渡していたものを 1 つにまとめたのは、S10 でゲート状態が増えて
+    /// `processVideoSample` の引数が 20 を超えたため（挙動は不変）。
+    private struct FrameLoopState {
+        var frameIndex = 0
+        /// 直前フレームが属していたクリップ（境界跨ぎの時系列リセット判定用）。
+        var previousClipID: UUID?
+        var cachedLandmarkSets: [FaceLandmarkSet] = []
+        var cachedBackgroundMask: MaskBuffer?
+        /// 直前フレームのモザイク適用区間ゲートの状態（S10）。nil = まだ 1 枚も
+        /// 処理していない。区間へ再入した最初のフレームで、検出間引きに関係なく
+        /// 検出をやり直すために持つ（さもないと再入直後の数フレームが空のまま出る）。
+        ///
+        /// **真偽値ではなく「適用対象の素材ID集合」で持つ**理由: トランジションの重なり
+        /// 区間では 2 素材が同時に映り、片方だけが区間から外れることがある。真偽値
+        /// （どれか 1 つでも ON）だけを見ていると、片側が ON→OFF になったフレームで
+        /// 変化が観測できず強制再検出が走らないため、**両素材ぶんの古い union**が
+        /// そのまま使われ続けて区間外の素材にモザイクが焼き込まれる。
+        var previousActiveSourceIDs: Set<UUID>?
+    }
+
     // フェーズ2でこのファイルに本格的に手を入れる際に解消する予定の構造的負債
     // swiftlint:disable:next function_parameter_count
     private func processVideoSample(
         _ sample: CMSampleBuffer,
-        frameIndex: inout Int,
-        previousClipID: inout UUID?,
-        cachedLandmarkSets: inout [FaceLandmarkSet],
-        cachedBackgroundMask: inout MaskBuffer?,
+        loop: inout FrameLoopState,
         detectionInterval: Int,
         selectedFaceTargets: [FaceTarget],
         manualRegions: [ManualRegion],
@@ -778,23 +811,47 @@ public final class VideoMosaicExporter: @unchecked Sendable {
         // クリップ境界を跨いだフレームは時系列状態をリセットし、
         // 検出間引きに関係なく検出し直す（前クリップの顔位置を持ち越さない）。
         let crossedClipBoundary = resetAtClipBoundary(
-            location: location, previousClipID: &previousClipID,
-            cachedLandmarkSets: &cachedLandmarkSets,
-            cachedBackgroundMask: &cachedBackgroundMask)
+            location: location, previousClipID: &loop.previousClipID,
+            cachedLandmarkSets: &loop.cachedLandmarkSets,
+            cachedBackgroundMask: &loop.cachedBackgroundMask)
 
-        if frameIndex % detectionInterval == 0 || crossedClipBoundary {
+        // モザイク適用区間ゲート（S10）。判定時刻は**このフレームの合成時刻**
+        // （writer 用にシフトする前の timeSec）で、写像・キャッシュ検索に使うのと同じ値。
+        // プレビュー（`MosaicEditorModel.isMosaicActive(atComposition:)`）と同一の純関数を
+        // 通すので、「合成時刻 → 素材ID/素材時刻 → isActive」の順序と時刻の意味が両経路で揃う。
+        let gate = MosaicApplyGate.gateState(ranges: applyRanges, mapping: mapping,
+                                             compositionTime: timeSec,
+                                             photoSourceIDs: photoSourceIDs)
+        let mosaicActive = gate.isActive
+        // 区間へ再入した最初のフレームは、間引きに関係なく検出し直す
+        // （区間外で捨てた顔・マスクが空のまま数フレーム出力されるのを防ぐ）。
+        // 判定は真偽値ではなく**適用対象の素材集合**の変化で行う。重なり区間で
+        // 片方の素材だけが ON→OFF になったフレームは、真偽値では変化が見えないのに
+        // 顔の union の中身は変わっている（`FrameLoopState.previousActiveSourceIDs` の doc）。
+        let gateChanged = loop.previousActiveSourceIDs != gate.activeSourceIDs
+        loop.previousActiveSourceIDs = gate.activeSourceIDs
+
+        if !mosaicActive {
+            // 区間外は素の映像。顔・手動矩形・背景モザイクのすべてを止める
+            // （顔だけ止めて背景が乗り続けるのは要件違反）。保持中の顔位置と
+            // 背景マスクは区間へ戻ったときには別時刻のものなので、ここで捨てる。
+            // 検出そのものを走らせないぶん、区間外が長いほど書き出しが速くなる。
+            loop.cachedLandmarkSets = []
+            loop.cachedBackgroundMask = nil
+            landmarkSmoother.reset()
+        } else if loop.frameIndex % detectionInterval == 0 || crossedClipBoundary || gateChanged {
             refreshDetection(
                 DetectionFrame(sourceBuffer: sourceBuffer, timeSec: timeSec,
                                timestampMs: timestampMs, location: location, mapping: mapping,
                                detectionCaches: detectionCaches,
                                selectedFaceTargets: selectedFaceTargets,
                                faceEnabled: faceEnabled, backgroundEnabled: backgroundEnabled),
-                cachedLandmarkSets: &cachedLandmarkSets,
-                cachedBackgroundMask: &cachedBackgroundMask)
+                cachedLandmarkSets: &loop.cachedLandmarkSets,
+                cachedBackgroundMask: &loop.cachedBackgroundMask)
         }
 
         // 手動矩形は顔検出の補助なので顔モザイク（faceEnabled）の状態に従う。
-        let additionalPaths = faceEnabled
+        let additionalPaths = faceEnabled && mosaicActive
             ? manualRegions.map { region -> FaceMaskBuilder.RegionPath in
                 let path = FaceMaskBuilder.rectPath(from: region.normalizedRect, in: videoSize)
                 return FaceMaskBuilder.RegionPath(path: path, value: 0.4)
@@ -805,9 +862,9 @@ public final class VideoMosaicExporter: @unchecked Sendable {
         try? mosaicFrame(
             sourceBuffer: sourceBuffer,
             pts: pts,
-            landmarkSets: cachedLandmarkSets,
+            landmarkSets: loop.cachedLandmarkSets,
             additionalPaths: additionalPaths,
-            backgroundMask: cachedBackgroundMask,
+            backgroundMask: loop.cachedBackgroundMask,
             backgroundBlock: backgroundBlock,
             adaptor: adaptor,
             input: input,
@@ -819,7 +876,7 @@ public final class VideoMosaicExporter: @unchecked Sendable {
         // Metal テクスチャキャッシュに溜まった参照を解放。
         CVMetalTextureCacheFlush(cache, 0)
 
-        frameIndex += 1
+        loop.frameIndex += 1
         // トリム時は「トリム範囲内の進捗」で 0..1 化して表示する。
         let progressSec = max(0, timeSec - trimStartSec)
         progress(min(progressSec / totalSeconds, 1.0))
@@ -1022,6 +1079,21 @@ public final class VideoMosaicExporter: @unchecked Sendable {
     /// **モザイクの過剰適用は安全側・不足は事故**なのでこのまま倒す。
     /// 直すには選択顔の同一性をクリップ単位で持つ必要があり、S8 の範囲を超える。
     ///
+    /// **モザイク適用区間のゲートは素材ごとにここで掛ける（S10 レビュー修正）。**
+    /// 重なり区間で素材 A だけが適用区間内なら、B の顔は union に入れない。
+    /// フレーム単位の合成時刻ゲート（`isActive(ranges:mapping:compositionTime:)`）は
+    /// 「どれか 1 つでも区間内なら ON」なので、それだけでは重なり区間で**区間ゼロの素材の
+    /// 顔にもモザイクが乗る**（実測: 8px 市松素材の crossfade 0.5s 重なり 15 フレーム中
+    /// 12 フレームで、区間外の素材側 MAD が 25.8 → 95.9〜105.7 へ跳ね上がった）。
+    /// プレビュー（`MosaicEditorModel.displayFaces(at:matching:)`）は同じ純関数・同じ
+    /// 引数で素材別にゲートしているので、ここを揃えないとプレビューと書き出しが食い違い、
+    /// ユーザーは書き出すまで気づけない。
+    ///
+    /// なお union が空になった場合、呼び出し側（`refreshDetection`）は従来どおり
+    /// その場検出へ落ちる。「適用区間内の素材にキャッシュが無い」ケースなので
+    /// 過剰適用側（安全側）であり、全素材が区間外のケースはそもそも
+    /// `mosaicActive == false` で `refreshDetection` 自体が呼ばれない。
+    ///
     /// - Returns: 重なり区間なら union（空もあり得る）、重なり外なら nil
     ///   （呼び出し側は従来どおり単一位置の経路へ落ちる）。
     private func transitionFaces(mapping: TimelineMapping,
@@ -1036,6 +1108,9 @@ public final class VideoMosaicExporter: @unchecked Sendable {
                   let sourceCache = detectionCaches[entry.location.sourceID] else { return [] }
             // 写真素材の素材時刻は 0 へ clamp（`resolveLocation` と同じ規則）。
             let sourceTime = photoSourceIDs.contains(entry.location.sourceID) ? 0 : entry.location.time
+            guard MosaicApplyGate.isActive(ranges: applyRanges,
+                                           sourceID: entry.location.sourceID,
+                                           sourceTime: sourceTime) else { return [] }
             let cached = lookupCache(sourceCache, at: sourceTime)
             let placed = renderLayout.remap(cached, clipID: entry.location.clipID)
             return overlap.kind.visibleLandmarks(placed, progress: progress, side: side)

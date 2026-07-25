@@ -1545,6 +1545,317 @@ final class MultiClipExportTests: XCTestCase {
         XCTAssertGreaterThan(controlCounter.count, 0,
                              "対照実験で実検出が観測できない（検出カウントのフックが壊れている）")
     }
+
+    /// 出力動画の映像フレームの pts 列（秒）。フレーム数と時刻の同一性検証に使う。
+    private func videoPresentationTimes(of url: URL) async throws -> [Double] {
+        let asset = AVURLAsset(url: url)
+        let tracks = try await asset.loadTracks(withMediaType: .video)
+        let track = try XCTUnwrap(tracks.first)
+        let reader = try AVAssetReader(asset: asset)
+        let output = AVAssetReaderTrackOutput(track: track, outputSettings: nil)
+        guard reader.canAdd(output) else { return [] }
+        reader.add(output)
+        reader.startReading()
+        var times: [Double] = []
+        while let sample = output.copyNextSampleBuffer() {
+            // セグメント境界のマーカーバッファは pts が不定（NaN）で届くことがあるので落とす。
+            let pts = CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sample))
+            if pts.isFinite { times.append(pts) }
+        }
+        return times
+    }
+
+    /// S10: モザイク適用区間がエクスポート経路に効いていること。
+    ///
+    /// 1. 区間外のフレームでは**実検出が一度も走らない**（ゲートが描画経路に届いている証拠。
+    ///    素材が単色でモザイクの有無を画素で判別できないため、検出回数を代理指標にする）
+    /// 2. それでも**出力フレーム数・pts・尺は区間の有無で一切変わらない**
+    ///    （区間外は入力フレームをそのまま書くだけで、落としも縮めもしない）
+    func test_applyRange_gatesExportWithoutChangingFrameCountOrDuration() async throws {
+        guard MTLCreateSystemDefaultDevice() != nil else {
+            throw XCTSkip("Metal デバイスが無い環境ではスキップ")
+        }
+        let url = try await makeTestVideo(seconds: 2.0, withAudio: false)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let sourceID = UUID()
+        let clips = [TimelineClip(sourceID: sourceID, sourceStart: 0, sourceEnd: 2)]
+        let composition = try await TimelineCompositionBuilder()
+            .build(clips: clips, sources: [sourceID: AVURLAsset(url: url)]).composition
+        let mapping = TimelineMapping(clips: clips)
+
+        // 1) 区間なし（既存挙動）: 全編で検出が走る。
+        let (base, baseCounter) = try makeCountingExporter()
+        let baseURL = try await base.export(asset: composition, mapping: mapping) { _ in }
+        defer { try? FileManager.default.removeItem(at: baseURL) }
+        XCTAssertGreaterThan(baseCounter.count, 0)
+        let basePTS = try await videoPresentationTimes(of: baseURL)
+        XCTAssertGreaterThan(basePTS.count, 0)
+
+        // 2) どのフレームも区間外: 実検出ゼロ。
+        //
+        // 区間はクリップ使用範囲 [0,2) と**交差させる**こと。交差しない区間（例 [5,6)）は
+        // 孤児区間として `MosaicApplyGate.effectiveRanges` に落とされ、「区間指定なし」＝
+        // 全区間 ON に戻る（帯 UI に出ない区間でモザイクが全消えする事故を防ぐ仕様。
+        // `MosaicEditorModel.effectiveApplyRanges` の doc 参照）。
+        // 代わりに、30fps のフレーム時刻（k/30 秒）の**隙間**に収まる極小区間を使う。
+        let (off, offCounter) = try makeCountingExporter()
+        let offURL = try await off.export(
+            asset: composition, mapping: mapping,
+            applyRanges: [MosaicApplyRange(sourceID: sourceID, sourceStart: 1.001, sourceEnd: 1.002)]
+        ) { _ in }
+        defer { try? FileManager.default.removeItem(at: offURL) }
+        XCTAssertEqual(offCounter.count, 0, "区間外のフレームで実検出が走っている（ゲート未配線）")
+        let offPTS = try await videoPresentationTimes(of: offURL)
+        XCTAssertEqual(offPTS.count, basePTS.count, "区間の有無で出力フレーム数が変わっている")
+        for (index, pts) in offPTS.enumerated() {
+            XCTAssertEqual(pts, basePTS[index], accuracy: 1e-6, "frame \(index) の pts がずれている")
+        }
+
+        // 3) 部分区間: 区間内のフレームだけ検出が走る（0 < n < 全体）。
+        let (partial, partialCounter) = try makeCountingExporter()
+        let partialURL = try await partial.export(
+            asset: composition, mapping: mapping,
+            applyRanges: [MosaicApplyRange(sourceID: sourceID, sourceStart: 0.5, sourceEnd: 1.0)]
+        ) { _ in }
+        defer { try? FileManager.default.removeItem(at: partialURL) }
+        XCTAssertGreaterThan(partialCounter.count, 0, "区間内でも検出が走っていない")
+        XCTAssertLessThan(partialCounter.count, baseCounter.count,
+                          "部分区間なのに全フレームで検出している")
+        let partialPTS = try await videoPresentationTimes(of: partialURL)
+        XCTAssertEqual(partialPTS.count, basePTS.count)
+
+        let baseDuration = CMTimeGetSeconds(try await AVURLAsset(url: baseURL).load(.duration))
+        let offDuration = CMTimeGetSeconds(try await AVURLAsset(url: offURL).load(.duration))
+        XCTAssertEqual(offDuration, baseDuration, accuracy: 0.02, "区間の有無で出力尺が変わっている")
+    }
+
+    // MARK: - S10: 重なり区間の素材別ゲート（画素検証）
+
+    /// 8px 市松（黒/白）の動画を作る。**単色素材ではモザイクの有無が画素に出ない**ため、
+    /// ブロックモザイクが平均化で必ず灰色へ潰す高周波パターンを素材にする
+    /// （素の映像 std ≈ 126.5 / モザイク後 std ≈ 16.4）。
+    private func makeCheckerboardVideo(seconds: Double) async throws -> URL {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(UUID().uuidString).mp4")
+        let writer = try AVAssetWriter(outputURL: url, fileType: .mp4)
+        let input = AVAssetWriterInput(mediaType: .video, outputSettings: [
+            AVVideoCodecKey: AVVideoCodecType.h264,
+            AVVideoWidthKey: width,
+            AVVideoHeightKey: height
+        ])
+        input.expectsMediaDataInRealTime = false
+        let adaptor = AVAssetWriterInputPixelBufferAdaptor(
+            assetWriterInput: input,
+            sourcePixelBufferAttributes: [
+                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+                kCVPixelBufferWidthKey as String: width,
+                kCVPixelBufferHeightKey as String: height
+            ])
+        writer.add(input)
+        writer.startWriting()
+        writer.startSession(atSourceTime: .zero)
+
+        for i in 0..<Int(seconds * Double(fps)) {
+            while !input.isReadyForMoreMediaData {
+                try await Task.sleep(nanoseconds: 1_000_000)
+            }
+            var pb: CVPixelBuffer?
+            CVPixelBufferCreate(kCFAllocatorDefault, width, height,
+                                kCVPixelFormatType_32BGRA, nil, &pb)
+            guard let buffer = pb else { continue }
+            CVPixelBufferLockBaseAddress(buffer, [])
+            if let base = CVPixelBufferGetBaseAddress(buffer)?.assumingMemoryBound(to: UInt8.self) {
+                let bytesPerRow = CVPixelBufferGetBytesPerRow(buffer)
+                for y in 0..<height {
+                    for x in 0..<width {
+                        let value: UInt8 = ((x / 8) + (y / 8)) % 2 == 0 ? 0 : 255
+                        let offset = y * bytesPerRow + x * 4
+                        base[offset] = value
+                        base[offset + 1] = value
+                        base[offset + 2] = value
+                        base[offset + 3] = 255
+                    }
+                }
+            }
+            CVPixelBufferUnlockBaseAddress(buffer, [])
+            adaptor.append(buffer, withPresentationTime:
+                            CMTime(value: CMTimeValue(i), timescale: CMTimeScale(fps)))
+        }
+        input.markAsFinished()
+        await writer.finishWriting()
+        return url
+    }
+
+    /// 円周に並べた 477 点の合成顔（正規化座標）。
+    ///
+    /// **477 点**なのはフルメッシュ（478 点）**未満**でコンタマスク経路を確定させるため
+    /// （478 点ちょうどだと 3D メッシュ warp 経路に入り、実素材の顔でないと結果が読みにくい）。
+    private func makeSyntheticFace(cx: Double, cy: Double, radius: Double) -> FaceLandmarkSet {
+        let points = (0..<477).map { index -> FaceLandmark in
+            let angle = 2 * Double.pi * Double(index) / 477
+            return FaceLandmark(x: Float(cx + radius * cos(angle)),
+                                y: Float(cy + radius * sin(angle)))
+        }
+        return FaceLandmarkSet(points: points, confidence: 1)
+    }
+
+    /// 素材時刻 1/30 秒刻みで同じ顔を詰めた検出キャッシュ（補間・ホールドの穴を排除する）。
+    private func denseCache(face: FaceLandmarkSet, seconds: Double) -> [Double: [FaceLandmarkSet]] {
+        var cache: [Double: [FaceLandmarkSet]] = [:]
+        for index in 0...Int(seconds * Double(fps)) {
+            cache[Double(index) / Double(fps)] = [face]
+        }
+        return cache
+    }
+
+    /// 出力動画の各フレームについて、左右 2 つの顔領域の画素を切り出して返す。
+    private func facePatches(of url: URL) async throws
+    -> [(pts: Double, left: [UInt8], right: [UInt8])] {
+        let asset = AVURLAsset(url: url)
+        let tracks = try await asset.loadTracks(withMediaType: .video)
+        let track = try XCTUnwrap(tracks.first)
+        let reader = try AVAssetReader(asset: asset)
+        let output = AVAssetReaderTrackOutput(track: track, outputSettings: [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
+        ])
+        reader.add(output)
+        reader.startReading()
+        var result: [(pts: Double, left: [UInt8], right: [UInt8])] = []
+        while let sample = output.copyNextSampleBuffer() {
+            let pts = CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sample))
+            guard pts.isFinite, let buffer = CMSampleBufferGetImageBuffer(sample) else { continue }
+            CVPixelBufferLockBaseAddress(buffer, .readOnly)
+            defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
+            guard let base = CVPixelBufferGetBaseAddress(buffer)?
+                .assumingMemoryBound(to: UInt8.self) else { continue }
+            let bytesPerRow = CVPixelBufferGetBytesPerRow(buffer)
+            let bufferWidth = CVPixelBufferGetWidth(buffer)
+            let bufferHeight = CVPixelBufferGetHeight(buffer)
+            // 顔（正規化半径 0.09 の円）の**内側**だけを見る。輪郭の外を混ぜると
+            // 素の市松が入って指標が鈍る。
+            func patch(centerX: Double) -> [UInt8] {
+                var pixels: [UInt8] = []
+                let xRange = Int(Double(bufferWidth) * (centerX - 0.05))
+                    ..< Int(Double(bufferWidth) * (centerX + 0.05))
+                let yRange = Int(Double(bufferHeight) * 0.45)..<Int(Double(bufferHeight) * 0.55)
+                for y in yRange {
+                    for x in xRange {
+                        pixels.append(base[y * bytesPerRow + x * 4])
+                    }
+                }
+                return pixels
+            }
+            result.append((pts, patch(centerX: 0.25), patch(centerX: 0.75)))
+        }
+        return result
+    }
+
+    /// パッチの輝度標準偏差。素の 8px 市松は高く（≈126）、ブロックモザイクが
+    /// 乗ると平均化されて低くなる（≈16）。
+    ///
+    /// 「モザイク無し書き出しとの画素差」ではなくこの指標を使う理由: H.264 は
+    /// フレーム間予測なので、画面の一部にモザイクが乗るだけで**乗っていない領域の
+    /// 復号結果まで数値が動く**（実測: 完全に同一内容のはずの領域で MAD 6.875）。
+    /// 標準偏差なら「高周波が残っているか」だけを見るので、符号化ノイズに鈍い。
+    private func luminanceStdDev(_ pixels: [UInt8]) -> Double {
+        guard !pixels.isEmpty else { return .nan }
+        let mean = pixels.reduce(0.0) { $0 + Double($1) } / Double(pixels.count)
+        let variance = pixels.reduce(0.0) { $0 + (Double($1) - mean) * (Double($1) - mean) }
+            / Double(pixels.count)
+        return variance.squareRoot()
+    }
+
+    /// **S10 レビュー修正: 重なり区間で、適用区間ゼロの素材の顔にモザイクが乗らないこと。**
+    ///
+    /// 素材 A（顔は画面左）だけを適用区間にして A→B のクロスフェードを書き出す。
+    /// 修正前は重なり区間で `transitionFaces` が両素材の顔を無条件に union していたため、
+    /// **素材 B（区間ゼロ）の顔（画面右）にもモザイクが焼き込まれていた**
+    /// （実測: 重なり 15 フレーム中 12 フレームで右側 MAD が 25.8 → 95.9〜105.7 へ跳ねた）。
+    /// プレビューは同条件で B の顔を出さないので、プレビューと書き出しが食い違い、
+    /// ユーザーは書き出すまで気づけない。
+    ///
+    /// 判定は顔領域内の輝度標準偏差で行う（`luminanceStdDev` の doc 参照）。
+    /// 区間指定なし（＝両素材にモザイク）の書き出しを対照に置き、
+    /// **右側にモザイクが乗れば検出できる計測系である**ことも同時に固定する。
+    func test_applyRange_doesNotMosaicOutOfRangeSourceInsideTransitionOverlap() async throws {
+        guard MTLCreateSystemDefaultDevice() != nil else {
+            throw XCTSkip("Metal デバイスが無い環境ではスキップ")
+        }
+        let clipSeconds = 2.0
+        let urlA = try await makeCheckerboardVideo(seconds: clipSeconds)
+        let urlB = try await makeCheckerboardVideo(seconds: clipSeconds)
+        defer {
+            try? FileManager.default.removeItem(at: urlA)
+            try? FileManager.default.removeItem(at: urlB)
+        }
+        let sourceA = UUID()
+        let sourceB = UUID()
+        let clipA = TimelineClip(sourceID: sourceA, sourceStart: 0, sourceEnd: clipSeconds)
+        let clipB = TimelineClip(sourceID: sourceB, sourceStart: 0, sourceEnd: clipSeconds)
+        let transitions = [clipA.id: TransitionSpec(kind: .crossfade, duration: 0.5)]
+        let built = try await TimelineCompositionBuilder()
+            .build(clips: [clipA, clipB], transitions: transitions,
+                   sources: [sourceA: AVURLAsset(url: urlA), sourceB: AVURLAsset(url: urlB)])
+        let mapping = TimelineMapping(clips: [clipA, clipB], transitions: transitions)
+        let overlap = try XCTUnwrap(mapping.overlaps.first, "クロスフェードの重なりが作られていない")
+        let caches = [
+            sourceA: denseCache(face: makeSyntheticFace(cx: 0.25, cy: 0.5, radius: 0.09),
+                                seconds: clipSeconds),
+            sourceB: denseCache(face: makeSyntheticFace(cx: 0.75, cy: 0.5, radius: 0.09),
+                                seconds: clipSeconds)
+        ]
+
+        func export(applyRanges: [MosaicApplyRange], faceEnabled: Bool) async throws -> URL {
+            try await makeExporter().export(
+                asset: built.composition, detectionCaches: caches, mapping: mapping,
+                applyRanges: applyRanges, videoComposition: built.videoComposition,
+                faceEnabled: faceEnabled) { _ in }
+        }
+
+        let bothURL = try await export(applyRanges: [], faceEnabled: true)
+        let gatedURL = try await export(
+            applyRanges: [MosaicApplyRange(sourceID: sourceA, sourceStart: 0, sourceEnd: clipSeconds)],
+            faceEnabled: true)
+        defer {
+            for url in [bothURL, gatedURL] { try? FileManager.default.removeItem(at: url) }
+        }
+
+        let both = try await facePatches(of: bothURL)
+        let gated = try await facePatches(of: gatedURL)
+        XCTAssertEqual(both.count, gated.count)
+
+        // モザイクの有無を分ける閾値。実測は「乗っている ≈ 16 / 乗っていない ≈ 126」なので
+        // どちらからも十分離れた値を採る。
+        let mosaicMax = 60.0
+        let rawMin = 90.0
+        // 重なりの先頭数フレームは、対照（区間指定なし）でも右側にモザイクが乗らない:
+        // incoming 側は progress=0 で不透明度 0 のため `visibleLandmarks` が空を返し、
+        // 次の検出更新（検出間引き）まで union に入らないからである。レビューの実測でも
+        // 重なり 15 フレームのうち先頭 3 フレームは両条件で off だった。
+        // したがって「**対照で右にモザイクが乗るフレーム**でのみ」区間外側を検証する。
+        var comparableFrames = 0
+        for index in gated.indices where
+            gated[index].pts >= overlap.start && gated[index].pts < overlap.end {
+            let pts = gated[index].pts
+            // 区間内の素材（A）には重なり中も必ずモザイクが乗る。
+            XCTAssertLessThan(luminanceStdDev(gated[index].left), mosaicMax,
+                              "区間内の素材（A）にモザイクが乗っていない pts=\(pts)")
+            guard luminanceStdDev(both[index].right) < mosaicMax else { continue }
+            comparableFrames += 1
+            XCTAssertGreaterThan(luminanceStdDev(gated[index].right), rawMin,
+                                 "区間外の素材（B）の顔にモザイクが焼き込まれている "
+                                 + "pts=\(pts) std=\(luminanceStdDev(gated[index].right))")
+        }
+        XCTAssertGreaterThanOrEqual(comparableFrames, 10,
+                                    "対照実験で右側にモザイクが乗るフレームが取れていない"
+                                    + "（計測系が壊れている）")
+
+        // 重なり**外**（素材 B 単独区間）も従来どおり OFF のままであること。
+        for index in gated.indices where gated[index].pts >= overlap.end {
+            XCTAssertGreaterThan(luminanceStdDev(gated[index].right), rawMin,
+                                 "重なり外の区間外フレームにモザイクが乗っている pts=\(gated[index].pts)")
+        }
+    }
 }
 
 #endif

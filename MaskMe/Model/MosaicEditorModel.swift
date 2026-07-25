@@ -137,6 +137,11 @@ public final class MosaicEditorModel: ObservableObject {
     @Published var timeline = TimelineState() {
         didSet {
             mapping = timeline.mapping
+            // 孤児区間（どのクリップの使用範囲とも交差しない適用区間）を除いた
+            // 「実際に効いている区間」をここで 1 回だけ作る。O(クリップ数 × 区間数) を
+            // 30fps の描画やエクスポートの全フレームで回さないためのキャッシュであり、
+            // タイムラインが変わらない限り結果も変わらない（純関数）。
+            effectiveApplyRanges = MosaicApplyGate.effectiveRanges(timeline.applyRanges, mapping: mapping)
             // 進行中の非同期処理（rebuild・ライブ検出の in-flight submit）を
             // 旧世代として破棄できるよう、タイムラインが変わった瞬間に世代を進める。
             timelineGeneration += 1
@@ -177,6 +182,21 @@ public final class MosaicEditorModel: ObservableObject {
     /// を経由してこの写像を参照する。フェーズ1相当の「素材全体1クリップ」では恒等写像に
     /// なるため、配線前と観測可能な挙動は変わらない。
     private(set) var mapping = TimelineMapping(clips: [])
+    /// **描画ゲートが見る唯一の適用区間**（`timeline` の didSet で追随。S10 レビュー修正）。
+    ///
+    /// `timeline.applyRanges` から「どのクリップの使用範囲とも交差しない区間（孤児区間）」を
+    /// 除いたもの。孤児区間は帯 UI（`TimelineBandLayout.applySpans`）に現れないため
+    /// 選択も削除もできず、それをゲートに通すと**全区間でモザイクが消えたまま undo 以外に
+    /// 戻せない**（実測: 4 秒素材の区間 source[1,2) に対し左端を 2.5 までトリムしただけで
+    /// 帯 1 本 → 0 本・ゲート ON 比率 0.24988 → 0.0）。区間データそのものは温存する
+    /// （トリムを戻せば復活する）という S9 の決定は変えず、**ゲート側で除外**する。
+    ///
+    /// これにより「見えている帯の本数 ⇔ 有効区間の個数」「帯 0 本 ⇔ ゲート常時 ON」が
+    /// 成立する。絞り込みの実体は `MosaicApplyGate.effectiveRanges(_:mapping:)` の 1 本だけで、
+    /// 顔ゲート・合成時刻ゲート・エクスポートの全経路がこの結果を通る。
+    ///
+    /// **毎フレーム計算しないこと**（O(クリップ数 × 区間数)）。だから didSet でキャッシュしている。
+    private(set) var effectiveApplyRanges: [MosaicApplyRange] = []
     /// テスト専用: クリップ列を直接差し替える（`didSet` 経由で `mapping` の再構築・
     /// 世代インクリメント・`videoDuration` 追随も走る）。
     /// 複数クリップ状態を再現するためのバックドア（正規の書き込み経路は
@@ -482,6 +502,18 @@ public final class MosaicEditorModel: ObservableObject {
             } catch {
                 errorMessage = "動画の読み込みに失敗しました"
             }
+            // タイムライン（＝適用区間）と previewController が揃った**この時点**で、
+            // 現在の再生位置のフレームを必ず 1 枚描き直す。一般的な動画編集アプリと同じく
+            // 「開いた瞬間に、いまの編集状態どおりの絵が出ている」状態にするため。
+            //
+            // ここが無いと、同期部の `renderPreview()`（素材の生フレームに対する暫定表示。
+            // 合成もモザイク適用区間も反映されない）が残り続ける。下書き復元では
+            // `applyRestoredParameters()` を含む 3 回の `renderPreview` がすべてこの Task より
+            // 先に、クリップ 0 本・適用区間 0 個の状態で走り終わっており、displayLink は
+            // `play()` でしか回らないため描き直す機会が二度と来ない
+            // （実測: 復元後 2 秒放置で `renderCurrentFrame` 実行 0 回、previewImage の中央画素は
+            // 適用区間外なのに [127,127,127]＝モザイクのまま。シークして初めて素の映像になる）。
+            await previewController?.renderInitialFrame(at: playbackPosition)
             // 成功・失敗どちらの経路でも必ず解除する。ここより前に解除すると
             // 「読み込み完了表示なのに previewController がまだ nil」の窓ができ、
             // 再生ボタンの表示と実挙動がずれる（togglePlayback 側でも二重に防ぐ）。
@@ -852,6 +884,15 @@ public final class MosaicEditorModel: ObservableObject {
 
     // MARK: - レンダリング
 
+    /// 静止プレビュー（`sourceTexture` 1 枚）を描いて `previewImage` を更新する。
+    ///
+    /// **モザイク適用区間ゲート（S10）はここには入れない。** この関数は合成タイムライン
+    /// 時刻を持たない写真タブ経路と共用であり、また `sourceTexture` は素材の生フレームで
+    /// 合成結果ではないため、ここで作る絵は本質的に「合成前の暫定表示」である。
+    /// 動画モードの正しい絵は必ず `MosaicPreviewController` が合成済みフレームから作る
+    /// （ゲートもそちらに 1 箇所だけ置く）。ロード・下書き復元の直後は
+    /// `MosaicPreviewController.renderInitialFrame(at:)` が現在位置のフレームを
+    /// 1 枚描き直して、この暫定表示を必ず上書きする（`installInitialTimeline` の doc 参照）。
     func renderPreview() {
         guard let renderer, let tex = sourceTexture else { return }
         applyControls(to: renderer)
@@ -1258,6 +1299,10 @@ public final class MosaicEditorModel: ObservableObject {
                 // 写真素材の素材時刻は exporter 側でも 0 に clamp する
                 // （t=0 seed に全フレームがヒットし、写真区間で実検出が走らない）。
                 photoSourceIDs: timeline.photoSourceIDs,
+                // モザイク適用区間（S10）。素材時刻アンカーのまま渡し、exporter が
+                // フレームの合成時刻を写像してからゲート判定する（プレビューと同じ
+                // `MosaicApplyGate` の純関数を通すので境界フレームの結果が一致する）。
+                applyRanges: timeline.applyRanges,
                 // 合成（トランジション・レターボックス・フレームレート上限）と
                 // 音声ミックスはプレビューと同じものを渡す。composition と必ず組で
                 // 差し替わる（`apply(built:generation:)`）ので世代がずれない。

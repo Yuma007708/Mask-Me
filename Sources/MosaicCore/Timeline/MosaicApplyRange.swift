@@ -21,6 +21,14 @@ import Foundation
 /// 合成時刻由来の素材アンカー（例 [1,2)）を保存すると `isActive` が 0 を見て
 /// **絶対にヒットしない**。静止画に対する秒単位のモザイク ON/OFF を捨てる代わりに、
 /// 「素材時刻アンカー」という不変条件を全素材で保つ。
+///
+/// **どのクリップの使用範囲とも交差しなくなった区間（孤児区間）は消さずに温存する。**
+/// トリム・分割・クリップ削除で一時的に外れただけの区間を消すと、トリムを戻しても
+/// undo しても復活しないからである。代わりに**ゲート判定の側で除外**する
+/// （`MosaicApplyGate.effectiveRanges(_:mapping:)`）。この分担により
+/// 「画面に見えている帯（`TimelineBandLayout.applySpans`）とゲートの挙動が必ず一致する」
+/// という不変条件が保たれる（孤児区間を放置してゲートに通すと、帯 0 本＝削除不能なのに
+/// 全区間 OFF という復帰不能な状態になる。S10 レビューの実測事故）。
 public struct MosaicApplyRange: Identifiable, Codable, Equatable, Sendable {
     public let id: UUID
     /// 素材の識別子（`TimelineClip.sourceID` と同じ空間）。
@@ -65,15 +73,168 @@ public enum MosaicApplyGate {
     /// クリップ分割由来の区間は境界が浮動小数点誤差でずれ得るため厳密一致にしない。
     private static let mergeTolerance: Double = 1e-9
 
+    /// 「いまのタイムラインで実際に効いている適用区間」だけに絞る（S10 レビュー修正）。
+    ///
+    /// **ゲート判定に渡す区間は必ずこの関数を通すこと。** 顔の素材別ゲート・合成時刻
+    /// ゲート・エクスポートの 3 経路が同じ結果になる唯一の担保であり、絞り込みを
+    /// 呼び出し側で書き直す（＝二重実装する）ことは禁止する。
+    ///
+    /// **なぜ要るか（孤児区間の事故）**: 適用区間は素材時刻アンカーなので、トリム・分割・
+    /// クリップ削除で「どのクリップの使用範囲とも交差しない」状態になり得る（区間データは
+    /// `MosaicApplyRange` 型の doc どおり**温存する**設計なので、そのまま残る）。このとき
+    /// 帯 UI（`TimelineBandLayout.applySpans`）は 0 本になって区間を選択・削除できないのに、
+    /// `applyRanges` は非空なのでゲートだけが全時刻で false になり、**モザイクが全区間で
+    /// 消えたまま undo 以外に戻せなくなる**。実測: 4 秒素材に区間 source[1,2) を置き、
+    /// 左端を 2.5 までトリムしただけで帯 1 本 → 0 本・ゲート ON 比率 0.24988 → 0.0。
+    ///
+    /// 絞り込み後が空なら「区間指定なし」（＝全区間適用の既存挙動）に戻る。これにより
+    /// **「画面に見えている帯とゲートの挙動が必ず一致する」**（帯 n 本 ⇔ 有効区間 n 個、
+    /// 帯 0 本 ⇔ ゲート常時 ON）という不変条件が成立する。
+    ///
+    /// 交差判定は `TimelineBandLayout.applySpans` と**同じ式**（同一 sourceID の
+    /// `max(range.sourceStart, clip.sourceStart) < min(range.sourceEnd, clip.sourceEnd)` の
+    /// 半開区間交差、両端が有限）である。ここだけ式が違うと「帯は出ているのにゲートが
+    /// 閉じる」1 ulp 事故が復活する（S8 の `Overlap.end` の前科）。
+    ///
+    /// 計算量は O(クリップ数 × 区間数)。**毎フレーム呼ばない**こと。
+    /// `MosaicEditorModel` は `timeline` の didSet で 1 回だけ計算してキャッシュし、
+    /// `VideoMosaicExporter` は export 開始時に 1 回だけ計算する
+    /// （実測: 50 クリップ × 100 区間で 0.14〜0.18ms／回。タイムライン変更時 1 回なら
+    /// 無視できるが、30fps 描画やエクスポートの全フレームで回す量ではない）。
+    public static func effectiveRanges(_ ranges: [MosaicApplyRange],
+                                       mapping: TimelineMapping) -> [MosaicApplyRange] {
+        guard !ranges.isEmpty else { return ranges }
+        let spans = mapping.clipSpans
+        guard !spans.isEmpty else { return [] }
+        return ranges.filter { range in
+            spans.contains { span in
+                let clip = span.clip
+                guard clip.sourceID == range.sourceID else { return false }
+                let start = max(range.sourceStart, clip.sourceStart)
+                let end = min(range.sourceEnd, clip.sourceEnd)
+                return start.isFinite && end.isFinite && start < end
+            }
+        }
+    }
+
     /// 指定した素材時刻にモザイクを適用すべきかを返す。
+    ///
+    /// `ranges` には `effectiveRanges(_:mapping:)` の結果を渡すこと
+    /// （生の `TimelineState.applyRanges` を渡すと孤児区間で全区間 OFF になる）。
     ///
     /// `ranges` が**空なら常に true**（範囲指定なし = 全区間適用の既存挙動互換）。
     /// 判定は半開区間 [sourceStart, sourceEnd)。
+    ///
+    /// **非有限の `sourceTime` はフェイルオープン**（true）にする。写像が壊れた時刻で
+    /// 「顔にはモザイクが乗らないが手動矩形と背景モザイクは乗る」という、経路ごとに
+    /// フェイル方向が食い違う状態を作らないため（合成時刻ゲート側は非有限時刻で
+    /// フェイルオープンする）。プロジェクトの原則どおり**過剰適用が安全側・不足が事故**の
+    /// 方向へ倒す。実害としては、NaN 時刻では `lookupFaces` も空を返すので描かれる顔は無い。
     public static func isActive(ranges: [MosaicApplyRange], sourceID: UUID, sourceTime: Double) -> Bool {
         guard !ranges.isEmpty else { return true }
+        guard sourceTime.isFinite else { return true }
         return ranges.contains {
             $0.sourceID == sourceID && $0.sourceStart <= sourceTime && sourceTime < $0.sourceEnd
         }
+    }
+
+    /// 指定した**合成時刻**でモザイクを適用すべきかを返す（S10）。
+    ///
+    /// 素材アンカーを持たない効果——手動矩形（`manualRegions`）と背景モザイク——の
+    /// 唯一の判定入口である。これらは合成タイムライン全体に対する設定で素材ごとの
+    /// 時刻を持たないため、素材別の `isActive(ranges:sourceID:sourceTime:)` を
+    /// そのまま使えない。判定規則は
+    ///
+    /// > **その合成時刻に映っている素材のうち、1 つでも適用区間内なら適用する。**
+    ///
+    /// トランジションの重なり区間（2 素材が同時に映る）で片方だけ区間内のときは
+    /// 適用側へ倒す近似になる。重なりは高々トランジション尺であり、かつ
+    /// **モザイクの過剰適用は安全側・不足は事故**なのでこの方向で確定させる。
+    ///
+    /// 顔ランドマークはこの関数を通さない。顔は素材ごとに引くので
+    /// `isActive(ranges:sourceID:sourceTime:)` で**素材別に**ゲートできる
+    /// （`MosaicEditorModel.displayFaces(at:matching:)`）。
+    ///
+    /// **フェイルオープンする条件**（いずれも「ゲート以前の従来経路」＝挙動不変にする）:
+    /// - `ranges` が空（範囲指定なし = 全区間適用。`effectiveRanges` が孤児区間を
+    ///   落とした結果の空も含む）
+    /// - 写像が 1 つも解決できない（クリップ未構築・非有限時刻・空タイムライン）
+    ///
+    /// **顔の素材別ゲート（`isActive(ranges:sourceID:sourceTime:)`）もフェイル方向が
+    /// これと揃っている**（非有限の素材時刻でフェイルオープン、クリップ未構築なら
+    /// `effectiveRanges` が空を返してフェイルオープン）。片方だけフェイルクローズだと
+    /// 「顔にはモザイクが乗らないが手動矩形と背景モザイクは乗る」という中途半端な絵になる。
+    ///
+    /// 写像範囲外の有限時刻（合成尺ちょうどの終端・負値。再生終端や AVPlayer の実測
+    /// 時刻の揺らぎで日常的に発生する）はタイムラインの端へクランプしてから写像する。
+    /// これは `MosaicEditorModel.resolveSourceTime(atComposition:)` および
+    /// `VideoMosaicExporter.resolveLocation(_:at:)` と**同じ規則**である
+    /// （ここだけ規則が違うと終端フレームでプレビューとエクスポートの ON/OFF が食い違う）。
+    ///
+    /// **既知の解像度限界**: rate < 1 のクリップでは、区間終端 `to` の直前 2 ulp
+    /// （実測 7.105e-15 秒）が OFF になることがある。合成時刻→素材時刻の写像
+    /// （`TimelineMapping.location(for:at:)`）が double 解像度で単射でないためで、
+    /// S10 のゲートの誤りではない。ズレ幅は 1/60 秒フレームの 4.3e-13 倍であり、
+    /// 実フレームの PTS がそこに当たることは事実上ない。
+    ///
+    /// - Parameter ranges: `effectiveRanges(_:mapping:)` を通した区間。
+    /// - Parameter photoSourceIDs: 写真素材の素材ID集合。素材時刻を 0 へ clamp する
+    ///   （`TimelineState.clampedSourceTime` と同じ規則。写真の適用区間は
+    ///   `MosaicApplyRange` 型の doc どおり素材 [0, sourceEnd) を覆う）。
+    ///   **既定値は置かない**: 渡し漏れると同一写真素材の複数クリップ構成で判定が
+    ///   無言で反転する（実測で true ⇄ false が入れ替わる）ため、渡し忘れを
+    ///   コンパイルエラーにする。
+    public static func isActive(ranges: [MosaicApplyRange],
+                                mapping: TimelineMapping,
+                                compositionTime: Double,
+                                photoSourceIDs: Set<UUID>) -> Bool {
+        gateState(ranges: ranges, mapping: mapping, compositionTime: compositionTime,
+                  photoSourceIDs: photoSourceIDs).isActive
+    }
+
+    /// 合成時刻ゲートの判定結果と、その内訳（どの素材が適用対象か）。
+    public struct CompositionGateState: Equatable, Sendable {
+        /// 素材アンカーを持たない効果（手動矩形・背景モザイク）を適用するか。
+        public let isActive: Bool
+        /// その合成時刻に映っている素材のうち、適用区間内と判定されたものの素材ID集合。
+        /// フェイルオープン時（区間指定なし・写像不能）は「映っている素材すべて」
+        /// （写像不能なら空集合）になる。
+        ///
+        /// **用途**: トランジションの重なり区間で片方の素材だけ ON→OFF に変わった
+        /// フレームを検出するため。`isActive` は「どれか 1 つでも ON」なので、
+        /// 重なり中に片側が落ちても真偽値は true のまま変わらず、エクスポートの
+        /// 強制再検出（`gateChanged`）が発火しない＝古い union が居座る。
+        public let activeSourceIDs: Set<UUID>
+
+        public init(isActive: Bool, activeSourceIDs: Set<UUID>) {
+            self.isActive = isActive
+            self.activeSourceIDs = activeSourceIDs
+        }
+    }
+
+    /// `isActive(ranges:mapping:compositionTime:photoSourceIDs:)` と同じ判定を、
+    /// 内訳（適用対象の素材ID集合）付きで返す。判定規則の実体はこの 1 本だけ。
+    public static func gateState(ranges: [MosaicApplyRange],
+                                 mapping: TimelineMapping,
+                                 compositionTime: Double,
+                                 photoSourceIDs: Set<UUID>) -> CompositionGateState {
+        var locations = mapping.sourceLocations(at: compositionTime)
+        if locations.isEmpty, compositionTime.isFinite, mapping.totalDuration > 0 {
+            let clamped = min(max(compositionTime, 0), mapping.totalDuration.nextDown)
+            locations = mapping.sourceLocations(at: clamped)
+        }
+        let visible = Set(locations.map(\.location.sourceID))
+        guard !ranges.isEmpty else { return CompositionGateState(isActive: true, activeSourceIDs: visible) }
+        guard !locations.isEmpty else { return CompositionGateState(isActive: true, activeSourceIDs: []) }
+        var active: Set<UUID> = []
+        for entry in locations {
+            let sourceID = entry.location.sourceID
+            let sourceTime = photoSourceIDs.contains(sourceID) ? 0 : entry.location.time
+            if isActive(ranges: ranges, sourceID: sourceID, sourceTime: sourceTime) {
+                active.insert(sourceID)
+            }
+        }
+        return CompositionGateState(isActive: !active.isEmpty, activeSourceIDs: active)
     }
 
     /// UI が指定した合成時刻の区間 [from, to) を素材アンカーへ分解して `existing` に追加する。

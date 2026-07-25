@@ -86,6 +86,12 @@ extension MosaicEditorModel {
     /// 書き込むと検出キャッシュが汚染され、エクスポート（キャッシュヒットで検出を
     /// スキップする）まで巻き添えになる。重なり区間の顔は両側のキャッシュを
     /// `displayFaces(at:)` が写像・union して賄う。
+    ///
+    /// **モザイク適用区間のゲートをここに入れてはならない（S10）。** 区間外でもライブ検出は
+    /// 継続して検出キャッシュを埋めるのが設計であり、止めると「後から区間を広げたときに
+    /// 再検出が要る」ことになる。この契約は
+    /// `TimelineEditingModelTests.test_shouldDetectPreviewFrame_ignoresApplyRangeGate` が
+    /// 固定している（冒頭に `guard isMosaicActive(...)` を足すと落ちる）。
     func shouldDetectPreviewFrame(at timeSec: Double) -> Bool {
         guard mode == .video, faceMosaicOn, !liveDetectionInFlight else { return false }
         guard mapping.sourceLocations(at: timeSec).count < 2 else { return false }

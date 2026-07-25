@@ -209,6 +209,42 @@ final class MosaicPreviewController {
         renderCurrentFrame()
     }
 
+    /// フレームが 1 枚も出ないまま諦めるまでのリトライ回数（約 30ms 間隔）。
+    /// デコーダが最初のフレームを吐くまでの猶予であり、これを超えるのは
+    /// 読み込み失敗と同義（暫定表示のまま残す）。
+    private static let initialFrameRetryCount = 20
+
+    /// ロード直後・下書き復元直後に、**現在の再生位置のフレームを必ず 1 枚描く**。
+    ///
+    /// 一般的な動画編集アプリと同じく「プロジェクトを開いた時点で、いまの編集状態どおりの
+    /// 絵が出ている」状態にするための入口である。これが無いと、`MosaicEditorModel` の
+    /// 同期 `renderPreview()`（素材の生フレームに対する暫定表示。合成もモザイク適用区間も
+    /// 反映されない）が画面に残り続ける: displayLink は `play()` でしか回らないので、
+    /// ユーザーが再生かシークをするまで一切描き直されない
+    /// （実測: 下書き復元後 2 秒放置で `renderCurrentFrame` の実行回数 0、
+    /// previewImage の中央画素は区間外なのに [127,127,127]＝モザイクのまま）。
+    ///
+    /// 尺のロードを待つのは `seek(to:)` が `duration > 0` を前提にするため
+    /// （`setupPlayer` の尺取得は別 Task なので、ここへ来た時点では未完了のことがある）。
+    /// シーク完了直後でも `AVPlayerItemVideoOutput` がまだフレームを持たないことがあるため、
+    /// 1 枚描けるまで短い間隔で数回だけ再試行する。
+    @discardableResult
+    func renderInitialFrame(at position: Double) async -> Bool {
+        if duration <= 0, let asset = player?.currentItem?.asset {
+            duration = ((try? await asset.load(.duration))?.seconds) ?? 0
+        }
+        // zero-tolerance シークで「その位置のフレーム」を確定させてから描く
+        // （再生・シーク経路とまったく同じ描画関数を通すので、初期表示だけ規則が
+        // 違うということが起こらない）。
+        await seek(to: position)
+        if renderCurrentFrame() { return true }
+        for _ in 0..<Self.initialFrameRetryCount {
+            try? await Task.sleep(nanoseconds: 30_000_000)
+            if renderCurrentFrame() { return true }
+        }
+        return false
+    }
+
     // MARK: - DisplayLink
 
     private func startDisplayLink() {
@@ -235,13 +271,16 @@ final class MosaicPreviewController {
 
     // MARK: - レンダリング
 
-    // フェーズ2でこのファイルに本格的に手を入れる際に解消する予定の構造的負債
-    // swiftlint:disable:next cyclomatic_complexity
-    private func renderCurrentFrame() {
+    /// 現在フレームを 1 枚描いて `model.previewImage` を更新する。
+    /// - Returns: 実際に `previewImage` を更新できたか（フレームが取れない・
+    ///   Metal の途中経路が失敗した場合は false）。`renderInitialFrame(at:)` が
+    ///   「暫定表示を上書きできたか」の判定に使う。
+    @discardableResult
+    private func renderCurrentFrame() -> Bool {
         guard let player,
               let videoOutput,
               let model,
-              let cache = textureCache else { return }
+              let cache = textureCache else { return false }
         // フレーム取り出し + Metal 描画の間は GPU / デコーダを占有する。
         // 再生中は 30fps で立ち上げ下げを繰り返すため、通知は @Published ではなく
         // コールバック 1 本（`MosaicEditorModel.onPreviewDecodeBusyChanged`）で受ける。
@@ -266,7 +305,7 @@ final class MosaicPreviewController {
                       + "t=\(String(format: "%.2f", currentTime.seconds))")
             }
             #endif
-            return
+            return false
         }
 
         let bufferWidth = CVPixelBufferGetWidth(pixelBuffer)
@@ -288,7 +327,7 @@ final class MosaicPreviewController {
             inputTex = MetalTextureUtilities.texture(from: pixelBuffer, cache: cache)
         }
 
-        guard let tex = inputTex else { return }
+        guard let tex = inputTex else { return false }
 
         // 描画中のフレームの実際の時刻（理想時刻ではなく）で landmarks を引く。
         // これにより「顔の動きにモザイクが一拍遅れる」現象を解消する。
@@ -306,10 +345,18 @@ final class MosaicPreviewController {
            let detImage = detectionCGImage(from: pixelBuffer) {
             model.submitPreviewFrameForDetection(detImage, at: timeSec)
         }
+        // モザイク適用区間ゲート（S10）。素材アンカーを持たない効果——手動矩形と
+        // 背景モザイク——は「この合成時刻に映っている素材のどれかが区間内か」で決める
+        // （エクスポートと同じ `MosaicApplyGate.isActive(ranges:mapping:compositionTime:)`）。
+        // 顔ランドマークはここでは触らない: `displayFaces(at:matching:)` の中で
+        // **素材別に**ゲート済みだからである（重なり区間で片方だけ ON にできる）。
+        // 判定時刻は landmarks 検索と同じ timeSec（＝実フレームの合成時刻）を使う。
+        // 別の時刻を渡すと境界フレームでモザイクの ON/OFF が 1 フレームずれる。
+        let mosaicActive = model.isMosaicActive(atComposition: timeSec)
         let landmarks = landmarksForRendering(at: timeSec, model: model)
         // 手動矩形は顔検出の補助なので顔タブ（faceMosaicOn）の状態に従う。
         // 解像度は（縮小後の）実テクスチャに合わせる（フルサイズだと 720px 縮小時に位置がずれる）。
-        let additionalPaths = model.faceMosaicOn
+        let additionalPaths = model.faceMosaicOn && mosaicActive
             ? model.manualRegionPaths(for: CGSize(width: tex.width, height: tex.height))
             : []
 
@@ -317,38 +364,58 @@ final class MosaicPreviewController {
             input: tex,
             landmarkSets: landmarks,
             additionalPaths: additionalPaths
-        ) else { return }
+        ) else { return false }
 
-        // 背景モザイク（平面）。人物前景を反転したマスクで背景だけを処理。
-        // Vision は重いため毎フレームではなく backgroundSegmentInterval ごとに再計算し、
-        // 間のフレームはキャッシュ済みマスクを再利用する。
-        var finalTexture = result.texture
-        if model.backgroundMosaicOn {
-            #if canImport(Vision)
-            if framesUntilResegment <= 0 || cachedBackgroundMask == nil {
-                cachedBackgroundMask = segmenter.backgroundMask(pixelBuffer: pixelBuffer)
-                framesUntilResegment = backgroundSegmentInterval
-            } else {
-                framesUntilResegment -= 1
-            }
-            if let mask = cachedBackgroundMask,
-               let out = renderer.renderBackgroundToNewTexture(
-                   input: finalTexture,
-                   mask: mask,
-                   block: model.backgroundBlockSize
-               ) {
-                finalTexture = out
-            }
-            #endif
-        }
+        let finalTexture = backgroundMosaicApplied(to: result.texture, pixelBuffer: pixelBuffer,
+                                                   model: model, mosaicActive: mosaicActive)
 
-        guard let cgImage = MetalTextureUtilities.cgImage(from: finalTexture) else { return }
+        guard let cgImage = MetalTextureUtilities.cgImage(from: finalTexture) else { return false }
         let uiImage = UIImage(cgImage: cgImage)
 
         model.previewImage = uiImage
         if duration > 0 {
             model.playbackPosition = max(0, min(timeSec / duration, 1))
         }
+        return true
+    }
+
+    /// 背景モザイク（平面）を重ねたテクスチャを返す。掛からない場合は入力をそのまま返す。
+    ///
+    /// 人物前景を反転したマスクで背景だけを処理する。Vision は重いため毎フレームではなく
+    /// `backgroundSegmentInterval` ごとに再計算し、間のフレームはキャッシュ済みマスクを
+    /// 再利用する。
+    ///
+    /// **適用区間外（`mosaicActive == false`）では背景モザイクも掛けない**（S10）。
+    /// 「区間外は素の映像」が要件なので、顔だけ止めて背景が残るのは誤り。
+    /// セグメンテーション自体も走らないので、区間外での無駄な重い処理も無い。
+    private func backgroundMosaicApplied(to texture: MTLTexture,
+                                         pixelBuffer: CVPixelBuffer,
+                                         model: MosaicEditorModel,
+                                         mosaicActive: Bool) -> MTLTexture {
+        guard mosaicActive else {
+            // 区間外の間に持ち越したマスクは、区間へ戻ったときには別時刻・別クリップの
+            // ものになっている。クリップ境界跨ぎ（resetTimeSeriesStateIfClipChanged）と
+            // 同じ理由で捨て、再入した最初のフレームで必ず引き直す。
+            cachedBackgroundMask = nil
+            framesUntilResegment = 0
+            return texture
+        }
+        guard model.backgroundMosaicOn else { return texture }
+        #if canImport(Vision)
+        if framesUntilResegment <= 0 || cachedBackgroundMask == nil {
+            cachedBackgroundMask = segmenter.backgroundMask(pixelBuffer: pixelBuffer)
+            framesUntilResegment = backgroundSegmentInterval
+        } else {
+            framesUntilResegment -= 1
+        }
+        guard let mask = cachedBackgroundMask,
+              let out = renderer.renderBackgroundToNewTexture(
+                  input: texture, mask: mask, block: model.backgroundBlockSize
+              ) else { return texture }
+        return out
+        #else
+        return texture
+        #endif
     }
 
     /// 描画に使う顔ランドマーク（合成フレーム基準）を返す。

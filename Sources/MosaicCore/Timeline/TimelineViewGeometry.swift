@@ -250,6 +250,10 @@ public enum TimelineBandLayout {
     /// `MosaicApplyGate.ranges(addingCompositionInterval:)` の逆写像にあたる。
     /// クリップの使用範囲と交差しない区間は結果に現れない。
     /// 結果はクリップのタイムライン順で並ぶ。
+    ///
+    /// **交差判定は `MosaicApplyGate.effectiveRanges(_:mapping:)` と同じ式**であり、
+    /// 「帯が n 本 ⇔ 有効区間が n 個」「帯 0 本 ⇔ ゲートが全区間 ON」が成り立つ
+    /// （見えている帯とモザイクの挙動を一致させる不変条件。片方だけ式を変えないこと）。
     public static func applySpans(ranges: [MosaicApplyRange],
                                   mapping: TimelineMapping) -> [TimelineApplySpan] {
         var result: [TimelineApplySpan] = []

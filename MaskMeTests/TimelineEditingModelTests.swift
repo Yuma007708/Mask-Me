@@ -452,6 +452,178 @@ final class TimelineEditingModelTests: XCTestCase {
                        "復元タイムライン（0.4s + 0.4s/2x）の合成尺で composition が構築されていない")
     }
 
+    /// 8px 市松（黒/白）のテスト動画。**単色素材ではモザイクの有無が画素に出ない**ため、
+    /// ブロックモザイクが平均化で必ず潰す高周波パターンを使う。
+    ///
+    /// - Parameter checkerFrom: この素材時刻より前のフレームは白一色にする。
+    ///   「プレビューが素材の先頭フレームを描いたのか、合成タイムラインの現在位置を
+    ///   描いたのか」を平均輝度だけで区別するために使う（白 255 / 市松 ≈127）。
+    private func makeCheckerboardVideo(seconds: Double, checkerFrom: Double = 0) async throws -> URL {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(UUID().uuidString).mp4")
+        let writer = try AVAssetWriter(outputURL: url, fileType: .mp4)
+        let input = AVAssetWriterInput(mediaType: .video, outputSettings: [
+            AVVideoCodecKey: AVVideoCodecType.h264,
+            AVVideoWidthKey: 320,
+            AVVideoHeightKey: 240
+        ])
+        input.expectsMediaDataInRealTime = false
+        let adaptor = AVAssetWriterInputPixelBufferAdaptor(
+            assetWriterInput: input,
+            sourcePixelBufferAttributes: [
+                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+                kCVPixelBufferWidthKey as String: 320,
+                kCVPixelBufferHeightKey as String: 240
+            ])
+        writer.add(input)
+        writer.startWriting()
+        writer.startSession(atSourceTime: .zero)
+        let fps = 30
+        for i in 0..<Int(seconds * Double(fps)) {
+            while !input.isReadyForMoreMediaData {
+                try await Task.sleep(nanoseconds: 1_000_000)
+            }
+            var pb: CVPixelBuffer?
+            CVPixelBufferCreate(kCFAllocatorDefault, 320, 240, kCVPixelFormatType_32BGRA, nil, &pb)
+            guard let buffer = pb else { continue }
+            CVPixelBufferLockBaseAddress(buffer, [])
+            if let base = CVPixelBufferGetBaseAddress(buffer)?.assumingMemoryBound(to: UInt8.self) {
+                let bytesPerRow = CVPixelBufferGetBytesPerRow(buffer)
+                let isChecker = Double(i) / Double(fps) >= checkerFrom
+                for y in 0..<240 {
+                    for x in 0..<320 {
+                        let value: UInt8 = !isChecker ? 255
+                            : (((x / 8) + (y / 8)) % 2 == 0 ? 0 : 255)
+                        let offset = y * bytesPerRow + x * 4
+                        base[offset] = value
+                        base[offset + 1] = value
+                        base[offset + 2] = value
+                        base[offset + 3] = 255
+                    }
+                }
+            }
+            CVPixelBufferUnlockBaseAddress(buffer, [])
+            adaptor.append(buffer, withPresentationTime:
+                            CMTime(value: CMTimeValue(i), timescale: CMTimeScale(fps)))
+        }
+        input.markAsFinished()
+        await writer.finishWriting()
+        return url
+    }
+
+    /// 画像中央の正方形パッチ（辺の 1/4）の輝度の平均と標準偏差。
+    /// 素の市松は std が高い（≈127）、ブロックモザイクが乗ると平均化されて 0 に落ちる。
+    /// 平均は「白一色の区間（255）を描いたのか市松の区間（≈127）を描いたのか」の判別に使う。
+    private func centerPatchStats(of image: UIImage) throws -> (mean: Double, stdDev: Double) {
+        let cg = try XCTUnwrap(image.cgImage)
+        let w = cg.width, h = cg.height
+        var pixels = [UInt8](repeating: 0, count: w * h * 4)
+        let context = CGContext(data: &pixels, width: w, height: h, bitsPerComponent: 8,
+                                bytesPerRow: w * 4, space: CGColorSpaceCreateDeviceRGB(),
+                                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+        context?.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
+        var values: [Double] = []
+        for y in (3 * h / 8)..<(5 * h / 8) {
+            for x in (3 * w / 8)..<(5 * w / 8) {
+                values.append(Double(pixels[(y * w + x) * 4]))
+            }
+        }
+        let mean = values.reduce(0, +) / Double(values.count)
+        let variance = values.reduce(0) { $0 + ($1 - mean) * ($1 - mean) } / Double(values.count)
+        return (mean, variance.squareRoot())
+    }
+
+    /// 下書きを復元して**再生もシークもせず放置した初期プレビュー**が、
+    /// 復元したタイムライン（適用区間・クリップの使用範囲）を反映していること。
+    ///
+    /// 修正前は、復元タイムラインが載る前に走り終わった `renderPreview()`
+    /// （合成前の**素材の先頭フレーム**に対する暫定表示。適用区間もクリップのトリムも
+    /// 反映されない）が残り続けていた。displayLink は `play()` でしか回らないので
+    /// 描き直す機会が無く、ユーザーが再生/シークするまで誤った初期画が消えなかった
+    /// （実測: previewImage 中央画素 [127,127,127]＝モザイク、シーク後に
+    /// [255,255,255]＝素の映像）。一般的な動画編集アプリと同様、開いた時点で
+    /// 現在の編集状態どおりの絵が出ていなければならない。
+    func test_draftRestore_initialPreviewReflectsRestoredTimeline() async throws {
+        guard MTLCreateSystemDefaultDevice() != nil else {
+            throw XCTSkip("Metal デバイスが無い環境ではスキップ")
+        }
+        let centerRect = CGRect(x: 0.3, y: 0.3, width: 0.4, height: 0.4)
+
+        /// 実アプリ（`EditorView.loadMedia`）と同じ順序で下書きを再開する:
+        /// queueTimelineRestore → load(videoURL:) →（必要なら）applyRestoredParameters。
+        /// 再開後は**再生もシークもせず 2 秒放置**して初期プレビューを観測する。
+        func restore(url: URL, clip: (UUID) -> TimelineClip,
+                     applyRanges: (UUID) -> [MosaicApplyRange],
+                     restoreParameters: Bool) async throws -> MosaicEditorModel {
+            let model = makeModel()
+            let sourceID = UUID()
+            var saved = TimelineState(clips: [clip(sourceID)])
+            saved.applyRanges = applyRanges(sourceID)
+            model.queueTimelineRestore(timeline: saved, sourceURLs: [sourceID: url],
+                                       primarySourceID: sourceID)
+            model.load(videoURL: url)
+            if restoreParameters {
+                model.applyRestoredParameters(faceMosaicOn: true, backgroundMosaicOn: false,
+                                              faceBlockSize: 48, backgroundBlockSize: 28,
+                                              manualRects: [centerRect])
+            }
+            try await waitUntilLoaded(model)
+            await model.awaitPendingTimelineRebuild()
+            try await Task.sleep(nanoseconds: 2_000_000_000)
+            return model
+        }
+
+        // --- A) 適用区間が初期プレビューに効いていること -------------------------
+        let checker = try await makeCheckerboardVideo(seconds: 2.0)
+        defer { try? FileManager.default.removeItem(at: checker) }
+        func wholeClip(_ source: UUID) -> TimelineClip {
+            TimelineClip(sourceID: source, sourceStart: 0, sourceEnd: 2)
+        }
+
+        // 対照: 適用区間なし → 中央の手動矩形にモザイクが乗る（＝計測系が効いている）。
+        let ungated = try await restore(url: checker, clip: wholeClip, applyRanges: { _ in [] },
+                                        restoreParameters: true)
+        let ungatedStats = try centerPatchStats(of: try XCTUnwrap(
+            ungated.previewImage, "初期プレビューが描かれていない"))
+
+        // 本題: 再生位置 0 は復元した適用区間 [1,2) の外 → 素の映像でなければならない。
+        let gated = try await restore(
+            url: checker, clip: wholeClip,
+            applyRanges: { [MosaicApplyRange(sourceID: $0, sourceStart: 1, sourceEnd: 2)] },
+            restoreParameters: true)
+        XCTAssertEqual(gated.playbackPosition, 0, accuracy: 0.05, "再生位置が 0 から動いている")
+        XCTAssertFalse(gated.isMosaicActive(atComposition: 0), "前提が崩れている（区間内になっている）")
+        let gatedStats = try centerPatchStats(of: try XCTUnwrap(
+            gated.previewImage, "初期プレビューが描かれていない"))
+
+        XCTAssertLessThan(ungatedStats.stdDev, 60.0,
+                          "対照実験で中央にモザイクが観測できない（計測系が壊れている）"
+                          + " std=\(ungatedStats.stdDev)")
+        XCTAssertGreaterThan(gatedStats.stdDev, 90.0,
+                             "下書き復元直後の初期プレビューが適用区間を無視してモザイクを描いている"
+                             + " std=\(gatedStats.stdDev)（対照 \(ungatedStats.stdDev)）")
+
+        // --- B) 初期プレビューが**合成タイムラインの現在位置**から描かれていること ---
+        //
+        // A だけでは足りない: `applyRestoredParameters` が @Published を書き換えるため、
+        // `bindControls` の 16ms デバウンス経由で `previewController?.invalidate()` が
+        // 走り、タイミング次第で結果的に正しい絵になってしまう（実測でそうなった）。
+        // ここは効果パラメータを一切触らない＝デバウンスが発火しない経路で、
+        // 「暫定表示（素材の先頭フレーム）」と「合成の現在位置」を平均輝度で区別する。
+        // 素材の先頭 1 秒は白一色（平均 255）、復元クリップが使う [1,2) は市松（平均 ≈127）。
+        let split = try await makeCheckerboardVideo(seconds: 2.0, checkerFrom: 1.0)
+        defer { try? FileManager.default.removeItem(at: split) }
+        let trimmed = try await restore(
+            url: split,
+            clip: { TimelineClip(sourceID: $0, sourceStart: 1, sourceEnd: 2) },
+            applyRanges: { _ in [] }, restoreParameters: false)
+        let trimmedStats = try centerPatchStats(of: try XCTUnwrap(
+            trimmed.previewImage, "初期プレビューが描かれていない"))
+        XCTAssertEqual(trimmedStats.mean, 127.5, accuracy: 20.0,
+                       "初期プレビューが素材の先頭フレーム（白一色）のままで、"
+                       + "復元タイムラインの現在位置が描かれていない mean=\(trimmedStats.mean)")
+    }
+
     /// S5 レビュー Major の再現手順の恒久化: 2 素材下書きを再開し、片方のクリップを
     /// 削除して再保存しても、undo で復活し得る素材コピーが GC で消えないこと。
     /// さらに undo → 再保存で、下書きの sources が実在ファイルだけを参照すること
@@ -671,6 +843,230 @@ final class TimelineEditingModelTests: XCTestCase {
         XCTAssertEqual(model.timeline.applyRanges.count, 1)
         XCTAssertEqual(model.compositionGeneration, model.timelineGeneration,
                        "適用区間の編集後に composition と mapping の世代が揃わない")
+    }
+
+    // MARK: - S10: モザイク適用区間の描画ゲート
+
+    /// 素材時刻 `step` 刻みで顔を詰めた単一クリップのモデル（ゲート判定だけを見たいので
+    /// 検出キャッシュの補間・ホールドの穴が判定に混ざらないよう密に埋める）。
+    private func makeDenseFaceModel(sourceEnd: Double = 10, step: Double = 0.2,
+                                    rate: Double = 1.0) -> MosaicEditorModel {
+        let model = makeModel()
+        let source = model.currentSourceID
+        model.setClipsForTesting([TimelineClip(sourceID: source, sourceStart: 0,
+                                               sourceEnd: sourceEnd, rate: rate)])
+        var t = 0.0
+        while t < sourceEnd {
+            model.cacheStore.store([fakeFace()], sourceID: source, time: t)
+            t += step
+        }
+        return model
+    }
+
+    /// 適用区間が空なら全フレームで顔が返り（既存挙動）、区間を付けると
+    /// **境界フレーム**で ON/OFF が切り替わること。半開区間 [start, end) の
+    /// `end` ちょうどは区間外。
+    func test_applyRangeGate_facesSwitchAtBoundaryFrames() {
+        let model = makeDenseFaceModel()
+
+        XCTAssertFalse(model.displayFaces(at: 1.9).isEmpty, "区間指定なしで顔が返っていない")
+        XCTAssertFalse(model.displayFaces(at: 8.0).isEmpty)
+
+        model.addMosaicApplyRange(fromCompositionTime: 2, to: 4)
+
+        XCTAssertTrue(model.displayFaces(at: 1.9).isEmpty, "区間外にモザイクが乗っている")
+        XCTAssertFalse(model.displayFaces(at: 2.0).isEmpty, "区間開始ちょうどが区間外になっている")
+        XCTAssertFalse(model.displayFaces(at: 4.0.nextDown).isEmpty)
+        XCTAssertTrue(model.displayFaces(at: 4.0).isEmpty,
+                      "半開区間 [start, end) の end ちょうどが区間内になっている")
+        XCTAssertTrue(model.displayFaces(at: 8.0).isEmpty)
+    }
+
+    /// **ゲートは lookup の後段にある**こと（区間外でも検出キャッシュは埋まり、
+    /// `lookupFaces` はゲート前の生の結果を返す）。ゲートを lookup 側に入れると、
+    /// 区間を後から広げたときに再検出が必要になる。
+    func test_applyRangeGate_isAfterLookupAndKeepsDetectionCache() {
+        let model = makeDenseFaceModel()
+        model.addMosaicApplyRange(fromCompositionTime: 2, to: 4)
+        let entriesBefore = model.cacheStore.count
+
+        // 区間外の合成時刻でライブ検出を記録しても捨てられない（未検出バケットが増える）。
+        model.storeLiveDetection(
+            LiveDetectionResult(faces: [fakeFace(cx: 0.3, cy: 0.3)], bridgedByFlow: false),
+            at: 7.5, source: UIImage(), generation: model.timelineGeneration)
+        XCTAssertGreaterThan(model.cacheStore.count, entriesBefore,
+                             "区間外でライブ検出の書き込みが捨てられている（ゲートが lookup 側に入っている）")
+
+        // lookup はゲート前なので顔を返し、描画入口の displayFaces だけが空になる。
+        XCTAssertFalse(model.lookupFaces(at: 7.0).isEmpty,
+                       "区間外で検出キャッシュの参照まで止まっている")
+        XCTAssertTrue(model.displayFaces(at: 7.0).isEmpty)
+
+        // 区間を広げれば再検出なしでそのまま乗る。
+        model.addMosaicApplyRange(fromCompositionTime: 6, to: 8)
+        XCTAssertFalse(model.displayFaces(at: 7.0).isEmpty,
+                       "区間を広げたのに既存の検出キャッシュが使われていない")
+    }
+
+    /// **速度変更されたクリップでは素材時刻で判定される**こと。
+    /// rate=2 の素材 [0,10)（合成 5 秒）に合成 [1,2) を指定すると素材 [2,4) がアンカーになり、
+    /// ON になるのは合成 [1,2) だけ。合成時刻で判定する誤実装なら合成 [2,4) が ON になる。
+    func test_applyRangeGate_usesSourceTimeForSpeedChangedClip() {
+        let model = makeDenseFaceModel(rate: 2.0)
+        XCTAssertEqual(model.videoDuration, 5.0, accuracy: 1e-9, "rate の前提が崩れている")
+
+        model.addMosaicApplyRange(fromCompositionTime: 1, to: 2)
+        XCTAssertEqual(model.timeline.applyRanges.count, 1)
+        XCTAssertEqual(model.timeline.applyRanges[0].sourceStart, 2.0, accuracy: 1e-9)
+        XCTAssertEqual(model.timeline.applyRanges[0].sourceEnd, 4.0, accuracy: 1e-9)
+
+        XCTAssertFalse(model.displayFaces(at: 1.5).isEmpty, "素材時刻 3.0 が区間外と判定された")
+        XCTAssertTrue(model.displayFaces(at: 3.0).isEmpty,
+                      "合成時刻で判定している（rate=2 で区間の位置がずれる）")
+        XCTAssertTrue(model.displayFaces(at: 0.5).isEmpty)
+    }
+
+    /// 素材時刻アンカーなので、**分割・並べ替えの後も区間が素材に追従する**こと。
+    func test_applyRangeGate_followsSourceAcrossSplitAndReorder() {
+        let model = makeDenseFaceModel(sourceEnd: 4)
+        model.playbackPosition = 0.5          // 合成 2.0s
+        model.splitAtCurrentPosition()
+        XCTAssertEqual(model.clips.count, 2)
+        // 後半クリップ（素材 [2,4)）だけを覆う区間。
+        model.addMosaicApplyRange(fromCompositionTime: 2, to: 4)
+
+        XCTAssertTrue(model.displayFaces(at: 1.0).isEmpty)
+        XCTAssertFalse(model.displayFaces(at: 3.0).isEmpty)
+
+        // 並べ替えると素材 [2,4) は合成 [0,2) へ移る。区間は素材に貼り付いたまま。
+        model.moveClip(id: model.clips[1].id, toIndex: 0)
+        XCTAssertEqual(model.timeline.applyRanges.count, 1, "並べ替えで区間が増減している")
+        XCTAssertFalse(model.displayFaces(at: 1.0).isEmpty,
+                       "並べ替え後に区間が素材へ追従していない")
+        XCTAssertTrue(model.displayFaces(at: 3.0).isEmpty)
+    }
+
+    /// **トランジションの重なり区間では素材別にゲートが効く**こと
+    /// （片方 ON・片方 OFF なら ON 側の顔だけが返る。両者をまとめて ON/OFF しない）。
+    func test_applyRangeGate_isPerSourceInsideTransitionOverlap() {
+        let model = makeModel()
+        let sourceA = model.currentSourceID
+        let sourceB = UUID()
+        let clipA = TimelineClip(sourceID: sourceA, sourceStart: 0, sourceEnd: 4)
+        let clipB = TimelineClip(sourceID: sourceB, sourceStart: 0, sourceEnd: 6)
+        let transitions = [clipA.id: TransitionSpec(kind: .crossfade, duration: 2)]
+        model.setTimelineForTesting(TimelineState(clips: [clipA, clipB], transitions: transitions))
+        // 合成 3.0 は重なりの中: A は素材 3.0、B は素材 1.0。
+        let faceA = fakeFace(cx: 0.2, cy: 0.5)
+        let faceB = fakeFace(cx: 0.8, cy: 0.5)
+        model.cacheStore.store([faceA], sourceID: sourceA, time: 3.0)
+        model.cacheStore.store([faceB], sourceID: sourceB, time: 1.0)
+        XCTAssertEqual(model.mapping.sourceLocations(at: 3.0).count, 2, "重なり区間の前提が崩れている")
+        XCTAssertEqual(model.displayFaces(at: 3.0).count, 2, "区間指定なしでは両素材の顔が union される")
+
+        // B の素材だけを適用区間にする。
+        var gated = model.timeline
+        gated.applyRanges = [MosaicApplyRange(sourceID: sourceB, sourceStart: 0, sourceEnd: 6)]
+        model.setTimelineForTesting(gated)
+
+        let faces = model.displayFaces(at: 3.0)
+        XCTAssertEqual(faces.count, 1, "重なり区間で素材別にゲートできていない")
+        let centroidX = faces[0].points.reduce(0.0) { $0 + Double($1.x) } / Double(faces[0].points.count)
+        XCTAssertEqual(centroidX, 0.8, accuracy: 0.05, "区間外の素材（A）の顔が返っている")
+        // 重なり外の A 単独区間は完全に OFF。
+        XCTAssertTrue(model.displayFaces(at: 1.0).isEmpty)
+    }
+
+    /// 素材アンカーを持たない効果（手動矩形・背景モザイク）のゲート
+    /// `isMosaicActive(atComposition:)` が、プレビューとエクスポートで共有する
+    /// 判定規則どおりに動くこと: 区間なし＝常に true、重なり区間は
+    /// 「映っている素材のどれかが区間内なら true」。
+    func test_isMosaicActiveAtComposition_gatesManualRegionsAndBackground() {
+        let model = makeModel()
+        let sourceA = model.currentSourceID
+        let sourceB = UUID()
+        let clipA = TimelineClip(sourceID: sourceA, sourceStart: 0, sourceEnd: 4)
+        let clipB = TimelineClip(sourceID: sourceB, sourceStart: 0, sourceEnd: 6)
+        let transitions = [clipA.id: TransitionSpec(kind: .crossfade, duration: 2)]
+        model.setTimelineForTesting(TimelineState(clips: [clipA, clipB], transitions: transitions))
+
+        for t in stride(from: 0.0, to: 8.0, by: 0.5) {
+            XCTAssertTrue(model.isMosaicActive(atComposition: t), "区間なしで OFF になっている t=\(t)")
+        }
+
+        var gated = model.timeline
+        gated.applyRanges = [MosaicApplyRange(sourceID: sourceB, sourceStart: 0, sourceEnd: 6)]
+        model.setTimelineForTesting(gated)
+
+        XCTAssertFalse(model.isMosaicActive(atComposition: 1.0), "A 単独区間で ON になっている")
+        XCTAssertTrue(model.isMosaicActive(atComposition: 3.0),
+                      "重なり区間で片方が区間内なのに OFF になっている")
+        XCTAssertTrue(model.isMosaicActive(atComposition: 5.0))
+        // 合成尺ちょうど（半開区間の外）は終端へクランプして判定する。
+        XCTAssertTrue(model.isMosaicActive(atComposition: model.mapping.totalDuration))
+    }
+
+    /// **孤児区間（どのクリップの使用範囲とも交差しない適用区間）で全区間 OFF に
+    /// ならないこと**（S10 レビュー修正）。
+    ///
+    /// 孤児区間は帯 UI（`TimelineBandLayout.applySpans`）に出ないので選択も削除もできず、
+    /// それをゲートに通すと undo 以外に復帰できない全区間 OFF になる。
+    /// レビュー実測の再現手順（4 秒素材の区間 source[1,2) を左端トリム 1 回で孤児にする）。
+    func test_applyRangeGate_orphanRangeFallsBackToWholeTimeline() {
+        let model = makeDenseFaceModel(sourceEnd: 4)
+        model.addMosaicApplyRange(fromCompositionTime: 1, to: 2)
+        XCTAssertEqual(model.effectiveApplyRanges.count, 1)
+        XCTAssertEqual(TimelineBandLayout.applySpans(ranges: model.timeline.applyRanges,
+                                                     mapping: model.mapping).count, 1)
+        XCTAssertTrue(model.displayFaces(at: 1.5).isEmpty == false)
+        XCTAssertTrue(model.displayFaces(at: 3.0).isEmpty)
+
+        // 左端トリムで区間はどのクリップの使用範囲とも交差しなくなる。
+        model.trimClip(id: model.clips[0].id, sourceStart: 2.5, sourceEnd: 4)
+        XCTAssertEqual(model.timeline.applyRanges.count, 1,
+                       "区間データが消えている（トリムを戻したら復活する設計を壊している）")
+        XCTAssertTrue(TimelineBandLayout.applySpans(ranges: model.timeline.applyRanges,
+                                                    mapping: model.mapping).isEmpty,
+                      "前提が崩れている（孤児になっていない）")
+        XCTAssertTrue(model.effectiveApplyRanges.isEmpty, "孤児区間がゲートに残っている")
+
+        // 帯 0 本 ⇔ ゲート常時 ON（＝区間指定なしと同じ挙動）。
+        for t in stride(from: 0.0, to: model.mapping.totalDuration, by: 0.05) {
+            XCTAssertTrue(model.isMosaicActive(atComposition: t), "t=\(t) で OFF になっている")
+        }
+        XCTAssertFalse(model.displayFaces(at: 1.0).isEmpty,
+                       "孤児区間で顔モザイクが全区間消えている（復帰不能な事故）")
+    }
+
+    /// **ゲートを `shouldDetectPreviewFrame` に入れてはならない**という契約を固定する。
+    ///
+    /// 区間外でライブ検出が止まると「後から区間を広げたときに再検出が要る」ことになり、
+    /// 「ゲートは lookup の後段・描画直前だけ」という S10 の設計目的が静かに失われる。
+    /// この検証が無いと、`MosaicEditorModel+LiveDetection.swift` の
+    /// `shouldDetectPreviewFrame` 冒頭に `guard isMosaicActive(...) else { return false }` を
+    /// 足しても MaskMeTests が 1 件も落ちない（レビュー実測）。
+    func test_shouldDetectPreviewFrame_ignoresApplyRangeGate() {
+        let model = makeModel()
+        let source = model.currentSourceID
+        model.setClipsForTesting([TimelineClip(sourceID: source, sourceStart: 0, sourceEnd: 10)])
+        model.addMosaicApplyRange(fromCompositionTime: 2, to: 4)
+
+        // 合成 7.0 は適用区間の外（＝描画ゲートは閉じている）。
+        XCTAssertFalse(model.isMosaicActive(atComposition: 7.0), "前提が崩れている")
+        XCTAssertTrue(model.shouldDetectPreviewFrame(at: 7.0),
+                      "区間外でライブ検出が止まっている（ゲートを検出判定に入れてはならない）")
+
+        // 検出済みバケットなら false になる（＝この関数が素通しの true ではないことの確認）。
+        model.storeLiveDetection(
+            LiveDetectionResult(faces: [fakeFace()], bridgedByFlow: false),
+            at: 7.0, source: UIImage(), generation: model.timelineGeneration)
+        XCTAssertFalse(model.shouldDetectPreviewFrame(at: 7.0),
+                       "検出済みバケットでも検出し続けている（判定が壊れている）")
+
+        // 検出キャッシュは区間外でも埋まっているので、区間を広げれば再検出なしで乗る。
+        model.addMosaicApplyRange(fromCompositionTime: 6, to: 8)
+        XCTAssertFalse(model.displayFaces(at: 7.0).isEmpty,
+                       "区間外で貯めた検出キャッシュが使われていない")
     }
 
     // MARK: - S9: UI が使う補助 API
