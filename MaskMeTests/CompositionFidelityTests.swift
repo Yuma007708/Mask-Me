@@ -244,7 +244,7 @@ final class CompositionFidelityTests: XCTestCase {
                                            landmarker: NullFaceLandmarker())
         let outURL = try await exporter.export(
             asset: composition, selectedFaceTargets: [], manualRegions: [],
-            detectionCache: [:], faceEnabled: true, backgroundEnabled: false,
+            detectionCaches: [:], faceEnabled: true, backgroundEnabled: false,
             backgroundBlock: 28, speed: .fast) { _ in }
         defer { try? FileManager.default.removeItem(at: outURL) }
 

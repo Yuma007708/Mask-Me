@@ -93,6 +93,12 @@ extension MosaicEditorModel {
     func submitPreviewFrameForDetection(_ cgImage: CGImage, at timeSec: Double) {
         guard !liveDetectionInFlight else { return }
         liveDetectionInFlight = true
+        // submit 時点の世代トークンを閉じ込める。検出中にタイムライン編集が入ると、
+        // この合成時刻は**旧タイムライン**のフレームを指しており、新しい写像で
+        // 素材キーへ落とすと誤った素材時刻に正規の検出として記録されてしまう
+        // （S3 レビューの観測事項）。書き込み側（世代チェック付き storeLiveDetection）
+        // が照合して不一致なら破棄する。
+        let generation = timelineGeneration
         liveDetectionQueue.async { [weak self, liveScanner] in
             let img = UIImage(cgImage: cgImage)
             // liveLandmarks は IMAGE 検出に加えてテンポラル ROI 再検出・フロー橋渡しで
@@ -100,9 +106,23 @@ extension MosaicEditorModel {
             // 丸めると adapter 側のシーク不連続検知が鈍る）。
             let detection = liveScanner.liveLandmarks(in: img, atMediaSeconds: timeSec)
             Task { @MainActor in
-                self?.storeLiveDetection(detection, at: timeSec, source: img)
+                self?.storeLiveDetection(detection, at: timeSec, source: img, generation: generation)
             }
         }
+    }
+
+    /// 世代チェック付きの記録入口。`generation`（submit 時点の世代トークン）が現在の
+    /// `timelineGeneration` と一致しない場合、結果を破棄する（旧タイムラインの合成時刻を
+    /// 新しい写像で解釈すると誤った素材キーに落ちるため）。in-flight ガードだけは解除して
+    /// 次のフレームの検出を止めない。
+    @MainActor
+    func storeLiveDetection(_ detection: LiveDetectionResult, at t: Double,
+                            source: UIImage, generation: Int) {
+        guard generation == timelineGeneration else {
+            liveDetectionInFlight = false
+            return
+        }
+        storeLiveDetection(detection, at: t, source: source)
     }
 
     /// シーク時にライブ追跡状態（ROI track / フロー）を破棄する。adapter 側の

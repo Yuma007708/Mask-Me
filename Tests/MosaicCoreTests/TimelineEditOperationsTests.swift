@@ -136,6 +136,28 @@ final class TimelineEditOperationsTests: XCTestCase {
         XCTAssertEqual(TimelineEditOperations.trim(clips: clips, clipID: UUID(), sourceStart: 0, sourceEnd: 1), clips)
     }
 
+    /// 非有限の素材範囲（±∞・NaN）は変更なし。NaN は比較ガードで落ちるが、
+    /// +∞ の sourceEnd はかつて素通りして合成尺・写像全体（totalDuration）を
+    /// ∞ に汚染していた（S4 レビューの実測）。
+    func test_trimRejectsNonFiniteRange() {
+        let clips = makeClips()
+        let clipID = clips[0].id
+        XCTAssertEqual(TimelineEditOperations.trim(clips: clips, clipID: clipID,
+                                                   sourceStart: 0, sourceEnd: .infinity), clips)
+        XCTAssertEqual(TimelineEditOperations.trim(clips: clips, clipID: clipID,
+                                                   sourceStart: .infinity, sourceEnd: .infinity), clips)
+        XCTAssertEqual(TimelineEditOperations.trim(clips: clips, clipID: clipID,
+                                                   sourceStart: -.infinity, sourceEnd: 2), clips)
+        XCTAssertEqual(TimelineEditOperations.trim(clips: clips, clipID: clipID,
+                                                   sourceStart: .nan, sourceEnd: 2), clips)
+        XCTAssertEqual(TimelineEditOperations.trim(clips: clips, clipID: clipID,
+                                                   sourceStart: 0, sourceEnd: .nan), clips)
+        // 写像が ∞ に汚染されないこと（totalDuration が有限のまま）。
+        let mapping = TimelineMapping(clips: TimelineEditOperations.trim(
+            clips: clips, clipID: clipID, sourceStart: 0, sourceEnd: .infinity))
+        XCTAssertTrue(mapping.totalDuration.isFinite)
+    }
+
     /// 最小尺の判定は合成時刻基準であること（2x では素材 0.15 秒は合成 0.075 秒となり不可）。
     func test_trimMinimumDurationIsInCompositionTime() {
         let fast = [TimelineClip(sourceID: sourceA, sourceStart: 0, sourceEnd: 3, rate: 2.0)]

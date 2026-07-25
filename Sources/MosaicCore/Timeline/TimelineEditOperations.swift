@@ -72,12 +72,15 @@ public enum TimelineEditOperations {
     /// 成功時、`id`・`sourceID`・`rate`・`originalAudioVolume` と他クリップは保存される。
     /// 次の場合は変更せず元の配列を返す:
     /// - `clipID` が見つからない
+    /// - `sourceStart` / `sourceEnd` が有限でない（NaN は比較ガードで落ちるが、
+    ///   +∞ の `sourceEnd` は素通りして合成尺・写像全体を ∞ に汚染する実測があった）
     /// - `sourceStart` が負、または `sourceStart >= sourceEnd`
     /// - 変更後の合成尺が最小合成尺（`minimumClipDuration`）未満になる
     public static func trim(clips: [TimelineClip], clipID: UUID,
                             sourceStart: Double, sourceEnd: Double) -> [TimelineClip] {
         guard let index = clips.firstIndex(where: { $0.id == clipID }) else { return clips }
-        guard sourceStart >= 0, sourceStart < sourceEnd,
+        guard sourceStart.isFinite, sourceEnd.isFinite,
+              sourceStart >= 0, sourceStart < sourceEnd,
               (sourceEnd - sourceStart) / clips[index].rate >= minimumClipDuration else { return clips }
         var result = clips
         result[index].sourceStart = sourceStart

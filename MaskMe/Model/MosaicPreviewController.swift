@@ -31,6 +31,9 @@ final class MosaicPreviewController {
     /// 描画直前のランドマーク EMA（フレーム間の微小ちらつき吸収）。検出キャッシュには
     /// 適用しない。シーク時は状態を捨てる。
     private let landmarkSmoother = LandmarkSmoother()
+    /// 直前に描画したフレームが属するクリップ。境界跨ぎの時系列リセット判定に使う
+    /// （`resetTimeSeriesStateIfClipChanged` 参照）。シーク・item 差し替えで nil に戻す。
+    private var lastRenderedClipID: UUID?
 
     private(set) var duration: Double = 0
     /// DEBUG 診断用: copyPixelBuffer が nil を返した累計（間引きログの分母）。
@@ -51,33 +54,68 @@ final class MosaicPreviewController {
         setupPlayer(asset)
     }
 
-    private func setupPlayer(_ asset: AVAsset) {
-        let settings: [String: Any] = [
-            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
-            kCVPixelBufferMetalCompatibilityKey as String: true
-        ]
-        let output = AVPlayerItemVideoOutput(pixelBufferAttributes: settings)
+    private static let outputPixelBufferAttributes: [String: Any] = [
+        kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+        kCVPixelBufferMetalCompatibilityKey as String: true
+    ]
+
+    /// asset から再生用の AVPlayerItem を作り、フレーム出力と再生終了監視を結線する。
+    /// `videoOutput` は item と 1:1 なので毎回作り直して差し替える。
+    private func makePlayerItem(for asset: AVAsset) -> AVPlayerItem {
+        let output = AVPlayerItemVideoOutput(pixelBufferAttributes: Self.outputPixelBufferAttributes)
         self.videoOutput = output
 
         let item = AVPlayerItem(asset: asset)
         item.add(output)
 
-        let player = AVPlayer(playerItem: item)
-        self.player = player
-
-        // 再生終了を監視
+        // 再生終了を監視（item 単位。差し替え時は旧 item の監視を外して付け替える）
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(playerDidFinish),
             name: .AVPlayerItemDidPlayToEndTime,
             object: item
         )
+        return item
+    }
+
+    private func setupPlayer(_ asset: AVAsset) {
+        let item = makePlayerItem(for: asset)
+        self.player = AVPlayer(playerItem: item)
 
         // 尺を非同期で取得
         Task {
             let d = try? await item.asset.load(.duration)
             self.duration = d?.seconds ?? 0
         }
+    }
+
+    /// タイムライン編集後の再構築で、再生中の asset（Composition）を差し替える。
+    ///
+    /// - DidPlayToEnd オブザーバは item 単位の登録なので、旧 item から外して
+    ///   新 item へ付け替える（付け替えないと旧 item の終了通知を拾い損ね、
+    ///   新 item の終了で `isPlaying` が戻らなくなる）。
+    /// - 旧タイムラインの時系列状態（EMA・背景マスク・クリップ追跡・ライブ追跡）は
+    ///   すべて無効になるため破棄する。
+    /// - 再生位置の復元は呼び出し側（`MosaicEditorModel.rebuildComposition`）が
+    ///   新しい合成尺へのクランプ込みで行う。
+    func replaceAsset(_ asset: AVAsset) async {
+        guard let player else { return }
+        if let oldItem = player.currentItem {
+            NotificationCenter.default.removeObserver(
+                self, name: .AVPlayerItemDidPlayToEndTime, object: oldItem)
+        }
+        let item = makePlayerItem(for: asset)
+        player.replaceCurrentItem(with: item)
+
+        cachedBackgroundMask = nil
+        framesUntilResegment = 0
+        landmarkSmoother.reset()
+        lastRenderedClipID = nil
+        model?.notifyLiveSeek()
+
+        // seek が新しい尺で計算できるよう、差し替え完了までに尺を取り直す。
+        let d = try? await item.asset.load(.duration)
+        self.duration = d?.seconds ?? 0
     }
 
     // MARK: - 再生制御
@@ -101,6 +139,8 @@ final class MosaicPreviewController {
         framesUntilResegment = 0
         // シーク先では前位置の EMA 状態も意味を持たない
         landmarkSmoother.reset()
+        // クリップ追跡もシークで別時系列になる（次フレームで記録し直す）
+        lastRenderedClipID = nil
         // ライブ検出の追跡状態（ROI track / フロー）もシーク先では別時系列になる
         model?.notifyLiveSeek()
         await player.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero)
@@ -208,6 +248,8 @@ final class MosaicPreviewController {
         // プレビューは素材時刻を一切仮定せず、合成時刻のまま検出 submit と
         // ランドマーク検索（selectedLandmarks）に渡す。
         let timeSec = actualItemTime.isValid ? actualItemTime.seconds : currentTime.seconds
+        // クリップ境界を跨いだフレームでは時系列状態をリセットする（S4）。
+        resetTimeSeriesStateIfClipChanged(at: timeSec, model: model)
         // 事前スキャン廃止: 再生・シークで表示中のこのフレームに顔検出を相乗りさせ、
         // detectionCache を埋める。表示スレッドを塞がないよう、検出すべきときだけ
         // 縮小 CGImage を作ってモデルへ渡す（モデル側でバックグラウンド検出）。
@@ -265,6 +307,24 @@ final class MosaicPreviewController {
         if duration > 0 {
             model.playbackPosition = max(0, min(timeSec / duration, 1))
         }
+    }
+
+    /// 直前フレームと異なるクリップに入っていたら、時系列前提の状態をすべて捨てる。
+    ///
+    /// 合成タイムライン上は連続した時刻でも、クリップ境界では映像内容が不連続になる
+    /// （別素材・同一素材の離れた区間・並べ替え）。前クリップの EMA・背景マスク・
+    /// ライブ追跡（ROI track / フロー）を持ち越すと、境界直後のフレームに前クリップの
+    /// 顔位置・マスクがにじむ。単一クリップでは clipID が変わらないため無影響。
+    private func resetTimeSeriesStateIfClipChanged(at timeSec: Double, model: MosaicEditorModel) {
+        let clipID = model.mapping.sourceLocation(at: timeSec)?.clipID
+        guard clipID != lastRenderedClipID else { return }
+        let crossedBoundary = lastRenderedClipID != nil
+        lastRenderedClipID = clipID
+        guard crossedBoundary else { return }
+        landmarkSmoother.reset()
+        cachedBackgroundMask = nil
+        framesUntilResegment = 0
+        model.notifyLiveSeek()
     }
 
     /// ライブ検出用に pixelBuffer を最大 `MosaicEditorModel.liveDetectionTargetWidth` px

@@ -106,25 +106,70 @@ public final class MosaicEditorModel: ObservableObject {
     private(set) var currentSourceID = UUID()
     /// 素材基準の検出キャッシュ。クラス全体が @MainActor なので同期機構は不要。
     let cacheStore = DetectionCacheStore(bucketFPS: 15.0)
-    /// タイムライン上のクリップ列。フェーズ1では常に1要素。
-    @Published private(set) var clips: [TimelineClip] = [] {
-        didSet { mapping = TimelineMapping(clips: clips) }
+    /// タイムライン編集の単一情報源（クリップ列＋トランジション＋モザイク適用範囲）。
+    ///
+    /// 編集はすべて `MosaicEditorModel+Timeline.swift` の公開 API（`TimelineState` の
+    /// 編集ラッパを呼ぶ薄い層）を経由する。UI からの接続は S9。
+    /// 変更のたびに `mapping` を追随させ、`timelineGeneration` を進める。
+    ///
+    /// **アクセスレベル**: `applyTimelineEdit`（`MosaicEditorModel+Timeline.swift`）が
+    /// 書き込むため setter も `internal`（無印）。書き込みは load / 編集 API /
+    /// テストバックドア（`setClipsForTesting`）以外から行わないこと。
+    @Published var timeline = TimelineState() {
+        didSet {
+            mapping = timeline.mapping
+            // 進行中の非同期処理（rebuild・ライブ検出の in-flight submit）を
+            // 旧世代として破棄できるよう、タイムラインが変わった瞬間に世代を進める。
+            timelineGeneration += 1
+            // 公開する動画尺は常に合成尺（mapping.totalDuration）基準にする。
+            // マルチクリップ・rate≠1 では素材尺と一致しないため、素材尺のままだと
+            // `position * videoDuration` の各所（seekTo / redetect / detectInRegion）
+            // がずれる（S3 の TODO を解消。変換は compositionTime(forPosition:) に集約）。
+            if !timeline.clips.isEmpty { videoDuration = mapping.totalDuration }
+        }
     }
-    /// `clips` から再構築される合成時刻⇔素材時刻の変換層（`clips` の didSet で追随）。
+    /// タイムライン上のクリップ列（`timeline` への読み取りショートカット）。
+    var clips: [TimelineClip] { timeline.clips }
+    /// タイムラインの世代トークン。`timeline` が変わるたびに 1 進む。
+    ///
+    /// 非同期処理は開始時点の値を閉じ込め、完了時に一致しなければ結果を破棄する:
+    /// - `rebuildComposition(generation:)`: 旧世代の合成結果でプレビューを上書きしない
+    /// - ライブ検出の in-flight submit: 旧タイムラインの合成時刻を新しい写像で
+    ///   素材キーへ落とすと誤った素材時刻に記録される（S3 レビューの観測事項）
+    private(set) var timelineGeneration = 0
+    /// 進行中のタイムライン再構築タスク（世代付き）。
+    ///
+    /// 編集直後〜非同期 rebuild 完了までは `mapping`（同期更新）と `composition`
+    /// （非同期差し替え）が不整合な窓になる。`exportVideo` はこのタスクを await して
+    /// から書き出すことで、旧 composition を新 mapping で写像する事故を防ぐ
+    /// （`awaitPendingTimelineRebuild()` 参照）。書き込みは `applyTimelineEdit` と
+    /// rebuild 完了時の後始末のみ（いずれも `MosaicEditorModel+Timeline.swift`）。
+    var pendingRebuild: (generation: Int, task: Task<Void, Never>)?
+    /// 現在の `composition` を構築した時点の世代トークン。
+    ///
+    /// `timelineGeneration` と一致していれば composition と mapping は同じ
+    /// タイムラインに由来する（エクスポート前の整合性照合に使う）。
+    /// 書き込みは load / `rebuildComposition` の composition 差し替え箇所のみ。
+    var compositionGeneration = 0
+    /// `timeline` から再構築される合成時刻⇔素材時刻の変換層（didSet で追随）。
     ///
     /// S3 で配線済み: 検出キャッシュの読み書き・フレーム抽出・矩形サーチ・顔選択照合は
     /// すべて `resolveSourceTime(atComposition:)`（`MosaicEditorModel+DetectionCache.swift`）
     /// を経由してこの写像を参照する。フェーズ1相当の「素材全体1クリップ」では恒等写像に
     /// なるため、配線前と観測可能な挙動は変わらない。
     private(set) var mapping = TimelineMapping(clips: [])
-    /// テスト専用: `clips` を直接差し替える（`didSet` 経由で `mapping` も再構築される）。
-    /// `clips` の setter は `private(set)` のため、`@testable import` 越しでも
-    /// テストから直接代入できない。複数クリップ状態を再現するためのバックドア。
+    /// テスト専用: クリップ列を直接差し替える（`didSet` 経由で `mapping` の再構築・
+    /// 世代インクリメント・`videoDuration` 追随も走る）。
+    /// 複数クリップ状態を再現するためのバックドア（正規の書き込み経路は
+    /// load / 編集 API のみ、という規約をテスト側にも明示する意図で残している）。
     func setClipsForTesting(_ clips: [TimelineClip]) {
-        self.clips = clips
+        timeline = TimelineState(clips: clips)
     }
     /// 素材IDから AVAsset への対応表。
-    private var sources: [UUID: AVAsset] = [:]
+    ///
+    /// **アクセスレベル変更**: 元は `private` だったが、`rebuildComposition`
+    /// （`MosaicEditorModel+Timeline.swift`）から参照されるため `internal`（無印）にした。
+    var sources: [UUID: AVAsset] = [:]
     /// クリップ列から構築した合成結果。プレビューと書き出しで同じものを使い回す。
     ///
     /// **不変条件（フェーズ1限定）: `composition` は `videoAsset` と時間軸が一致する。**
@@ -143,9 +188,11 @@ public final class MosaicEditorModel: ObservableObject {
     /// `resolveRegion` / `findFaceInVideo` の全体走査）は、すべて
     /// `resolveSourceTime(atComposition:)` / `frameAtCompositionTime(_:)` /
     /// クリップ使用区間走査（`scanSegments()`）経由に置き換えた。
-    /// 残る作業は S4 のマルチクリップ実行系（builder の rate 反映・複数素材、
-    /// exporter の素材別キャッシュ辞書 + mapping 対応）。
-    private var composition: AVMutableComposition?
+    ///
+    /// **アクセスレベル変更（S4）**: 元は `private` だったが、タイムライン編集後の
+    /// `rebuildComposition`（`MosaicEditorModel+Timeline.swift`）が差し替えるため
+    /// `internal`（無印）にした。
+    var composition: AVMutableComposition?
     private(set) var previewController: MosaicPreviewController?
     private var cancellables: Set<AnyCancellable> = []
 
@@ -309,21 +356,40 @@ public final class MosaicEditorModel: ObservableObject {
             let seconds = (try? await asset.load(.duration))?.seconds ?? 0
             videoDuration = seconds
 
-            // フェーズ1では素材全体を使う単一クリップ。
+            // 読み込み直後は素材全体を使う単一クリップ（編集はここから始まる）。
             sources = [currentSourceID: asset]
-            clips = [TimelineClip(sourceID: currentSourceID,
-                                  sourceStart: 0, sourceEnd: seconds)]
+            timeline = TimelineState(clips: [TimelineClip(sourceID: currentSourceID,
+                                                          sourceStart: 0, sourceEnd: seconds)])
 
             // Composition の構築は renderer の有無と無関係に行う。
             // renderer が nil でも書き出し（composition 依存）は成立させたいので、
             // 「renderer が無い ＝ composition も無い」という巻き添えを作らない。
             do {
+                // rebuildComposition(generation:) と同じく、build の await を跨ぐ前に
+                // 世代をローカルへ閉じ込める。await 後に「現在の」世代を刻むと、
+                // build 中に編集が割り込んだとき旧クリップ列の合成結果へ新世代が
+                // 刻まれ、exportVideo の世代照合が素通しになる（レビューの実測）。
+                let loadGeneration = timelineGeneration
                 let built = try await TimelineCompositionBuilder()
                     .build(clips: clips, sources: sources)
-                composition = built
+                let isStale = loadGeneration != timelineGeneration
+                if !isStale {
+                    composition = built
+                    compositionGeneration = loadGeneration
+                }
                 if let r = renderer {
+                    // stale の場合、割り込んだ編集側の rebuild が composition を
+                    // 先に差し替えていればそちらを使う（無ければ built を暫定表示し、
+                    // 直後の再構築で現行世代の合成結果に置き換わる）。
                     previewController = MosaicPreviewController(
-                        renderer: r, asset: built, model: self)
+                        renderer: r, asset: composition ?? built, model: self)
+                }
+                if isStale {
+                    // 旧クリップ列の合成結果は適用せず、現行世代で作り直す。
+                    // 割り込んだ編集側の rebuild が先に完了していた場合も、その時点では
+                    // previewController が無く asset 差し替えをスキップしているため、
+                    // ここで必ず現行世代へ揃える。
+                    await rebuildComposition(keepingCompositionSeconds: nil)
                 }
             } catch {
                 errorMessage = "動画の読み込みに失敗しました"
@@ -385,7 +451,7 @@ public final class MosaicEditorModel: ObservableObject {
             // 動画では「いま表示中のフレームが属する素材」を顔の帰属先にする
             // （恒等写像下では常に currentSourceID）。写真は素材の概念が無いので nil。
             let faceSourceID: UUID? = mode == .video
-                ? resolveSourceTime(atComposition: playbackPosition * videoDuration).sourceID
+                ? resolveSourceTime(atComposition: compositionTime(forPosition: playbackPosition)).sourceID
                 : nil
             let newFaces = found.map { lm -> FaceTarget in
                 let remapped = lm.remapped(into: normalizedRect)
@@ -558,11 +624,10 @@ public final class MosaicEditorModel: ObservableObject {
             // シーク後のフレームで sourceTexture を更新してプレビューに反映。
             // 合成時刻を素材＋素材時刻へ写像して抽出する（videoAsset 直参照だと
             // トリム・並べ替え後に誤フレームを返す。恒等では従来と同一フレーム）。
-            // TODO(S4): `videoDuration` は素材尺のため、マルチクリップ・rate≠1 では
-            // `mapping.totalDuration` と一致しない。S4 で位置→合成時刻の変換を
-            // totalDuration 基準のヘルパ 1 箇所に集約すること（redetect・detectInRegion も同様）。
+            // 位置→合成時刻の変換は compositionTime(forPosition:) に集約済み
+            // （videoDuration はクリップ構築後 mapping.totalDuration に追随する）。
             if videoDuration > 0,
-               let frame = frameAtCompositionTime(position * videoDuration) {
+               let frame = frameAtCompositionTime(compositionTime(forPosition: position)) {
                 sourceTexture = makeTexture(from: frame)
                 updateBackgroundMask(from: frame)
             }
@@ -581,7 +646,7 @@ public final class MosaicEditorModel: ObservableObject {
 
     public func redetect(at position: Double) async {
         guard videoAsset != nil, videoDuration > 0 else { return }
-        let t = position * videoDuration
+        let t = compositionTime(forPosition: position)
         // 合成時刻 t を素材＋素材時刻へ写像してフレームを取り出す（恒等では従来と同一）。
         guard let frame = frameAtCompositionTime(t) else { return }
 
@@ -927,8 +992,18 @@ public final class MosaicEditorModel: ObservableObject {
         // 進捗もアラートも出ず「押しても何も起きない」になるので、必ず理由を出す。
         // （`togglePlayback` の無言 no-op は「状態を進めない」ことが目的なので黙って
         //   良いが、書き出しはユーザーが結果を待つ操作なので黙ってはいけない。）
+        // 編集直後〜非同期 rebuild 完了までは mapping（同期更新）と composition
+        // （非同期差し替え）が不整合な窓になる。この窓で書き出すと旧 composition を
+        // 新 mapping で写像してしまうため、進行中の rebuild を待ってから始める。
+        await awaitPendingTimelineRebuild()
         guard let composition else {
             errorMessage = "動画の読み込み中です。少し待ってからもう一度お試しください"
+            return
+        }
+        // rebuild の失敗・スキップで composition が旧世代のまま残ることがある
+        // （エラー時など）。不整合な組で黙って書き出さず、安全側に倒して知らせる。
+        guard compositionGeneration == timelineGeneration else {
+            errorMessage = "タイムラインの更新が完了していません。もう一度お試しください"
             return
         }
         guard let renderer else { return }
@@ -939,16 +1014,22 @@ public final class MosaicEditorModel: ObservableObject {
         // （exporter は空配列を「全顔に適用」と解釈する）。追跡マッチングの誤棄却で
         // 書き出しからモザイクが消える余地を残さないフェイルクローズ。
         let targetsForExport = selected.count == detectedFaces.count ? [] : selected
-        // exporter は現状「単一素材の素材時刻辞書」を受け取る（複数素材・mapping 対応の
-        // シグネチャ変更は S4）。恒等写像下ではタイムライン先頭の素材＝唯一の素材なので、
-        // 先頭クリップの素材IDでスコープする（クリップ未構築時は currentSourceID）。
-        let exportSourceID = clips.first?.sourceID ?? currentSourceID
+        // exporter は素材IDごとのキャッシュ辞書＋合成時刻→素材位置の写像を受け取る（S4）。
+        // タイムラインが参照する全素材ぶんを射影して渡す。フレーム PTS（合成時刻）を
+        // 素材キーへ写像するのは exporter 側（丸め・近傍補間は写像の後）。
+        // クリップ未構築の窓は composition guard で弾かれるため clips は実質常に非空だが、
+        // 万一空でも「キャッシュなし・全フレーム自前検出」で完走する（品質は落ちない）。
+        var detectionCaches: [UUID: [Double: [FaceLandmarkSet]]] = [:]
+        for sourceID in Set(clips.map(\.sourceID)) {
+            detectionCaches[sourceID] = sourceScopedCache(for: sourceID)
+        }
         do {
             let url = try await exporter.export(
                 asset: composition,
                 selectedFaceTargets: targetsForExport,
                 manualRegions: manualRegions,
-                detectionCache: sourceScopedCache(for: exportSourceID),
+                detectionCaches: detectionCaches,
+                mapping: mapping,
                 faceEnabled: faceMosaicOn,
                 backgroundEnabled: backgroundMosaicOn,
                 backgroundBlock: backgroundBlockSize,

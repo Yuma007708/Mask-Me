@@ -32,6 +32,13 @@ final class ExportSpeedMeasurementTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: videoURL) }
         let asset = AVURLAsset(url: videoURL)
         let cache = makeDenseDetectionCache(seconds: synthSeconds)
+        // S4 で exporter は「素材IDごとのキャッシュ辞書＋写像」を受け取る。素の
+        // AVAsset を書き出す本テストでは「素材全体 1 クリップ」の恒等写像を渡す
+        // （全時刻キャッシュヒットの前提を維持する）。
+        let sourceID = UUID()
+        let mapping = TimelineMapping(clips: [
+            TimelineClip(sourceID: sourceID, sourceStart: 0, sourceEnd: Double(synthSeconds))
+        ])
 
         let exporter = VideoMosaicExporter(renderer: renderer, landmarker: NullFaceLandmarker())
         let exp = expectation(description: "export")
@@ -41,7 +48,7 @@ final class ExportSpeedMeasurementTests: XCTestCase {
             let t0 = CFAbsoluteTimeGetCurrent()
             outURL = try? await exporter.export(
                 asset: asset, selectedFaceTargets: [], manualRegions: [],
-                detectionCache: cache, faceEnabled: true,
+                detectionCaches: [sourceID: cache], mapping: mapping, faceEnabled: true,
                 backgroundEnabled: false, backgroundBlock: 28, speed: .fast
             ) { _ in }
             exportSec = CFAbsoluteTimeGetCurrent() - t0
