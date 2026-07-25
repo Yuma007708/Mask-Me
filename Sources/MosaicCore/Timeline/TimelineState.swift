@@ -9,6 +9,17 @@ import Foundation
 public struct TimelineState: Codable, Equatable, Sendable {
     public var clips: [TimelineClip]
     /// クリップ境界のトランジション。キーは**先行（outgoing）クリップの id**。
+    ///
+    /// **書き込み経路（S8 時点）**: 下書き v2 のデコードと、この `var` への直接代入
+    /// （テスト・`MosaicEditorModel.setTimelineForTesting`）だけ。**トランジションを
+    /// 設定する公開 API はまだ無い**（`normalizingTransitions` は private の整合処理で、
+    /// 値を新規に入れる手段ではない）。したがって S8 の実装は完成しているが、
+    /// 通常のユーザー操作からは到達できない。編集 API（付与・種類変更・duration 変更・
+    /// 削除）と UI は **S9 で足す**。
+    ///
+    /// クリップ列を変える編集（split / delete / move / trim）を通したときの
+    /// 付け替え・破棄・duration クランプは、既に `normalizingTransitions` が
+    /// 面倒を見ている（S9 の編集 API はそこへ乗るだけで済む）。
     public var transitions: [UUID: TransitionSpec]
     /// モザイク適用範囲（素材時刻アンカー）。空なら全区間適用。
     public var applyRanges: [MosaicApplyRange]

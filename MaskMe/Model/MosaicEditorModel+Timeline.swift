@@ -79,8 +79,10 @@ extension MosaicEditorModel {
     /// 世代トークン付き rebuild → `commitEdit`。下書き保存（`draftSources`）と
     /// undo/redo（EditSnapshot の timeline）は既存機構がそのまま追随する。
     ///
-    /// 追加前に解像度・向きを既存素材と照合し、builder の `mixedVideoFormats` と
-    /// 同一基準で不一致なら**状態を一切変えずに** reject する（S8 で解禁予定）。
+    /// **S8 で解像度・向きの混在を正式解禁した**ため、追加前の照合
+    /// （旧 `photoFormatMatchesTimeline`）は廃止した。混在するタイムラインは
+    /// `AVVideoComposition` が renderSize へアスペクトフィットで揃えて合成し、
+    /// 顔座標も同じ配置計算（`TimelineRenderLayout`）で合成フレーム基準へ写される。
     ///
     /// 検出は写真の全フレームが同一なので素材時刻 t=0 に 1 回だけ seed する。
     /// 以後の lookup・ライブ検出は `resolveSourceTime` の clamp（写真素材 → 素材時刻 0）
@@ -100,19 +102,6 @@ extension MosaicEditorModel {
             // load / 復元経路と同じく AVURLAsset として登録する（draftSources が
             // URL を取り出して下書きへコピーできる形）。
             let photoAsset = AVAsset(url: encoded.url)
-            // 解像度・向きの事前照合。builder の `mixedVideoFormats` と同一基準
-            // （`TimelineCompositionBuilder.videoFormat` の Equatable 比較）で、
-            // **一切の状態変異（sources 登録・seed・commitEdit）より前に**不一致を弾く。
-            // commit 後の非同期 rebuild で落とすと、壊れたクリップ・世代不一致
-            // （export 恒久拒否）・汎用エラーが残留し、復旧手段が undo しかなくなる
-            // （実測）。reject 時は状態を完全に無変化に保ち、エンコード済み一時 mp4
-            // だけ削除する。レターボックス化はしない（S8 の AVVideoComposition が
-            // 解像度混在を正式解禁する）。
-            guard await photoFormatMatchesTimeline(photoAsset) else {
-                try? FileManager.default.removeItem(at: encoded.url)
-                errorMessage = "写真の縦横比が動画と一致しないため追加できません（今後対応予定です）"
-                return
-            }
             let sourceID = UUID()
             sources[sourceID] = photoAsset
             seedPhotoDetection(encoded.normalizedImage, sourceID: sourceID)
@@ -123,23 +112,6 @@ extension MosaicEditorModel {
         } catch {
             errorMessage = "写真の追加に失敗しました"
         }
-    }
-
-    /// エンコード済み写真素材の映像フォーマットが既存タイムラインと一致するか。
-    ///
-    /// 基準は先頭クリップの素材（builder が `reference` に取るのと同じ「先頭」。
-    /// 既存クリップは構築済み composition の存在により相互一致が保証されている）。
-    /// 判定は `TimelineCompositionBuilder.videoFormat` の Equatable 比較で、builder の
-    /// `mixedVideoFormats` ガードと同一（判定ロジックの二重実装を避ける）。
-    /// フォーマットが取得できない場合も不一致扱い（builder に投げれば必ず失敗する組
-    /// なので、事前 reject が安全側）。
-    private func photoFormatMatchesTimeline(_ photoAsset: AVAsset) async -> Bool {
-        guard let firstClip = timeline.clips.first,
-              let referenceAsset = sources[firstClip.sourceID],
-              let reference = try? await TimelineCompositionBuilder.videoFormat(of: referenceAsset),
-              let photoFormat = try? await TimelineCompositionBuilder.videoFormat(of: photoAsset)
-        else { return false }
-        return photoFormat == reference
     }
 
     /// 写真クリップの検出 seed（素材時刻 t=0 の 1 回だけ）。
@@ -210,6 +182,20 @@ extension MosaicEditorModel {
 
     // MARK: - Composition 再構築（世代トークン付き）
 
+    /// build 結果一式（composition / videoComposition / audioMix / layout）を
+    /// **必ず組で**適用する唯一の入口。
+    ///
+    /// 4 つは同じクリップ列から同時に作られており、片方だけ差し替えると
+    /// 「旧尺の composition に新しい instruction」「向きだけ二重適用」といった
+    /// 不整合が黙って成立する。世代トークンの記録もここに揃える。
+    func apply(built: TimelineCompositionBuilder.Built, generation: Int) {
+        composition = built.composition
+        videoComposition = built.videoComposition
+        audioMix = built.audioMix
+        renderLayout = built.layout
+        compositionGeneration = generation  // mapping との整合性照合（exportVideo）に使う
+    }
+
     /// 現在世代で再構築する便宜ラッパ。
     func rebuildComposition(keepingCompositionSeconds keepSeconds: Double? = nil) async {
         await rebuildComposition(generation: timelineGeneration, keepingCompositionSeconds: keepSeconds)
@@ -232,14 +218,17 @@ extension MosaicEditorModel {
         // （実アプリの経路では load(videoURL:) が必ず sources を登録している）。
         guard !clipsSnapshot.isEmpty,
               clipsSnapshot.allSatisfy({ sourcesSnapshot[$0.sourceID] != nil }) else { return }
+        let transitionsSnapshot = timeline.transitions
         do {
             let built = try await TimelineCompositionBuilder()
-                .build(clips: clipsSnapshot, sources: sourcesSnapshot)
+                .build(clips: clipsSnapshot, transitions: transitionsSnapshot,
+                       sources: sourcesSnapshot)
             guard generation == timelineGeneration else { return }  // 古い世代の結果は破棄
-            composition = built
-            compositionGeneration = generation  // mapping との整合性照合（exportVideo）に使う
+            apply(built: built, generation: generation)
             guard let controller = previewController else { return }
-            await controller.replaceAsset(built)
+            await controller.replaceAsset(built.composition,
+                                          videoComposition: built.videoComposition,
+                                          audioMix: built.audioMix)
             guard generation == timelineGeneration else { return }
             let total = mapping.totalDuration
             if total > 0 {

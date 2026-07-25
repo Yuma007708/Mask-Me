@@ -155,7 +155,7 @@ final class CompositionFidelityTests: XCTestCase {
         let sourceID = UUID()
         let clip = TimelineClip(sourceID: sourceID, sourceStart: 0, sourceEnd: seconds)
         return try await TimelineCompositionBuilder()
-            .build(clips: [clip], sources: [sourceID: asset])
+            .build(clips: [clip], sources: [sourceID: asset]).composition
     }
 
     // MARK: - Critical 1: ビットレートが合成で変わらないこと
@@ -196,7 +196,7 @@ final class CompositionFidelityTests: XCTestCase {
         let composition = try await TimelineCompositionBuilder().build(
             clips: [TimelineClip(sourceID: sourceID, sourceStart: 0, sourceEnd: 1),
                     TimelineClip(sourceID: sourceID, sourceStart: 2, sourceEnd: 3)],
-            sources: [sourceID: asset])
+            sources: [sourceID: asset]).composition
         let rate = try await composition.loadTracks(withMediaType: .video)[0]
             .load(.estimatedDataRate)
         print("[FIDELITY] multiClipDataRate=\(rate)")
@@ -226,7 +226,8 @@ final class CompositionFidelityTests: XCTestCase {
         print("[FIDELITY] noTransform conditions=\(conditions)")
         XCTAssertEqual(conditions, AudioTrackConditions(),
                        "無変換タイムラインなのに変換条件が立っている")
-        XCTAssertEqual(AudioExportPipeline.decide(isTrimming: false, conditions: conditions),
+        XCTAssertEqual(AudioExportPipeline.decide(isTrimming: false, hasAudioMix: false,
+                                                  conditions: conditions),
                        .passthrough,
                        "無変換タイムラインがパススルーに乗らない（bit 同一の忠実度が壊れる）")
     }

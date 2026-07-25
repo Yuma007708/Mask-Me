@@ -79,8 +79,16 @@ extension MosaicEditorModel {
     /// プレビューがこの**合成時刻**のフレームを検出すべきか（表示スレッドから安価に判定する）。
     /// 素材ID・素材時刻へ写像してからバケットの有無を見る。
     /// 既に同バケットを検出済み・検出中・顔タブOFF・写真モードのときはスキップ。
+    ///
+    /// **トランジションの重なり区間では検出しない**（S8）。プレビューが持っている
+    /// フレームは 2 クリップを合成した画（フェード・スライド・ワイプの途中）であり、
+    /// そこで検出した顔位置は素材フレームのどちらの座標系にも属さない。素材キーで
+    /// 書き込むと検出キャッシュが汚染され、エクスポート（キャッシュヒットで検出を
+    /// スキップする）まで巻き添えになる。重なり区間の顔は両側のキャッシュを
+    /// `displayFaces(at:)` が写像・union して賄う。
     func shouldDetectPreviewFrame(at timeSec: Double) -> Bool {
         guard mode == .video, faceMosaicOn, !liveDetectionInFlight else { return false }
+        guard mapping.sourceLocations(at: timeSec).count < 2 else { return false }
         let (sourceID, sourceTime) = resolveSourceTime(atComposition: timeSec)
         return !cacheStore.hasEntry(sourceID: sourceID, time: sourceTime)
     }

@@ -260,6 +260,110 @@ final class MultiClipExportTests: XCTestCase {
         return (sumSquares / Double(sampleCount)).squareRoot()
     }
 
+    // MARK: - S8 のテスト補助（縦動画・ピクセル検証）
+
+    /// 4 象限を別色（TL 赤・TR 緑・BL 青・BR 白）で塗った映像を、
+    /// `preferredTransform` に 90 度回転を持たせて書く（= 縦動画の再現）。
+    ///
+    /// 二重回転（writer と instruction の両方で回転を掛ける事故）は、出力の
+    /// **表示サイズが横向きに戻る / 象限の色が入れ替わる**として現れるので、
+    /// この素材の出力を「素材を正しく表示したときの絵」と突き合わせれば検出できる。
+    private func makePortraitQuadrantVideo(seconds: Double) async throws -> URL {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(UUID().uuidString).mp4")
+        let writer = try AVAssetWriter(outputURL: url, fileType: .mp4)
+        let input = AVAssetWriterInput(mediaType: .video, outputSettings: [
+            AVVideoCodecKey: AVVideoCodecType.h264,
+            AVVideoWidthKey: width,
+            AVVideoHeightKey: height
+        ])
+        input.expectsMediaDataInRealTime = false
+        // 縦動画（ポートレート撮影）の preferredTransform。
+        input.transform = CGAffineTransform(rotationAngle: .pi / 2)
+        let adaptor = AVAssetWriterInputPixelBufferAdaptor(
+            assetWriterInput: input,
+            sourcePixelBufferAttributes: [
+                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+                kCVPixelBufferWidthKey as String: width,
+                kCVPixelBufferHeightKey as String: height
+            ])
+        writer.add(input)
+        writer.startWriting()
+        writer.startSession(atSourceTime: .zero)
+
+        for i in 0..<Int(seconds * Double(fps)) {
+            while !input.isReadyForMoreMediaData {
+                try await Task.sleep(nanoseconds: 1_000_000)
+            }
+            var pb: CVPixelBuffer?
+            CVPixelBufferCreate(kCFAllocatorDefault, width, height,
+                                kCVPixelFormatType_32BGRA, nil, &pb)
+            guard let buffer = pb else { continue }
+            CVPixelBufferLockBaseAddress(buffer, [])
+            if let base = CVPixelBufferGetBaseAddress(buffer)?.assumingMemoryBound(to: UInt8.self) {
+                let bytesPerRow = CVPixelBufferGetBytesPerRow(buffer)
+                // BGRA 順。TL 赤 / TR 緑 / BL 青 / BR 白。
+                let colors: [[UInt8]] = [[0, 0, 255, 255], [0, 255, 0, 255],
+                                         [255, 0, 0, 255], [255, 255, 255, 255]]
+                for y in 0..<height {
+                    for x in 0..<width {
+                        let quadrant = (y < height / 2 ? 0 : 2) + (x < width / 2 ? 0 : 1)
+                        let color = colors[quadrant]
+                        let offset = y * bytesPerRow + x * 4
+                        base[offset] = color[0]
+                        base[offset + 1] = color[1]
+                        base[offset + 2] = color[2]
+                        base[offset + 3] = color[3]
+                    }
+                }
+            }
+            CVPixelBufferUnlockBaseAddress(buffer, [])
+            adaptor.append(buffer, withPresentationTime:
+                            CMTime(value: CMTimeValue(i), timescale: CMTimeScale(fps)))
+        }
+        input.markAsFinished()
+        await writer.finishWriting()
+        return url
+    }
+
+    /// `AVAssetImageGenerator`（`appliesPreferredTrackTransform = true` = 実際の見え方）で
+    /// 1 フレーム取り出し、表示サイズと 4 象限の平均色（R,G,B）を返す。
+    private func displayedQuadrants(url: URL, at seconds: Double) throws
+    -> (size: CGSize, colors: [(r: Double, g: Double, b: Double)]) {
+        let generator = AVAssetImageGenerator(asset: AVURLAsset(url: url))
+        generator.appliesPreferredTrackTransform = true
+        generator.requestedTimeToleranceBefore = CMTime(seconds: 0.05, preferredTimescale: 600)
+        generator.requestedTimeToleranceAfter = CMTime(seconds: 0.05, preferredTimescale: 600)
+        let cg = try generator.copyCGImage(
+            at: CMTime(seconds: seconds, preferredTimescale: 600), actualTime: nil)
+        let w = cg.width, h = cg.height
+        var pixels = [UInt8](repeating: 0, count: w * h * 4)
+        let context = CGContext(data: &pixels, width: w, height: h, bitsPerComponent: 8,
+                                bytesPerRow: w * 4,
+                                space: CGColorSpaceCreateDeviceRGB(),
+                                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+        context?.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
+        var colors: [(r: Double, g: Double, b: Double)] = []
+        for quadrant in 0..<4 {
+            // 象限の中央 1/4 領域だけを平均する（境界のにじみを避ける）。
+            let xRange = quadrant % 2 == 0 ? (w / 8)..<(3 * w / 8) : (5 * w / 8)..<(7 * w / 8)
+            let yRange = quadrant / 2 == 0 ? (h / 8)..<(3 * h / 8) : (5 * h / 8)..<(7 * h / 8)
+            var sum = (r: 0.0, g: 0.0, b: 0.0)
+            var count = 0.0
+            for y in yRange {
+                for x in xRange {
+                    let offset = (y * w + x) * 4
+                    sum.r += Double(pixels[offset])
+                    sum.g += Double(pixels[offset + 1])
+                    sum.b += Double(pixels[offset + 2])
+                    count += 1
+                }
+            }
+            colors.append((sum.r / count, sum.g / count, sum.b / count))
+        }
+        return (CGSize(width: w, height: h), colors)
+    }
+
     private func makeExporter() throws -> VideoMosaicExporter {
         let renderer = try MosaicRenderer(evaluator: TrackingEvaluator(smoothing: 1.0))
         return VideoMosaicExporter(renderer: renderer, landmarker: NullFaceLandmarker())
@@ -284,7 +388,7 @@ final class MultiClipExportTests: XCTestCase {
             TimelineClip(sourceID: sourceID, sourceStart: 0, sourceEnd: 1)
         ]
         let sources: [UUID: AVAsset] = [sourceID: AVURLAsset(url: url)]
-        let composition = try await TimelineCompositionBuilder().build(clips: clips, sources: sources)
+        let composition = try await TimelineCompositionBuilder().build(clips: clips, sources: sources).composition
 
         // 素材時刻キーのキャッシュ（各クリップの使用区間に 1 バケットずつ）
         let caches: [UUID: [Double: [FaceLandmarkSet]]] = [
@@ -319,7 +423,7 @@ final class MultiClipExportTests: XCTestCase {
         let sourceID = UUID()
         let clips = [TimelineClip(sourceID: sourceID, sourceStart: 0, sourceEnd: 2, rate: 2.0)]
         let composition = try await TimelineCompositionBuilder()
-            .build(clips: clips, sources: [sourceID: AVURLAsset(url: url)])
+            .build(clips: clips, sources: [sourceID: AVURLAsset(url: url)]).composition
 
         let exporter = try makeExporter()
         let outURL = try await exporter.export(
@@ -354,7 +458,7 @@ final class MultiClipExportTests: XCTestCase {
             TimelineClip(sourceID: sourceID, sourceStart: 2, sourceEnd: 3)
         ]
         let composition = try await TimelineCompositionBuilder()
-            .build(clips: clips, sources: [sourceID: AVURLAsset(url: url)])
+            .build(clips: clips, sources: [sourceID: AVURLAsset(url: url)]).composition
 
         let caches: [UUID: [Double: [FaceLandmarkSet]]] = [
             sourceID: [2.5: [fakeFace(cx: 0.5, cy: 0.5)]]
@@ -405,7 +509,7 @@ final class MultiClipExportTests: XCTestCase {
             TimelineClip(sourceID: sourceID, sourceStart: 2, sourceEnd: 3)
         ]
         let composition = try await TimelineCompositionBuilder()
-            .build(clips: clips, sources: [sourceID: AVURLAsset(url: url)])
+            .build(clips: clips, sources: [sourceID: AVURLAsset(url: url)]).composition
 
         let exporter = try makeExporter()
         let outURL = try await exporter.export(
@@ -445,7 +549,7 @@ final class MultiClipExportTests: XCTestCase {
             TimelineClip(sourceID: sourceID, sourceStart: 2, sourceEnd: 3)
         ]
         let composition = try await TimelineCompositionBuilder()
-            .build(clips: clips, sources: [sourceID: AVURLAsset(url: url)])
+            .build(clips: clips, sources: [sourceID: AVURLAsset(url: url)]).composition
 
         let exporter = try makeExporter()
         let outURL = try await exporter.export(
@@ -483,7 +587,7 @@ final class MultiClipExportTests: XCTestCase {
         let sourceID = UUID()
         let clips = [TimelineClip(sourceID: sourceID, sourceStart: 0, sourceEnd: 3)]
         let composition = try await TimelineCompositionBuilder()
-            .build(clips: clips, sources: [sourceID: AVURLAsset(url: url)])
+            .build(clips: clips, sources: [sourceID: AVURLAsset(url: url)]).composition
 
         let exporter = try makeExporter()
         let outURL = try await exporter.export(
@@ -518,7 +622,7 @@ final class MultiClipExportTests: XCTestCase {
         let sourceID = UUID()
         let clips = [TimelineClip(sourceID: sourceID, sourceStart: 0, sourceEnd: 2, rate: 2.0)]
         let composition = try await TimelineCompositionBuilder()
-            .build(clips: clips, sources: [sourceID: AVURLAsset(url: url)])
+            .build(clips: clips, sources: [sourceID: AVURLAsset(url: url)]).composition
 
         let audioTracks = try await composition.loadTracks(withMediaType: .audio)
         let audio = try XCTUnwrap(audioTracks.first, "合成に音声トラックが無い")
@@ -564,7 +668,7 @@ final class MultiClipExportTests: XCTestCase {
         ]
         let sources: [UUID: AVAsset] = [photoID: AVURLAsset(url: photo.url),
                                         videoID: AVURLAsset(url: videoURL)]
-        let composition = try await TimelineCompositionBuilder().build(clips: clips, sources: sources)
+        let composition = try await TimelineCompositionBuilder().build(clips: clips, sources: sources).composition
         let compositionDuration = try await composition.load(.duration)
         XCTAssertEqual(CMTimeGetSeconds(compositionDuration), 5.0, accuracy: 0.1,
                        "写真クリップ入り composition の尺が合成尺と一致しない")
@@ -594,7 +698,161 @@ final class MultiClipExportTests: XCTestCase {
         XCTAssertGreaterThan(videoRMS, 0.1, "動画区間の音が無音（音声全損 or 位置ずれ）")
     }
 
-    /// `AudioExportPipeline.decide` の純ロジック契約（真理値表を全 16 通り固定）:
+    // MARK: - S8: トランジション（合成の装着・二重回転・音声クロスフェード）
+
+    /// **二重回転の回帰ガード（S8 最大の落とし穴）**。
+    ///
+    /// 縦動画（`preferredTransform` が 90 度回転）にトランジションを付けて書き出し、
+    /// 出力の**実際の見え方**（`appliesPreferredTrackTransform` 付きで取り出したフレーム）が
+    /// 素材の見え方と一致することを、表示サイズと 4 象限の平均色で確かめる。
+    ///
+    /// `preferredTransform` は videoComposition の layer instruction に畳み込まれ、
+    /// writer 側は identity・出力サイズは renderSize になる。writer 側にも回転を残すと
+    /// 表示サイズが横向きに戻る（240x320 → 320x240）か、象限の色が 180 度入れ替わる。
+    func test_portraitVideoWithTransition_isNotDoubleRotated() async throws {
+        guard MTLCreateSystemDefaultDevice() != nil else {
+            throw XCTSkip("Metal デバイスが無い環境ではスキップ")
+        }
+        let url = try await makePortraitQuadrantVideo(seconds: 4.0)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let sourceID = UUID()
+        let first = TimelineClip(sourceID: sourceID, sourceStart: 0, sourceEnd: 2)
+        let second = TimelineClip(sourceID: sourceID, sourceStart: 2, sourceEnd: 4)
+        let transitions = [first.id: TransitionSpec(kind: .crossfade, duration: 0.5)]
+        let built = try await TimelineCompositionBuilder().build(
+            clips: [first, second], transitions: transitions,
+            sources: [sourceID: AVURLAsset(url: url)])
+        let videoComposition = try XCTUnwrap(built.videoComposition,
+                                             "トランジションがあるのに videoComposition が無い")
+        // 縦動画なので renderSize は 240x320（naturalSize 320x240 の 90 度回転後）。
+        XCTAssertEqual(videoComposition.renderSize, CGSize(width: 240, height: 320),
+                       "renderSize が preferredTransform 適用後の表示サイズになっていない")
+
+        let exporter = try makeExporter()
+        let outURL = try await exporter.export(
+            asset: built.composition,
+            mapping: TimelineMapping(clips: [first, second], transitions: transitions),
+            videoComposition: built.videoComposition,
+            audioMix: built.audioMix,
+            renderLayout: built.layout) { _ in }
+        defer { try? FileManager.default.removeItem(at: outURL) }
+
+        // 書き出しトラックの素の状態: サイズは renderSize、向きは identity。
+        let outTracks = try await AVURLAsset(url: outURL).loadTracks(withMediaType: .video)
+        let outTrack = try XCTUnwrap(outTracks.first)
+        let outNaturalSize = try await outTrack.load(.naturalSize)
+        let outTransform = try await outTrack.load(.preferredTransform)
+        XCTAssertEqual(outNaturalSize, CGSize(width: 240, height: 320),
+                       "出力の格納解像度が renderSize と違う")
+        XCTAssertEqual(outTransform, .identity,
+                       "writer 側にも回転が残っている（instruction と合わせて二重回転になる）")
+
+        // 実際の見え方の突き合わせ（素材 = 正解）。
+        let reference = try displayedQuadrants(url: url, at: 0.5)
+        let output = try displayedQuadrants(url: outURL, at: 0.5)
+        XCTAssertEqual(output.size, reference.size,
+                       "出力の表示サイズが素材と違う（二重回転で縦横が入れ替わっている）")
+        for quadrant in 0..<4 {
+            let (out, ref) = (output.colors[quadrant], reference.colors[quadrant])
+            XCTAssertEqual(out.r, ref.r, accuracy: 40, "象限 \(quadrant) の R が素材と違う（回転ずれ）")
+            XCTAssertEqual(out.g, ref.g, accuracy: 40, "象限 \(quadrant) の G が素材と違う（回転ずれ）")
+            XCTAssertEqual(out.b, ref.b, accuracy: 40, "象限 \(quadrant) の B が素材と違う（回転ずれ）")
+        }
+        // 4 象限が実際に互いに別色であること（全部同色なら上の比較は無意味になる）。
+        for lhs in 0..<4 {
+            for rhs in (lhs + 1)..<4 {
+                let (a, b) = (output.colors[lhs], output.colors[rhs])
+                let distance = max(abs(a.r - b.r), max(abs(a.g - b.g), abs(a.b - b.b)))
+                XCTAssertGreaterThan(distance, 60,
+                                     "象限 \(lhs) と \(rhs) が同色（回転ずれを検出できない素材）")
+            }
+        }
+
+        // トランジションぶん尺が縮むこと（重なりモデルと一致）。
+        let duration = try await AVURLAsset(url: outURL).load(.duration)
+        XCTAssertEqual(CMTimeGetSeconds(duration), 3.5, accuracy: 0.2,
+                       "トランジションの重なりぶん尺が縮んでいない")
+    }
+
+    /// rate≠1 でも videoComposition が装着され（`VideoCompositionPlan.decide`）、
+    /// 合成済みフレーム経路（`AVAssetReaderVideoCompositionOutput`）で書き出せること。
+    /// 出力フレームレートは素材の公称値どまり（実効 fps の跳ね上がりを頭打ちにする）。
+    func test_rateClipWithVideoCompositionExportsHalvedDuration() async throws {
+        guard MTLCreateSystemDefaultDevice() != nil else {
+            throw XCTSkip("Metal デバイスが無い環境ではスキップ")
+        }
+        let url = try await makeTestVideo(seconds: 2.0, withAudio: false)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let sourceID = UUID()
+        let clips = [TimelineClip(sourceID: sourceID, sourceStart: 0, sourceEnd: 2, rate: 2.0)]
+        let built = try await TimelineCompositionBuilder().build(
+            clips: clips, sources: [sourceID: AVURLAsset(url: url)])
+        let videoComposition = try XCTUnwrap(built.videoComposition,
+                                             "rate≠1 なのに videoComposition が装着されていない")
+        XCTAssertLessThanOrEqual(
+            1.0 / CMTimeGetSeconds(videoComposition.frameDuration),
+            VideoCompositionFactory.maxFrameRate + 0.001,
+            "frameDuration に上限が掛かっていない（rate=10 で実効 300fps になる）")
+
+        let exporter = try makeExporter()
+        let outURL = try await exporter.export(
+            asset: built.composition,
+            mapping: TimelineMapping(clips: clips),
+            videoComposition: built.videoComposition,
+            audioMix: built.audioMix,
+            renderLayout: built.layout) { _ in }
+        defer { try? FileManager.default.removeItem(at: outURL) }
+
+        let duration = try await AVURLAsset(url: outURL).load(.duration)
+        XCTAssertEqual(CMTimeGetSeconds(duration), 1.0, accuracy: 0.15,
+                       "合成済みフレーム経路で rate=2 の出力尺が半分になっていない")
+    }
+
+    /// トランジション区間で音声がクロスフェードすること（audioMix の実効検証）。
+    ///
+    /// 素材は前半 2s が有音・後半 2s が無音。クリップ A=[0,2) / B=[2,4) を 0.5s の
+    /// クロスフェードで繋ぐと、出力は「[0,1.5) 有音 → [1.5,2.0) A が減衰 → [2.0,3.5) 無音」。
+    /// audioMix が効いていないと重なり区間で A の音が減衰せずそのまま鳴る。
+    func test_transitionCrossfadesAudio() async throws {
+        guard MTLCreateSystemDefaultDevice() != nil else {
+            throw XCTSkip("Metal デバイスが無い環境ではスキップ")
+        }
+        let url = try await makeTestVideo(seconds: 4.0, withAudio: true,
+                                          audioAmplitude: { $0 < 2.0 ? 1.0 : 0.0 })
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let sourceID = UUID()
+        let first = TimelineClip(sourceID: sourceID, sourceStart: 0, sourceEnd: 2)
+        let second = TimelineClip(sourceID: sourceID, sourceStart: 2, sourceEnd: 4)
+        let transitions = [first.id: TransitionSpec(kind: .crossfade, duration: 0.5)]
+        let built = try await TimelineCompositionBuilder().build(
+            clips: [first, second], transitions: transitions,
+            sources: [sourceID: AVURLAsset(url: url)])
+        XCTAssertNotNil(built.audioMix, "音声付きトランジションなのに audioMix が無い")
+
+        let exporter = try makeExporter()
+        let outURL = try await exporter.export(
+            asset: built.composition,
+            mapping: TimelineMapping(clips: [first, second], transitions: transitions),
+            videoComposition: built.videoComposition,
+            audioMix: built.audioMix,
+            renderLayout: built.layout) { _ in }
+        defer { try? FileManager.default.removeItem(at: outURL) }
+
+        let bodyRMS = try await audioRMS(url: outURL, window: 0.3...1.2)
+        let overlapRMS = try await audioRMS(url: outURL, window: 1.6...1.95)
+        let tailRMS = try await audioRMS(url: outURL, window: 2.3...3.4)
+        print("[S8AUDIO] body=\(bodyRMS) overlap=\(overlapRMS) tail=\(tailRMS)")
+        XCTAssertGreaterThan(bodyRMS, 0.1, "クリップ本体の音が載っていない")
+        XCTAssertLessThan(tailRMS, 0.05, "無音のはずの後続クリップ区間に音が残っている")
+        XCTAssertLessThan(overlapRMS, bodyRMS * 0.9,
+                          "重なり区間で音量が落ちていない（audioMix のランプが効いていない）")
+        XCTAssertGreaterThan(overlapRMS, 0.01, "重なり区間の音が完全に消えている（フェードが急すぎる）")
+    }
+
+    /// `AudioExportPipeline.decide` の純ロジック契約（真理値表を全 32 通り固定）:
     /// パススルー（bit 同一の無変換コピー）は**立っている条件が 0 個のときだけ**で、
     /// 1 個以上あれば再エンコード。
     ///
@@ -602,16 +860,18 @@ final class MultiClipExportTests: XCTestCase {
     /// 「OR に足し忘れ」を検出できない。ここでは期待値を**立っているビットの個数**
     /// （`bits == 0` か否か）だけから決め、条件の列挙に依存させない。
     func test_audioPipelineDecision_passthroughOnlyWhenNoTransform() {
-        for bits in 0..<16 {
+        for bits in 0..<32 {
             let trimming = bits & 1 != 0
+            let hasAudioMix = bits & 16 != 0
             let conditions = AudioTrackConditions(hasEmptySegments: bits & 2 != 0,
                                                   hasScaledSegments: bits & 4 != 0,
                                                   hasMixedFormats: bits & 8 != 0)
             let expected: AudioExportPipeline = bits == 0 ? .passthrough : .reencode
             XCTAssertEqual(
-                AudioExportPipeline.decide(isTrimming: trimming, conditions: conditions),
+                AudioExportPipeline.decide(isTrimming: trimming, hasAudioMix: hasAudioMix,
+                                           conditions: conditions),
                 expected,
-                "decide(trim: \(trimming), conditions: \(conditions)) が期待と違う")
+                "decide(trim: \(trimming), mix: \(hasAudioMix), conditions: \(conditions)) が期待と違う")
         }
     }
 
@@ -633,14 +893,23 @@ final class MultiClipExportTests: XCTestCase {
         for (name, keyPath) in fields {
             var conditions = AudioTrackConditions()
             conditions[keyPath: keyPath] = true
-            XCTAssertEqual(AudioExportPipeline.decide(isTrimming: false, conditions: conditions),
+            XCTAssertEqual(AudioExportPipeline.decide(isTrimming: false, hasAudioMix: false,
+                                                      conditions: conditions),
                            .reencode, "\(name) が単独で再エンコードを選ばせていない")
         }
         XCTAssertEqual(
-            AudioExportPipeline.decide(isTrimming: true, conditions: AudioTrackConditions()),
+            AudioExportPipeline.decide(isTrimming: true, hasAudioMix: false,
+                                       conditions: AudioTrackConditions()),
             .reencode, "isTrimming が単独で再エンコードを選ばせていない")
+        // audioMix（S8）単独でも再エンコード。パススルーは元パケットのコピーなので
+        // 音量ランプ・クロスフェードが一切反映されない。
         XCTAssertEqual(
-            AudioExportPipeline.decide(isTrimming: false, conditions: AudioTrackConditions()),
+            AudioExportPipeline.decide(isTrimming: false, hasAudioMix: true,
+                                       conditions: AudioTrackConditions()),
+            .reencode, "hasAudioMix が単独で再エンコードを選ばせていない")
+        XCTAssertEqual(
+            AudioExportPipeline.decide(isTrimming: false, hasAudioMix: false,
+                                       conditions: AudioTrackConditions()),
             .passthrough, "全条件が偽なのにパススルーにならない")
     }
 
@@ -662,7 +931,7 @@ final class MultiClipExportTests: XCTestCase {
 
         func conditions(_ clips: [TimelineClip]) async throws -> AudioTrackConditions {
             let composition = try await TimelineCompositionBuilder()
-                .build(clips: clips, sources: sources)
+                .build(clips: clips, sources: sources).composition
             let tracks = try await composition.loadTracks(withMediaType: .audio)
             let track = try XCTUnwrap(tracks.first)
             let segments = try await track.load(.segments)
@@ -705,7 +974,7 @@ final class MultiClipExportTests: XCTestCase {
     private func audioTrack(_ clips: [TimelineClip],
                             sources: [UUID: AVAsset]) async throws -> AVAssetTrack {
         let composition = try await TimelineCompositionBuilder().build(clips: clips,
-                                                                      sources: sources)
+                                                                      sources: sources).composition
         let tracks = try await composition.loadTracks(withMediaType: .audio)
         return try XCTUnwrap(tracks.first, "合成に音声トラックが無い")
     }
@@ -935,7 +1204,7 @@ final class MultiClipExportTests: XCTestCase {
         let sourceID = UUID()
         let clips = [TimelineClip(sourceID: sourceID, sourceStart: 0, sourceEnd: 2, rate: 2.0)]
         let composition = try await TimelineCompositionBuilder()
-            .build(clips: clips, sources: [sourceID: AVURLAsset(url: url)])
+            .build(clips: clips, sources: [sourceID: AVURLAsset(url: url)]).composition
 
         let exporter = try makeExporter()
         let outURL = try await exporter.export(
@@ -975,7 +1244,7 @@ final class MultiClipExportTests: XCTestCase {
         let sourceID = UUID()
         let clips = [TimelineClip(sourceID: sourceID, sourceStart: 0, sourceEnd: 4, rate: 2.0)]
         let composition = try await TimelineCompositionBuilder()
-            .build(clips: clips, sources: [sourceID: AVURLAsset(url: url)])
+            .build(clips: clips, sources: [sourceID: AVURLAsset(url: url)]).composition
 
         let exporter = try makeExporter()
         let outURL = try await exporter.export(
@@ -1024,7 +1293,7 @@ final class MultiClipExportTests: XCTestCase {
         ]
         let composition = try await TimelineCompositionBuilder().build(
             clips: clips,
-            sources: [aID: AVURLAsset(url: url44), bID: AVURLAsset(url: url48)])
+            sources: [aID: AVURLAsset(url: url44), bID: AVURLAsset(url: url48)]).composition
 
         let exporter = try makeExporter()
         let outURL = try await exporter.export(
@@ -1070,7 +1339,7 @@ final class MultiClipExportTests: XCTestCase {
         let sources: [UUID: AVAsset] = [aID: AVURLAsset(url: videoAURL),
                                         photoID: AVURLAsset(url: photo.url),
                                         bID: AVURLAsset(url: videoBURL)]
-        let composition = try await TimelineCompositionBuilder().build(clips: clips, sources: sources)
+        let composition = try await TimelineCompositionBuilder().build(clips: clips, sources: sources).composition
 
         let exporter = try makeExporter()
         let outURL = try await exporter.export(
@@ -1121,7 +1390,7 @@ final class MultiClipExportTests: XCTestCase {
         let sources: [UUID: AVAsset] = [aID: AVURLAsset(url: videoAURL),
                                         photoID: AVURLAsset(url: photo.url),
                                         bID: AVURLAsset(url: videoBURL)]
-        let composition = try await TimelineCompositionBuilder().build(clips: clips, sources: sources)
+        let composition = try await TimelineCompositionBuilder().build(clips: clips, sources: sources).composition
 
         let exporter = try makeExporter()
         let outURL = try await exporter.export(
@@ -1165,7 +1434,7 @@ final class MultiClipExportTests: XCTestCase {
         ]
         let sources: [UUID: AVAsset] = [videoID: AVURLAsset(url: videoURL),
                                         photoID: AVURLAsset(url: photo.url)]
-        let composition = try await TimelineCompositionBuilder().build(clips: clips, sources: sources)
+        let composition = try await TimelineCompositionBuilder().build(clips: clips, sources: sources).composition
 
         let exporter = try makeExporter()
         let outURL = try await exporter.export(
@@ -1239,7 +1508,7 @@ final class MultiClipExportTests: XCTestCase {
         let photoID = UUID()
         let clips = [TimelineClip(sourceID: photoID, sourceStart: 0, sourceEnd: photo.duration)]
         let sources: [UUID: AVAsset] = [photoID: AVURLAsset(url: photo.url)]
-        let composition = try await TimelineCompositionBuilder().build(clips: clips, sources: sources)
+        let composition = try await TimelineCompositionBuilder().build(clips: clips, sources: sources).composition
         let mapping = TimelineMapping(clips: clips)
 
         // 1) seed あり + clamp あり: 実検出ゼロ

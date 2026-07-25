@@ -394,6 +394,45 @@ final class TimelineMappingTransitionTests: XCTestCase {
         }
     }
 
+    // MARK: - S8: 重なりモデル（overlaps）
+
+    /// `overlaps` が「クランプ後の実効的な重なり」を、`sourceLocations(at:)` が
+    /// 2 要素を返す区間と厳密に同じ範囲で表すこと（builder / factory はこれだけを見る）。
+    func test_overlapsMatchTwoLocationRegion() {
+        let data = makeOverlapMapping(duration: 1.0)
+        XCTAssertEqual(data.mapping.overlaps.count, 1)
+        let overlap = try? XCTUnwrap(data.mapping.overlaps.first)
+        XCTAssertEqual(overlap?.outgoingClipID, data.clipA.id)
+        XCTAssertEqual(overlap?.incomingClipID, data.clipB.id)
+        XCTAssertEqual(overlap?.kind, .crossfade)
+        XCTAssertEqual(overlap?.duration ?? 0, 1.0, accuracy: 1e-9)
+        XCTAssertEqual(overlap?.start ?? -1, 3.0, accuracy: 1e-9)
+        XCTAssertEqual(overlap?.end ?? -1, 4.0, accuracy: 1e-9)
+        // 重なり区間の内外判定が sourceLocations と一致すること。
+        for step in 0...70 {
+            let time = Double(step) / 10
+            let isOverlap = data.mapping.overlap(at: time) != nil
+            XCTAssertEqual(isOverlap, data.mapping.sourceLocations(at: time).count == 2,
+                           "t=\(time): overlap(at:) と sourceLocations の重なり判定が食い違う")
+        }
+    }
+
+    /// `overlaps` の duration も防御的クランプ後の値であること（builder が
+    /// 独自にクランプし直さなくて済む＝計算の二重実装を作らない前提）。
+    func test_overlapsUseClampedDuration() {
+        let data = makeOverlapMapping(duration: 100)
+        XCTAssertEqual(data.mapping.overlaps.first?.duration ?? 0, 2.0, accuracy: 1e-9)
+        XCTAssertEqual(data.mapping.overlaps.first?.start ?? -1, 2.0, accuracy: 1e-9)
+    }
+
+    /// duration が 0 / NaN のトランジションは重なりとして載らないこと。
+    func test_zeroAndNaNTransitionsProduceNoOverlap() {
+        XCTAssertTrue(makeOverlapMapping(duration: 0).mapping.overlaps.isEmpty)
+        XCTAssertTrue(makeOverlapMapping(duration: .nan).mapping.overlaps.isEmpty)
+        let plain = TimelineMapping(clips: [TimelineClip(sourceID: sourceA, sourceStart: 0, sourceEnd: 2)])
+        XCTAssertTrue(plain.overlaps.isEmpty)
+    }
+
     /// clipSpans がタイムライン順に全クリップの合成区間（重なり込み）を返すこと。
     func test_clipSpansExposeOverlappingIntervals() {
         let data = makeOverlapMapping()

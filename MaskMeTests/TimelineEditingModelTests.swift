@@ -1118,21 +1118,14 @@ final class PhotoClipModelTests: XCTestCase {
                        "redo 後に素材種別が失われた")
     }
 
-    /// 一時ディレクトリ内の PhotoClipEncoder 出力（photoclip-*.mp4）の集合。
-    /// reject 時にエンコード済み一時ファイルが残留しないことの検証に使う。
-    private func photoClipTempFiles() -> Set<String> {
-        let dir = FileManager.default.temporaryDirectory
-        let names = (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []
-        return Set(names.filter { $0.hasPrefix("photoclip-") })
-    }
-
-    /// Major-2 回帰: 解像度不一致の写真 append は**一切の状態変異より前に** reject され、
-    /// クリップ数・世代・sources・検出キャッシュが完全に無変化のまま、具体的な
-    /// エラーメッセージが通知され、エンコード済み一時 mp4 が削除されること。
-    /// 修正前は commitEdit 後の非同期 rebuild が `mixedVideoFormats` ガードで落ち、
-    /// 壊れたクリップ・世代不一致（compositionGeneration ≠ timelineGeneration =
-    /// export 恒久拒否）・汎用エラーが残留し、復旧手段が undo しかなかった（実測）。
-    func test_appendPhotoClip_mismatchedResolution_rejectsWithoutStateMutation() async throws {
+    /// **契約の更新（S6 → S8）**: 解像度不一致の写真 append は、S6 では
+    /// 「一切の状態変異より前に reject（`mixedVideoFormats` と同一基準）」だった。
+    /// S8 で `AVVideoComposition` による解像度混在を正式解禁したので、
+    /// **追加され、合成される**のが正しい契約になった。
+    ///
+    /// 併せて「reject 時に残していた不整合（壊れたクリップ・世代不一致 = export 恒久
+    /// 拒否・汎用エラー）が起きない」ことは、成功経路の不変条件として引き続き見る。
+    func test_appendPhotoClip_mismatchedResolution_isComposedWithLetterbox() async throws {
         let url = try await makeTestVideo(seconds: 1.0)
         defer { try? FileManager.default.removeItem(at: url) }
         let model = makeModel()
@@ -1140,31 +1133,31 @@ final class PhotoClipModelTests: XCTestCase {
         try await waitUntilLoaded(model)
         await model.awaitPendingTimelineRebuild()
 
-        let clipsBefore = model.clips
-        let generationBefore = model.timelineGeneration
-        let sourcesBefore = Set(model.sources.keys)
-        let cacheKeysBefore = Set(model.cacheStore.allEntries.keys)
-        let facesBefore = model.detectedFaces.count
-        let tempFilesBefore = photoClipTempFiles()
+        let clipsBefore = model.clips.count
 
-        // 320x240 の動画に 100x80 の写真（builder の mixedVideoFormats と同じ不一致）
+        // 320x240 の動画に 100x80 の写真（S6 までは mixedVideoFormats で reject していた組）
         await model.appendPhotoClip(image: solidImage(width: 100, height: 80), seconds: 2.0)
         await model.awaitPendingTimelineRebuild()
 
-        XCTAssertEqual(model.clips, clipsBefore, "reject 後にクリップが変化した（壊れたクリップの残留）")
-        XCTAssertEqual(model.timelineGeneration, generationBefore, "reject で世代トークンが進んだ")
+        XCTAssertNil(model.errorMessage, "解像度混在の写真追加が拒否された（S8 で解禁済み）")
+        XCTAssertEqual(model.clips.count, clipsBefore + 1, "写真クリップが追加されていない")
         XCTAssertEqual(model.compositionGeneration, model.timelineGeneration,
-                       "reject 後に世代不一致（export 恒久拒否状態）が残った")
-        XCTAssertEqual(Set(model.sources.keys), sourcesBefore, "reject 後に sources へ素材が登録された")
-        XCTAssertEqual(Set(model.cacheStore.allEntries.keys), cacheKeysBefore,
-                       "reject 後に検出キャッシュへ seed が書き込まれた")
-        XCTAssertEqual(model.detectedFaces.count, facesBefore,
-                       "reject 後に検出顔リストへ写真の顔が追加された")
-        let message = try XCTUnwrap(model.errorMessage, "reject の理由がユーザーに通知されない")
-        XCTAssertTrue(message.contains("縦横比"),
-                      "エラーメッセージが具体的でない（汎用エラーに落ちている）: \(message)")
-        XCTAssertEqual(photoClipTempFiles(), tempFilesBefore,
-                       "reject 時にエンコード済み一時 mp4 が削除されていない")
+                       "追加後に世代不一致（export 恒久拒否状態）が残った")
+        XCTAssertTrue(model.timeline.validate())
+        let composition = try XCTUnwrap(model.composition)
+        XCTAssertEqual(CMTimeGetSeconds(composition.duration), 3.0, accuracy: 0.15,
+                       "混在クリップ込みで composition が再構築されていない")
+        // 混在 → videoComposition が装着され、renderSize は先頭（動画）クリップ基準。
+        let videoComposition = try XCTUnwrap(model.videoComposition,
+                                             "解像度混在なのに videoComposition が装着されていない")
+        XCTAssertEqual(videoComposition.renderSize, CGSize(width: 320, height: 240))
+        // 写真クリップは左右に帯（100x80 = 5:4 を 4:3 のフレームへフィット）。
+        let photoClipID = try XCTUnwrap(model.clips.last?.id)
+        let placement = model.renderLayout.placement(for: photoClipID)
+        XCTAssertLessThan(placement.width, 1.0, "レターボックスの配置が計算されていない")
+        XCTAssertEqual(placement.height, 1.0, accuracy: 1e-6)
+        XCTAssertEqual(placement.minX, (1 - placement.width) / 2, accuracy: 1e-6,
+                       "レターボックスが中央寄せになっていない")
     }
 
     /// クリップ未構築（動画ロード前）では追加せず、理由を errorMessage で知らせること。
@@ -1218,5 +1211,232 @@ final class PhotoClipModelTests: XCTestCase {
         XCTAssertEqual(entriesAfter.count, 1,
                        "写真区間のライブ検出書き込みが素材時刻 0 以外のバケットを作った")
         XCTAssertEqual(entriesAfter.first?.bucket, 0)
+    }
+}
+
+/// S8: トランジションの重なり区間におけるモデル層の振る舞い
+/// （両クリップの顔の union・選択照合スコープ・ライブ検出の停止）。
+@MainActor
+final class TransitionOverlapModelTests: XCTestCase {
+    private func makeModel() -> MosaicEditorModel {
+        MosaicEditorModel(mode: .video, recents: RecentItemsStore())
+    }
+
+    private func fakeFace(cx: Double, cy: Double, size: Double = 0.1) -> FaceLandmarkSet {
+        let half = size / 2
+        let points = [
+            FaceLandmark(x: Float(cx - half), y: Float(cy - half)),
+            FaceLandmark(x: Float(cx + half), y: Float(cy - half)),
+            FaceLandmark(x: Float(cx - half), y: Float(cy + half)),
+            FaceLandmark(x: Float(cx + half), y: Float(cy + half))
+        ]
+        return FaceLandmarkSet(points: points, confidence: 1)
+    }
+
+    /// 2 クリップ + crossfade（重なり [1.5, 2.0)）のモデルを組み、
+    /// 各素材の検出キャッシュに 1 顔ずつ入れる。
+    private func makeOverlapModel(kind: TransitionKind = .crossfade)
+    -> (model: MosaicEditorModel, sourceA: UUID, sourceB: UUID) {
+        let model = makeModel()
+        let sourceA = model.currentSourceID
+        let sourceB = UUID()
+        let clipA = TimelineClip(sourceID: sourceA, sourceStart: 0, sourceEnd: 2)
+        let clipB = TimelineClip(sourceID: sourceB, sourceStart: 0, sourceEnd: 2)
+        model.setTimelineForTesting(TimelineState(
+            clips: [clipA, clipB],
+            transitions: [clipA.id: TransitionSpec(kind: kind, duration: 0.5)]))
+        // 重なり区間（合成 [1.5, 2.0)）に対応する素材時刻に顔を仕込む。
+        // A は素材時刻 1.5〜2.0、B は素材時刻 0.0〜0.5。
+        for time in stride(from: 1.5, through: 2.0, by: 0.1) {
+            model.cacheStore.store([fakeFace(cx: 0.25, cy: 0.5)], sourceID: sourceA, time: time)
+        }
+        for time in stride(from: 0.0, through: 0.5, by: 0.1) {
+            model.cacheStore.store([fakeFace(cx: 0.75, cy: 0.5)], sourceID: sourceB, time: time)
+        }
+        return (model, sourceA, sourceB)
+    }
+
+    /// 重なり区間では**両クリップの顔**が返ること（片側だけだと画面に映っている
+    /// もう片方の顔が素通しになる）。重なり外は従来どおり 1 クリップぶん。
+    func test_displayFacesUnionsBothClipsInsideOverlap() {
+        let (model, _, _) = makeOverlapModel()
+        // 重なり [1.5, 2.0) の中央。
+        let faces = model.displayFaces(at: 1.75)
+        XCTAssertEqual(faces.count, 2, "重なり区間で片側の顔しか返っていない（モザイク漏れ）")
+        let centers = faces.map { Double($0.points[0].x + $0.points[1].x) / 2 }.sorted()
+        XCTAssertEqual(centers[0], 0.25, accuracy: 0.02, "outgoing 側の顔位置がずれている")
+        XCTAssertEqual(centers[1], 0.75, accuracy: 0.02, "incoming 側の顔位置がずれている")
+
+        // 重なり外（A 単独区間）は 1 顔。
+        XCTAssertEqual(model.displayFaces(at: 1.0).count, 1)
+        // 単一位置の経路（lookupFaces）は重なり中でも incoming 側だけを返す
+        // （検出キャッシュの書き込みキーなど、単一で正しい用途のために残してある）。
+        XCTAssertEqual(model.lookupFaces(at: 1.75).count, 1)
+    }
+
+    /// スライドでは顔が画面移動量ぶん平行移動し、画面外へ出た側は落ちること
+    /// （instruction のランプと同じ純関数から生成されている証拠）。
+    func test_displayFacesFollowSlideTranslation() {
+        let (model, _, _) = makeOverlapModel(kind: .slideLeft)
+
+        // progress 0.2（合成 1.6）: outgoing（中心 0.25）は −0.2 移動して画面内、
+        // incoming（中心 0.75）は +0.8 移動してまだ画面外。
+        let early = model.displayFaces(at: 1.6)
+        XCTAssertEqual(early.count, 1, "まだ画面に入っていない側の顔が残っている")
+        XCTAssertEqual(Double(early[0].points[0].x + early[0].points[1].x) / 2, 0.25 - 0.2,
+                       accuracy: 0.02, "outgoing 側がスライド量ぶん移動していない")
+
+        // progress 0.8（合成 1.9）: outgoing は −0.8 で画面外、incoming は +0.2 で画面内。
+        let late = model.displayFaces(at: 1.9)
+        XCTAssertEqual(late.count, 1, "画面外へ抜けた側の顔が残っている")
+        XCTAssertEqual(Double(late[0].points[0].x + late[0].points[1].x) / 2, 0.75 + 0.2,
+                       accuracy: 0.02, "incoming 側がスライド量ぶん移動していない")
+    }
+
+    /// 選択顔の照合スコープが重なり区間では 2 素材ぶんに広がること。
+    /// incoming 側だけにすると、画面に映っている outgoing 側の顔が選択照合で落ちる。
+    func test_selectedLandmarksKeepsBothSidesInsideOverlap() {
+        let (model, sourceA, sourceB) = makeOverlapModel()
+        model.detectedFaces = [
+            FaceTarget(id: UUID(), landmarks: fakeFace(cx: 0.25, cy: 0.5),
+                       thumbnail: UIImage(), isSelected: true, sourceID: sourceA),
+            FaceTarget(id: UUID(), landmarks: fakeFace(cx: 0.75, cy: 0.5),
+                       thumbnail: UIImage(), isSelected: true, sourceID: sourceB),
+            // 非選択の顔を 1 つ混ぜて「全選択バイパス」に落ちないようにする。
+            FaceTarget(id: UUID(), landmarks: fakeFace(cx: 0.5, cy: 0.9),
+                       thumbnail: UIImage(), isSelected: false, sourceID: sourceB)
+        ]
+        XCTAssertEqual(model.selectedLandmarks(at: 1.75).count, 2,
+                       "重なり区間で片側の選択顔が照合スコープから落ちている")
+    }
+
+    /// 重なり区間ではライブ検出を submit しないこと
+    /// （合成済みフレームの検出結果を素材キーで書くとキャッシュが汚染される）。
+    func test_liveDetectionIsSuspendedInsideOverlap() {
+        let (model, _, _) = makeOverlapModel()
+        model.faceMosaicOn = true
+        // 未検出の時刻（重なり外）は検出対象。
+        XCTAssertTrue(model.shouldDetectPreviewFrame(at: 0.5),
+                      "重なり外の未検出フレームが検出対象になっていない")
+        // 重なり区間は検出しない。
+        XCTAssertFalse(model.shouldDetectPreviewFrame(at: 1.6),
+                       "重なり区間でライブ検出が走る（キャッシュ汚染）")
+        XCTAssertFalse(model.shouldDetectPreviewFrame(at: 1.99))
+        // 重なりを抜けたら再開する。
+        XCTAssertTrue(model.shouldDetectPreviewFrame(at: 2.5))
+    }
+
+    // MARK: - m-1: 選択顔の照合は素材座標で行う（座標系を混ぜない）
+
+    /// 選択顔の照合が**視覚変換の前・素材座標**で行われること。
+    ///
+    /// スライドの重なり区間では顔が画面上で大きく平行移動する。合成座標の顔と
+    /// 素材座標の `FaceTarget` を直接比べていた旧実装では、
+    /// 「選択した顔にモザイクが乗らず、選択していないもう片方に乗る」という
+    /// 取り違えが起きる（下のコメントの実測値）。
+    func test_selectedLandmarksMatchesTargetsInSourceCoordinates() {
+        let model = makeModel()
+        let sourceA = model.currentSourceID
+        let sourceB = UUID()
+        let clipA = TimelineClip(sourceID: sourceA, sourceStart: 0, sourceEnd: 2)
+        let clipB = TimelineClip(sourceID: sourceB, sourceStart: 0, sourceEnd: 2)
+        model.setTimelineForTesting(TimelineState(
+            clips: [clipA, clipB],
+            transitions: [clipA.id: TransitionSpec(kind: .slideLeft, duration: 0.5)]))
+        // 重なり [1.5, 2.0)。t=1.85 → progress 0.7。
+        // outgoing(A) は dx=−0.7、incoming(B) は dx=+0.3 平行移動する。
+        for time in stride(from: 1.5, through: 2.0, by: 0.1) {
+            model.cacheStore.store([fakeFace(cx: 0.95, cy: 0.5)], sourceID: sourceA, time: time)
+        }
+        for time in stride(from: 0.0, through: 0.5, by: 0.1) {
+            model.cacheStore.store([fakeFace(cx: 0.5, cy: 0.5)], sourceID: sourceB, time: time)
+        }
+        model.detectedFaces = [
+            // 選択するのは A 側の顔だけ（素材座標 cx=0.95 → 画面上は 0.25）。
+            FaceTarget(id: UUID(), landmarks: fakeFace(cx: 0.95, cy: 0.5),
+                       thumbnail: UIImage(), isSelected: true, sourceID: sourceA),
+            // B 側は非選択（画面上は 0.8）。「全選択バイパス」に落ちないためにも要る。
+            FaceTarget(id: UUID(), landmarks: fakeFace(cx: 0.5, cy: 0.5),
+                       thumbnail: UIImage(), isSelected: false, sourceID: sourceB)
+        ]
+
+        // 画面には 2 顔（A:0.25 / B:0.8）が映っている。
+        let shown = model.displayFaces(at: 1.85)
+        XCTAssertEqual(shown.count, 2)
+
+        let selected = model.selectedLandmarks(at: 1.85)
+        XCTAssertEqual(selected.count, 1, "選択していない側の顔にもモザイクが乗っている")
+        let centroid = Double(selected[0].points[0].x + selected[0].points[1].x) / 2
+        // 旧実装（合成座標 0.25 と素材座標 0.95 を直接比較）では
+        // |0.95−0.25|=0.70 で選択顔が落ち、|0.95−0.8|=0.15 で**非選択の顔**が通っていた。
+        XCTAssertEqual(centroid, 0.25, accuracy: 0.02,
+                       "選択した顔ではなく、もう片方の顔にモザイクが乗っている")
+    }
+
+    /// レターボックス（解像度混在）でも、選択顔の照合が素材座標のまま行われ、
+    /// 返る顔だけが合成座標へ写ること（写像の順序の退行ガード）。
+    func test_selectedLandmarksAppliesLayoutAfterMatching() {
+        let model = makeModel()
+        let sourceA = model.currentSourceID
+        let clip = TimelineClip(sourceID: sourceA, sourceStart: 0, sourceEnd: 2)
+        model.setTimelineForTesting(TimelineState(clips: [clip]))
+        // 240x320 を 320x240 のフレームへフィットした配置（x=0.21875 / 幅 0.5625）。
+        let placement = AspectFit.placement(of: CGSize(width: 240, height: 320),
+                                            in: CGSize(width: 320, height: 240))
+        model.renderLayout = TimelineRenderLayout(placements: [clip.id: placement])
+        for time in stride(from: 0.0, through: 1.0, by: 0.1) {
+            model.cacheStore.store([fakeFace(cx: 0.10, cy: 0.5), fakeFace(cx: 0.90, cy: 0.5)],
+                                   sourceID: sourceA, time: time)
+        }
+        model.detectedFaces = [
+            FaceTarget(id: UUID(), landmarks: fakeFace(cx: 0.10, cy: 0.5),
+                       thumbnail: UIImage(), isSelected: true, sourceID: sourceA),
+            FaceTarget(id: UUID(), landmarks: fakeFace(cx: 0.90, cy: 0.5),
+                       thumbnail: UIImage(), isSelected: false, sourceID: sourceA)
+        ]
+        let selected = model.selectedLandmarks(at: 0.5)
+        XCTAssertEqual(selected.count, 1, "非選択の顔まで通っている")
+        let centroid = Double(selected[0].points[0].x + selected[0].points[1].x) / 2
+        // 素材 0.10 → 合成 0.21875 + 0.10*0.5625 = 0.275。
+        XCTAssertEqual(centroid, 0.275, accuracy: 1e-6,
+                       "選択顔がレターボックス配置へ写っていない")
+    }
+
+    // MARK: - M-1: 矩形サーチはレターボックスの逆写像を通る
+
+    /// プレビュー（合成フレーム）に描いた矩形が、クリップごとに**素材フレーム基準**へ
+    /// 戻ってから走査されること。先頭クリップ（単位配置）では矩形が変わらないこと。
+    func test_scanSegmentsMapsSearchRectBackToSourceFrame() {
+        let model = makeModel()
+        let sourceA = model.currentSourceID
+        let sourceB = UUID()
+        let clipA = TimelineClip(sourceID: sourceA, sourceStart: 0, sourceEnd: 2)
+        let clipB = TimelineClip(sourceID: sourceB, sourceStart: 0, sourceEnd: 2)
+        model.setTimelineForTesting(TimelineState(clips: [clipA, clipB]))
+        // scanSegments は asset の中身を読まない（存在確認のみ）。
+        let stub = AVURLAsset(url: URL(fileURLWithPath: "/dev/null"))
+        model.sources = [sourceA: stub, sourceB: stub]
+        // 先頭クリップは全面、後続クリップはレターボックス（x=0.21875 / 幅 0.5625）。
+        let placement = AspectFit.placement(of: CGSize(width: 240, height: 320),
+                                            in: CGSize(width: 320, height: 240))
+        model.renderLayout = TimelineRenderLayout(placements: [
+            clipA.id: CGRect(x: 0, y: 0, width: 1, height: 1),
+            clipB.id: placement
+        ])
+
+        // 合成 x=0.275 幅 0.05*0.5625 → 素材 x=0.10 幅 0.05（レビューの実測表の逆向き）。
+        let drawn = CGRect(x: 0.275, y: 0.2, width: 0.05 * 0.5625, height: 0.3)
+        let segments = model.scanSegments(searchRect: drawn)
+        XCTAssertEqual(segments.count, 2)
+        XCTAssertEqual(segments[0].rect, drawn, "先頭クリップ（単位配置）で矩形が変化した")
+        XCTAssertEqual(Double(segments[1].rect.minX), 0.10, accuracy: 1e-9,
+                       "レターボックスの逆写像が掛かっていない")
+        XCTAssertEqual(Double(segments[1].rect.width), 0.05, accuracy: 1e-9)
+        XCTAssertEqual(segments[1].rect.minY, drawn.minY, accuracy: 1e-9, "縦は全面なので不変")
+
+        // 黒帯の中だけを指した矩形: 先頭クリップだけが残る。
+        let inBar = model.scanSegments(searchRect: CGRect(x: 0.02, y: 0, width: 0.1, height: 1))
+        XCTAssertEqual(inBar.count, 1, "対応領域の無いクリップが走査対象に残っている")
+        XCTAssertEqual(inBar[0].sourceID, sourceA)
     }
 }

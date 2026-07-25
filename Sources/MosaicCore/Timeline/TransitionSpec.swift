@@ -103,6 +103,110 @@ public enum TransitionKind: String, Codable, CaseIterable, Sendable {
     public static func clampedProgress(_ progress: Double) -> Double {
         progress.isNaN ? 0 : min(max(progress, 0), 1)
     }
+
+    /// 区分線形ランプの分割点（progress 昇順・両端を含む）。
+    ///
+    /// AVFoundation のランプ（`setOpacityRamp` / `setTransformRamp` /
+    /// `setCropRectangleRamp`）は**区間内を線形補間する**ため、`parameters` が
+    /// 折れ線になる種類（`fadeToBlack`）は折れ点で区間を割らないと再現できない。
+    /// S8 の `VideoCompositionFactory` はこの分割点だけを見てランプを分割し、
+    /// 各区間の端点値を `parameters(progress:side:)` から取る（分割点の知識も
+    /// 数式も二重実装しない）。
+    ///
+    /// 「各区間の中で `parameters` が本当に線形か」は
+    /// `TransitionRampTests` が全種類・全区間について中点で検証している。
+    public var rampBreakpoints: [Double] {
+        self == .fadeToBlack ? [0, 0.5, 1] : [0, 1]
+    }
+
+    // MARK: - ランドマークの視覚変換（重なり区間の union 用）
+
+    /// 片側クリップの顔ランドマークに、この進行度の視覚変換を適用する。
+    ///
+    /// 重なり区間では画面に 2 クリップが同時に映るため、両側の顔にモザイクが要る。
+    /// 呼び出し側は `TimelineMapping.sourceLocations(at:)` の各要素についてこれを呼び、
+    /// 結果を連結（union）して描画・書き出しへ渡す。
+    ///
+    /// - 完全に不可視（不透明度 0）の側は空を返す。
+    /// - 1 点でも可視領域に残る顔は**全点を平行移動して残す**。ワイプの境界を跨ぐ顔で
+    ///   点を間引くとメッシュが壊れるため、はみ出しぶんはモザイクが余分に載る側に倒す
+    ///   （モザイクの過剰適用は安全側、不足は事故）。
+    /// - 可視判定・移動量ともに `transformPoint` / `parameters` を使う（数式の単一情報源）。
+    public func visibleLandmarks(_ sets: [FaceLandmarkSet],
+                                 progress: Double,
+                                 side: TransitionSide) -> [FaceLandmarkSet] {
+        let params = parameters(progress: progress, side: side)
+        guard params.opacity > 0 else { return [] }
+        let dx = Float(params.translation.dx)
+        let dy = Float(params.translation.dy)
+        return sets.compactMap { set in
+            let anyVisible = set.points.contains { point in
+                transformPoint(CGPoint(x: CGFloat(point.x), y: CGFloat(point.y)),
+                               progress: progress, side: side) != nil
+            }
+            guard anyVisible else { return nil }
+            guard dx != 0 || dy != 0 else { return set }
+            return FaceLandmarkSet(
+                points: set.points.map { FaceLandmark(x: $0.x + dx, y: $0.y + dy, z: $0.z) },
+                confidence: set.confidence)
+        }
+    }
+
+    // MARK: - 2 レイヤ合成（AVVideoComposition のレイヤ順）
+
+    /// 重なり区間を「前面 = outgoing / 背面 = incoming」の 2 レイヤで合成するとき、
+    /// **背面レイヤ**に設定すべき不透明度。
+    ///
+    /// AVFoundation のレイヤ合成は前面から順に over 合成する:
+    ///
+    ///     結果 = a_front·F + (1 − a_front)·(a_back·B)
+    ///
+    /// 一方 `parameters` が表す意図は「a_out·O + a_in·I（残りは黒）」なので、
+    /// 前面（outgoing）に a_out をそのまま与えたうえで、背面には
+    /// `a_back = a_in / (1 − a_out)` を与えると意図と厳密に一致する。
+    /// a_out = 1（スライド・ワイプのように 2 クリップが**画面上で重ならない**種類）は
+    /// 除算が定義できないので a_in をそのまま使う（重なりが無いので前面が背面を
+    /// 隠すだけであり、どちらでも結果は同じ）。
+    ///
+    /// 具体値: crossfade は常に 1（= 正しいクロスフェード。素直に a_in = p を
+    /// 与えると中間で黒が透けて暗くなる）、fadeToBlack は前半 0・後半 2p−1
+    /// （黒を挟む意図がそのまま出る）、slide/wipe は 1。
+    /// いずれも `rampBreakpoints` の各区間内で progress の線形関数になるため、
+    /// AVFoundation の線形ランプで誤差なく表現できる（`TransitionRampTests` が固定）。
+    ///
+    /// **区間の内部でだけ評価すること。** 端点は a_out = 1 になり得て 0/0
+    /// （crossfade の p=0 など）になる。ランプの端点値は `incomingLayerOpacityRamp`
+    /// が内部の 2 点から外挿して求める。
+    func incomingLayerOpacityInside(progress: Double) -> Double {
+        let outgoing = parameters(progress: progress, side: .outgoing).opacity
+        let incoming = parameters(progress: progress, side: .incoming).opacity
+        let denominator = 1 - outgoing
+        // 前面が画面全体を不透明で覆う種類（slide/wipe）は割れない。これらは
+        // 「前面が translate / crop で画面の一部しか占めない」ので、覆われていない
+        // 領域には背面がそのまま出るのが意図（= a_in をそのまま使う）。
+        guard denominator > 0 else { return incoming }
+        return min(1, max(0, incoming / denominator))
+    }
+
+    /// `rampBreakpoints` の 1 区間ぶんの、背面（incoming）レイヤの不透明度ランプ端点。
+    ///
+    /// 端点そのものは 0/0（a_out = 1 かつ a_in = 0）になり得るため、**区間内部の
+    /// 2 点（1/4 と 3/4）を評価して線形外挿する**。区間内が線形であることは
+    /// `rampBreakpoints` の契約そのもので、`TransitionRampTests` が全種類について
+    /// 中点検証で固定している。
+    public func incomingLayerOpacityRamp(from lower: Double,
+                                         to upper: Double) -> (start: Double, end: Double) {
+        let span = upper - lower
+        guard span > 0 else {
+            let value = incomingLayerOpacityInside(progress: lower)
+            return (value, value)
+        }
+        let first = incomingLayerOpacityInside(progress: lower + span * 0.25)
+        let second = incomingLayerOpacityInside(progress: lower + span * 0.75)
+        let start = min(1, max(0, 1.5 * first - 0.5 * second))
+        let end = min(1, max(0, 1.5 * second - 0.5 * first))
+        return (start, end)
+    }
 }
 
 /// クリップ境界 1 箇所に付くトランジションの指定。

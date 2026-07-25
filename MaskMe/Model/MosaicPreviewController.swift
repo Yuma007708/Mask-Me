@@ -34,17 +34,29 @@ final class MosaicPreviewController {
     /// 直前に描画したフレームが属するクリップ。境界跨ぎの時系列リセット判定に使う
     /// （`resetTimeSeriesStateIfClipChanged` 参照）。シーク・item 差し替えで nil に戻す。
     private var lastRenderedClipID: UUID?
+    /// 直前のフレームがトランジションの重なり区間だったか（S8）。
+    /// 重なり中は EMA を素通しにし、抜けた最初のフレームで状態を捨てる。
+    private var wasInTransition = false
+    /// 再生アイテムに装着する映像合成 / 音声ミックス（S8）。item を作り直しても
+    /// 落ちないよう、asset と組で保持して `makePlayerItem` が毎回付け直す。
+    private var videoComposition: AVVideoComposition?
+    private var audioMix: AVAudioMix?
 
     private(set) var duration: Double = 0
     /// DEBUG 診断用: copyPixelBuffer が nil を返した累計（間引きログの分母）。
     private var pixelBufferMissCount = 0
 
-    /// - Parameter asset: 合成済みの `AVMutableComposition` を受け取る。
-    ///   URL ではなく AVAsset を受けることで、クリップ編集の結果を
-    ///   そのまま再生できる。
-    init(renderer: MosaicRenderer, asset: AVAsset, model: MosaicEditorModel) {
+    /// - Parameters:
+    ///   - asset: 合成済みの `AVMutableComposition` を受け取る。
+    ///     URL ではなく AVAsset を受けることで、クリップ編集の結果をそのまま再生できる。
+    ///   - videoComposition: トランジション・rate≠1・フォーマット混在のときだけ非 nil（S8）。
+    ///   - audioMix: 音声クロスフェード・音量調整があるときだけ非 nil（S8）。
+    init(renderer: MosaicRenderer, asset: AVAsset, model: MosaicEditorModel,
+         videoComposition: AVVideoComposition? = nil, audioMix: AVAudioMix? = nil) {
         self.renderer = renderer
         self.model = model
+        self.videoComposition = videoComposition
+        self.audioMix = audioMix
         self.ciContext = CIContext(mtlDevice: renderer.device, options: [.useSoftwareRenderer: false])
 
         var cache: CVMetalTextureCache?
@@ -62,9 +74,10 @@ final class MosaicPreviewController {
     /// asset から再生用の AVPlayerItem を作り、フレーム出力と再生終了監視を結線する。
     /// `videoOutput` は item と 1:1 なので毎回作り直して差し替える。
     ///
-    /// ピッチ保持（S7）もここで設定する。item 単位のプロパティなので、
-    /// タイムライン編集のたびに composition を差し替えても設定が落ちないよう
-    /// 「item を作る 1 箇所」に置くこと（`setupPlayer` と `replaceAsset` の共通経路）。
+    /// ピッチ保持（S7）と映像合成 / 音声ミックスの装着（S8）もここで設定する。
+    /// いずれも item 単位のプロパティなので、タイムライン編集のたびに composition を
+    /// 差し替えても設定が落ちないよう「item を作る 1 箇所」に置くこと
+    /// （`setupPlayer` と `replaceAsset` の共通経路）。
     private func makePlayerItem(for asset: AVAsset) -> AVPlayerItem {
         let output = AVPlayerItemVideoOutput(pixelBufferAttributes: Self.outputPixelBufferAttributes)
         self.videoOutput = output
@@ -76,6 +89,10 @@ final class MosaicPreviewController {
         // 完全に含む。書き出し側（AVAssetReaderAudioMixOutput）と同じ設定に揃えることで、
         // プレビューと書き出しで音程が食い違わない。
         item.audioTimePitchAlgorithm = .spectral
+        // トランジション合成・レターボックス（S8）。無変換構成では nil のままで、
+        // 従来どおり素の composition をそのまま再生する。
+        item.videoComposition = videoComposition
+        item.audioMix = audioMix
         item.add(output)
 
         // 再生終了を監視（item 単位。差し替え時は旧 item の監視を外して付け替える）
@@ -108,12 +125,18 @@ final class MosaicPreviewController {
     ///   すべて無効になるため破棄する。
     /// - 再生位置の復元は呼び出し側（`MosaicEditorModel.rebuildComposition`）が
     ///   新しい合成尺へのクランプ込みで行う。
-    func replaceAsset(_ asset: AVAsset) async {
+    func replaceAsset(_ asset: AVAsset,
+                      videoComposition: AVVideoComposition? = nil,
+                      audioMix: AVAudioMix? = nil) async {
         guard let player else { return }
         if let oldItem = player.currentItem {
             NotificationCenter.default.removeObserver(
                 self, name: .AVPlayerItemDidPlayToEndTime, object: oldItem)
         }
+        // asset と装着物は必ず組で差し替える（旧 composition に新 instruction を
+        // 掛ける不整合を作らない）。
+        self.videoComposition = videoComposition
+        self.audioMix = audioMix
         let item = makePlayerItem(for: asset)
         player.replaceCurrentItem(with: item)
 
@@ -121,6 +144,7 @@ final class MosaicPreviewController {
         framesUntilResegment = 0
         landmarkSmoother.reset()
         lastRenderedClipID = nil
+        wasInTransition = false
         model?.notifyLiveSeek()
 
         // seek が新しい尺で計算できるよう、差し替え完了までに尺を取り直す。
@@ -151,6 +175,7 @@ final class MosaicPreviewController {
         landmarkSmoother.reset()
         // クリップ追跡もシークで別時系列になる（次フレームで記録し直す）
         lastRenderedClipID = nil
+        wasInTransition = false
         // ライブ検出の追跡状態（ROI track / フロー）もシーク先では別時系列になる
         model?.notifyLiveSeek()
         await player.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero)
@@ -267,14 +292,7 @@ final class MosaicPreviewController {
            let detImage = detectionCGImage(from: pixelBuffer) {
             model.submitPreviewFrameForDetection(detImage, at: timeSec)
         }
-        // 顔タブが OFF のときは顔ランドマークを使わない。
-        // 検出キャッシュ欠落時の freeze はしない。lookupFaces 側で両側マッチング補間が
-        // 連続する顔だけ返すようにしているため、ここで freeze するとアウト→イン時に
-        // 「アウト位置にモザイクが固定」され、かつエクスポートと挙動が食い違う。
-        // 描画直前の EMA でフレーム間の微小ちらつきを吸収する（速い動きはスナップ）。
-        let landmarks: [FaceLandmarkSet] = model.faceMosaicOn
-            ? landmarkSmoother.smooth(model.selectedLandmarks(at: timeSec))
-            : []
+        let landmarks = landmarksForRendering(at: timeSec, model: model)
         // 手動矩形は顔検出の補助なので顔タブ（faceMosaicOn）の状態に従う。
         // 解像度は（縮小後の）実テクスチャに合わせる（フルサイズだと 720px 縮小時に位置がずれる）。
         let additionalPaths = model.faceMosaicOn
@@ -319,12 +337,40 @@ final class MosaicPreviewController {
         }
     }
 
+    /// 描画に使う顔ランドマーク（合成フレーム基準）を返す。
+    ///
+    /// 顔タブが OFF のときは顔ランドマークを使わない。
+    /// 検出キャッシュ欠落時の freeze はしない。`lookupFaces` 側で両側マッチング補間が
+    /// 連続する顔だけ返すようにしているため、ここで freeze するとアウト→イン時に
+    /// 「アウト位置にモザイクが固定」され、かつエクスポートと挙動が食い違う。
+    /// 描画直前の EMA でフレーム間の微小ちらつきを吸収する（速い動きはスナップ）。
+    ///
+    /// **トランジションの重なり中（S8）は EMA を素通しにする**: 2 クリップぶんの顔が
+    /// 並ぶうえ、スライドでは全点が高速に移動するため、時系列平滑をかけると位置が
+    /// 遅れてモザイクがずれる。重なりを抜けた最初のフレームで状態を捨ててから
+    /// 通常運転に戻す。
+    private func landmarksForRendering(at timeSec: Double,
+                                       model: MosaicEditorModel) -> [FaceLandmarkSet] {
+        let inTransition = model.mapping.sourceLocations(at: timeSec).count >= 2
+        if wasInTransition, !inTransition { landmarkSmoother.reset() }
+        wasInTransition = inTransition
+        guard model.faceMosaicOn else { return [] }
+        let selected = model.selectedLandmarks(at: timeSec)
+        return inTransition ? selected : landmarkSmoother.smooth(selected)
+    }
+
     /// 直前フレームと異なるクリップに入っていたら、時系列前提の状態をすべて捨てる。
     ///
     /// 合成タイムライン上は連続した時刻でも、クリップ境界では映像内容が不連続になる
     /// （別素材・同一素材の離れた区間・並べ替え）。前クリップの EMA・背景マスク・
     /// ライブ追跡（ROI track / フロー）を持ち越すと、境界直後のフレームに前クリップの
     /// 顔位置・マスクがにじむ。単一クリップでは clipID が変わらないため無影響。
+    ///
+    /// **重なり区間でも `sourceLocation(at:)`（incoming 側の単一位置）でよい**（S8）:
+    /// 重なりの開始 = incoming への切り替わりでちょうど 1 回リセットされ、重なり中は
+    /// clipID が変わらないので毎フレームの無駄なリセットにならない。重なり中に
+    /// 両クリップの顔が要るのは描画側だけで、そちらは `selectedLandmarks` が
+    /// `sourceLocations(at:)` で union している。
     private func resetTimeSeriesStateIfClipChanged(at timeSec: Double, model: MosaicEditorModel) {
         let clipID = model.mapping.sourceLocation(at: timeSec)?.clipID
         guard clipID != lastRenderedClipID else { return }

@@ -51,6 +51,48 @@ public struct TimelineMapping: Sendable {
         }
     }
 
+    /// 隣接する 2 クリップの実効的な重なり（トランジション適用後）。
+    ///
+    /// **合成タイムラインの重なりモデルの単一情報源**である。S8 の
+    /// `TimelineCompositionBuilder`（A/B トラック交互配置）と
+    /// `VideoCompositionFactory`（instruction のランプ範囲）は、重なりの開始時刻・
+    /// 長さ・種類をここからしか取らない（builder 側で独自にクランプ計算を持つと、
+    /// 顔位置の写像とフレームの合成がずれてモザイクが漏れる）。
+    public struct Overlap: Equatable, Sendable {
+        /// 先行（画面から抜ける）クリップの id。`TimelineState.transitions` のキーでもある。
+        public let outgoingClipID: UUID
+        /// 後続（画面に入る）クリップの id。
+        public let incomingClipID: UUID
+        public let kind: TransitionKind
+        /// 合成タイムライン上の重なり開始時刻（= 後続クリップの開始時刻）。
+        public let start: Double
+        /// 合成タイムライン上の重なり終了時刻（= **先行クリップの `ClipSpan.end` そのもの**。
+        /// 半開区間 [start, end) の外側）。
+        ///
+        /// **`start + duration` で作らないこと。** `start` は「先行クリップ終端 − D」を
+        /// 丸めた値なので、そこへ D を足し戻しても先行クリップ終端と bit 一致しない
+        /// （実測で ±1.11e-16 秒ずれる）。ずれた 1 フレームでは `overlap(at:)` と
+        /// `sourceLocations(at:)` の重なり判定が食い違い、重なり中なのに片側キャッシュ
+        /// 経路へ落ちる（＝ライブ検出の抑止も外れ、合成済みフレームの検出結果が素材キーで
+        /// 書かれうる）。同じ値を 2 通りに計算しないため、`end` は先行クリップの span 終端を
+        /// そのまま持つ。
+        public let end: Double
+        /// クランプ後の実効的な重なり長（秒）。`end − start` の派生値であり、
+        /// 進行度（progress）の分母として `sourceLocations(at:)` と
+        /// `VideoCompositionFactory` の両方がこれを使う（分母を別々に作らない）。
+        /// 0 のトランジションは `overlaps` に載らない。
+        public var duration: Double { end - start }
+
+        public init(outgoingClipID: UUID, incomingClipID: UUID,
+                    kind: TransitionKind, start: Double, end: Double) {
+            self.outgoingClipID = outgoingClipID
+            self.incomingClipID = incomingClipID
+            self.kind = kind
+            self.start = start
+            self.end = end
+        }
+    }
+
     /// クリップと、その合成タイムライン上の開始位置。
     private struct Entry {
         let clip: TimelineClip
@@ -60,6 +102,8 @@ public struct TimelineMapping: Sendable {
 
     private let entries: [Entry]
     public let totalDuration: Double
+    /// トランジションによる実効的な重なり（タイムライン順）。
+    public let overlaps: [Overlap]
 
     public init(clips: [TimelineClip]) {
         self.init(clips: clips, transitions: [:])
@@ -76,18 +120,42 @@ public struct TimelineMapping: Sendable {
     public init(clips: [TimelineClip], transitions: [UUID: TransitionSpec]) {
         var acc = 0.0
         var built: [Entry] = []
+        var builtOverlaps: [Overlap] = []
         built.reserveCapacity(clips.count)
         for (index, clip) in clips.enumerated() {
             built.append(Entry(clip: clip, start: acc))
             acc += clip.duration
+            // この時点の acc は、いま積んだ Entry の `end`（= start + clip.duration）と
+            // **同じ式・同じ値**なので bit 一致する。Overlap.end にはこれを渡す
+            // （`start + duration` で作り直すと 1 ulp ずれる。Overlap.end の doc 参照）。
+            let outgoingEnd = acc
             if index + 1 < clips.count, let spec = transitions[clip.id] {
                 let cap = min(clip.duration, clips[index + 1].duration) / 2
                 let duration = spec.duration.isNaN ? 0 : spec.duration
-                acc -= min(max(duration, 0), cap)
+                let clamped = min(max(duration, 0), cap)
+                acc -= clamped
+                // クランプ後の重なりが 0 のトランジションは合成上存在しない
+                // （= A/B 交互配置も instruction のランプも作らない）。
+                if clamped > 0 {
+                    builtOverlaps.append(Overlap(outgoingClipID: clip.id,
+                                                 incomingClipID: clips[index + 1].id,
+                                                 kind: spec.kind,
+                                                 start: acc,
+                                                 end: outgoingEnd))
+                }
             }
         }
         self.entries = built
         self.totalDuration = acc
+        self.overlaps = builtOverlaps
+    }
+
+    /// 合成時刻が属する重なり（半開区間 [start, end)）。重なり外は nil。
+    ///
+    /// `sourceLocations(at:)` が 2 要素を返す区間と厳密に一致する
+    /// （どちらも同じ `init` のクランプ結果に由来する）。
+    public func overlap(at compositionTime: Double) -> Overlap? {
+        overlaps.first { compositionTime >= $0.start && compositionTime < $0.end }
     }
 
     /// 全クリップとその合成区間（タイムライン順。トランジションがあれば区間は重なる）。

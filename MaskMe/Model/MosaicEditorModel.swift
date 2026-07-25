@@ -204,6 +204,17 @@ public final class MosaicEditorModel: ObservableObject {
     /// `rebuildComposition`（`MosaicEditorModel+Timeline.swift`）が差し替えるため
     /// `internal`（無印）にした。
     var composition: AVMutableComposition?
+    /// `composition` に装着する映像合成（S8）。トランジション・rate≠1・
+    /// フォーマット混在のときだけ非 nil（判定は `VideoCompositionPlan.decide`）。
+    /// プレビュー（`AVPlayerItem.videoComposition`）と書き出し
+    /// （`AVAssetReaderVideoCompositionOutput`）の両経路に同じものを渡す。
+    var videoComposition: AVMutableVideoComposition?
+    /// `composition` に装着する音声ミックス（S8）。トランジションの音声クロスフェード・
+    /// `TimelineClip.originalAudioVolume` があるときだけ非 nil。
+    var audioMix: AVMutableAudioMix?
+    /// 素材フレーム基準の顔座標を合成フレーム基準へ写すレイアウト（S8）。
+    /// 解像度混在（レターボックス）で効く。無変換構成では恒等。
+    var renderLayout: TimelineRenderLayout = .identity
     private(set) var previewController: MosaicPreviewController?
     private var cancellables: Set<AnyCancellable> = []
 
@@ -386,18 +397,23 @@ public final class MosaicEditorModel: ObservableObject {
                 // 刻まれ、exportVideo の世代照合が素通しになる（レビューの実測）。
                 let loadGeneration = timelineGeneration
                 let built = try await TimelineCompositionBuilder()
-                    .build(clips: clips, sources: sources)
+                    .build(clips: clips, transitions: timeline.transitions, sources: sources)
                 let isStale = loadGeneration != timelineGeneration
                 if !isStale {
-                    composition = built
-                    compositionGeneration = loadGeneration
+                    apply(built: built, generation: loadGeneration)
                 }
                 if let r = renderer {
                     // stale の場合、割り込んだ編集側の rebuild が composition を
                     // 先に差し替えていればそちらを使う（無ければ built を暫定表示し、
                     // 直後の再構築で現行世代の合成結果に置き換わる）。
+                    // composition と videoComposition / audioMix は**必ず同じ組**で使う
+                    // （別世代の組み合わせは尺・向き・音量が食い違う）。
+                    let useBuilt = composition == nil
+                    let asset: AVAsset = composition ?? built.composition
                     previewController = MosaicPreviewController(
-                        renderer: r, asset: composition ?? built, model: self)
+                        renderer: r, asset: asset, model: self,
+                        videoComposition: useBuilt ? built.videoComposition : videoComposition,
+                        audioMix: useBuilt ? built.audioMix : audioMix)
                 }
                 if isStale {
                     // 旧クリップ列の合成結果は適用せず、現行世代で作り直す。
@@ -518,11 +534,19 @@ public final class MosaicEditorModel: ObservableObject {
     }
 
     /// 矩形サーチ（`resolveRegion`）の走査対象1件。素材と、その中で走査する区間。
-    private struct RegionScanSegment {
+    ///
+    /// **アクセスレベル**: レターボックスの逆写像結果（`rect`）を実素材なしで検証したいので
+    /// `internal`（`TimelineEditingModelTests` が `scanSegments(searchRect:)` を直接叩く）。
+    struct RegionScanSegment {
         let asset: AVAsset
         /// nil は素材全体（`findFaceInVideo` が duration をロードして決める）。
         let range: ClosedRange<Double>?
         let sourceID: UUID
+        /// **素材フレーム基準**へ逆写像済みのクロップ矩形
+        /// （`TimelineRenderLayout.inverseRemap`）。`findFaceInVideo` はこれをそのまま
+        /// 素材ピクセルへ掛ける。ユーザーが描いた合成フレーム基準の矩形を無変換で
+        /// 当てると、レターボックスされたクリップで確定的にずれる。
+        let rect: CGRect
     }
 
     /// 矩形サーチの検出結果。どの素材で見つかったかを顔の帰属（`FaceTarget.sourceID`）
@@ -538,6 +562,11 @@ public final class MosaicEditorModel: ObservableObject {
     /// 対応時刻の無い結果を返さないため。恒等＝素材全体1クリップでは従来の全体走査と
     /// 同一の時刻列になる）。見つかれば FaceTarget として追加（追跡可能）。
     /// 全フレームで失敗なら固定矩形マスク。
+    ///
+    /// `rect` は**プレビュー（＝合成フレーム）基準**の正規化矩形。素材へ当てる前に
+    /// クリップごとに `renderLayout.inverseRemap` で素材フレーム基準へ戻す
+    /// （`scanSegments(searchRect:)`）。得られるランドマークは素材座標なので、
+    /// `detectedFaces` の他の要素（ライブ検出・初期スキャン）と座標系が揃う。
     private func resolveRegion(_ rect: CGRect, referenceImage: UIImage?) async {
         guard mode == .video, videoAsset != nil else {
             appendManualRect(rect)
@@ -545,15 +574,16 @@ public final class MosaicEditorModel: ObservableObject {
         }
         isScanning = true
         let scanner = makeFaceLandmarker(forVideo: false, settings: detectionSettings)
-        let segments = scanSegments()
+        let segments = scanSegments(searchRect: rect)
         let result: RegionScanHit? = await Task.detached(
             priority: .userInitiated
-        ) { [scanner, segments, rect] in
+        ) { [scanner, segments] in
             // タイムライン順に各クリップの使用区間を走査し、最初の検出を採用する。
             for segment in segments {
                 guard !Task.isCancelled else { return nil }
                 if let (landmarks, frame) = await Self.findFaceInVideo(
-                    asset: segment.asset, rect: rect, scanner: scanner, scanRange: segment.range) {
+                    asset: segment.asset, rect: segment.rect,
+                    scanner: scanner, scanRange: segment.range) {
                     return RegionScanHit(landmarks: landmarks, frame: frame, sourceID: segment.sourceID)
                 }
             }
@@ -573,24 +603,40 @@ public final class MosaicEditorModel: ObservableObject {
         }
     }
 
-    /// 矩形サーチ（`resolveRegion`）が走査すべき素材と使用区間の列。
+    /// 矩形サーチ（`resolveRegion`）が走査すべき素材・使用区間・**素材基準の矩形**の列。
     /// クリップ列があればその使用区間のみ。クリップ未構築（Composition 構築前）の間は
     /// 従来どおり素材全体。
-    private func scanSegments() -> [RegionScanSegment] {
+    ///
+    /// - Parameter rect: プレビュー（合成フレーム）基準の正規化矩形。
+    ///
+    /// クリップごとに `renderLayout.inverseRemap` でレターボックスの逆写像を掛ける。
+    /// 恒等レイアウト（無変換タイムライン・先頭クリップ）では矩形がそのまま返るため
+    /// 挙動不変。逆写像が nil（矩形が完全に黒帯の中）のクリップは走査対象から外す
+    /// （そのクリップの素材にはユーザーが指した領域が存在しない）。
+    ///
+    /// **アクセスレベル**: 逆写像の配線を実素材なしで検証するためテストから呼ぶので
+    /// `internal`（`RegionScanSegment` も同じ理由で `internal`）。
+    func scanSegments(searchRect rect: CGRect) -> [RegionScanSegment] {
         guard !clips.isEmpty else {
             guard let asset = videoAsset else { return [] }
-            return [RegionScanSegment(asset: asset, range: nil, sourceID: currentSourceID)]
+            return [RegionScanSegment(asset: asset, range: nil,
+                                      sourceID: currentSourceID, rect: rect)]
         }
         return clips.compactMap { clip in
             guard let asset = sources[clip.sourceID], clip.sourceEnd > clip.sourceStart else { return nil }
+            guard let sourceRect = renderLayout.inverseRemap(rect, clipID: clip.id) else { return nil }
             return RegionScanSegment(asset: asset,
                                      range: clip.sourceStart...clip.sourceEnd,
-                                     sourceID: clip.sourceID)
+                                     sourceID: clip.sourceID,
+                                     rect: sourceRect)
         }
     }
 
     /// 素材の指定区間（nil なら全体）を1fpsでサンプリングし、矩形クロップ内で顔を探す。
     /// 最初の検出結果を返す。
+    ///
+    /// `rect` は**素材フレーム基準**（`scanSegments(searchRect:)` が逆写像済み）。
+    /// 返すランドマークも `remapped(into: rect)` で素材フレーム基準へ戻したものになる。
     nonisolated private static func findFaceInVideo(
         asset: AVAsset,
         rect: CGRect,
@@ -820,28 +866,23 @@ public final class MosaicEditorModel: ObservableObject {
     var liveFlowCache: [DetectionCacheKey: [FaceLandmarkSet]] = [:]
 
     /// 選択中の顔に対応する、指定した合成時刻のランドマークセットを返す。
+    ///
+    /// 参照する顔は `displayFaces(at:)`（重なり区間は 2 クリップぶんの union・
+    /// レターボックス写像込み）。
+    ///
+    /// **座標系を混ぜないこと（重要）**: `displayFaces(at:)` の返り値は**合成フレーム基準**、
+    /// `FaceTarget.landmarks` は検出時のままの**素材フレーム基準**なので、両者の重心を
+    /// 直接比べてはならない（レターボックスの実測ずれは最大 0.175。閾値 0.5 に対して
+    /// 単独顔では落ちないが、顔が 2 人以上で互いに 0.35 以内に居ると誤マッチしうる）。
+    /// 絞り込みは `displayFaces(at:matching:)` に渡し、**写像の前・素材座標のまま**
+    /// 行わせる（順序の理由はそちらの doc 参照）。
     func selectedLandmarks(at time: Double) -> [FaceLandmarkSet] {
         guard faceMosaicOn else { return [] }
-        let cached = lookupFaces(at: time)
         let selected = detectedFaces.filter(\.isSelected)
         if selected.isEmpty { return [] }
-        if selected.count == detectedFaces.count { return cached }
-
-        // 照合対象をこの合成時刻が属する素材の顔に限定する（別素材の「似た位置の顔」
-        // との誤マッチ防止）。sourceID が nil の顔（写真モード・素材ID導入前の経路・
-        // テスト直注入）は従来どおり素材不問で照合する。恒等（単一素材）では
-        // 全員が同一 sourceID なのでスコープは何も落とさない（挙動不変）。
-        let sourceID = resolveSourceTime(atComposition: time).sourceID
-        let scoped = selected.filter { $0.sourceID == nil || $0.sourceID == sourceID }
-
-        // 重心の近さで選択顔とキャッシュ顔を照合する（閾値0.5: 広め）
-        return cached.filter { face in
-            let fc = normalizedCentroid(of: face)
-            return scoped.contains { target in
-                let tc = normalizedCentroid(of: target.landmarks)
-                return hypot(fc.x - tc.x, fc.y - tc.y) < 0.5
-            }
-        }
+        // 全選択なら絞り込み自体が恒等（照合を回すだけ無駄）。
+        if selected.count == detectedFaces.count { return displayFaces(at: time) }
+        return displayFaces(at: time, matching: selected)
     }
 
     /// 手動矩形を FaceMaskBuilder.RegionPath に変換する。
@@ -1160,6 +1201,12 @@ public final class MosaicEditorModel: ObservableObject {
                 // 写真素材の素材時刻は exporter 側でも 0 に clamp する
                 // （t=0 seed に全フレームがヒットし、写真区間で実検出が走らない）。
                 photoSourceIDs: timeline.photoSourceIDs,
+                // 合成（トランジション・レターボックス・フレームレート上限）と
+                // 音声ミックスはプレビューと同じものを渡す。composition と必ず組で
+                // 差し替わる（`apply(built:generation:)`）ので世代がずれない。
+                videoComposition: videoComposition,
+                audioMix: audioMix,
+                renderLayout: renderLayout,
                 faceEnabled: faceMosaicOn,
                 backgroundEnabled: backgroundMosaicOn,
                 backgroundBlock: backgroundBlockSize,
@@ -1253,6 +1300,32 @@ public final class MosaicEditorModel: ObservableObject {
     /// 写像込みで維持する（`composition` プロパティの doc コメント参照）。
     /// クリップ未構築（Composition 構築前の窓・`sources` 未登録）の間は従来どおり
     /// `videoAsset` の恒等参照にフォールバックする。
+    ///
+    /// **既知の割り切り（S8。composition + videoComposition 経由に切り替えない理由）**
+    ///
+    /// ここが返すのは**素材フレーム**であり、`videoComposition` によるレターボックス・
+    /// トランジションは掛かっていない。一方 `AVPlayerItem` 経由の再生プレビューは
+    /// 合成フレームなので、解像度が混在したタイムラインでは
+    /// **シーク／一時停止のたびに絵の枠（帯の有無）が切り替わって見える**。
+    /// これは表示上の構図の違いだけで、モザイクの位置ずれ・漏れは起きない:
+    /// 静止プレビューを描く `renderPreview()` は `detectedFaces` の
+    /// **素材フレーム基準**のランドマークをそのまま使うので、素材フレームと座標系が
+    /// 一致している（合成フレーム基準の `selectedLandmarks(at:)` を使うのは再生経路だけ）。
+    ///
+    /// composition + videoComposition の image generator に切り替えると、この一貫性が
+    /// 逆に壊れる:
+    /// 1. `renderPreview()` が素材座標の顔を合成フレームへ描くことになり、
+    ///    レターボックスされたクリップで**モザイクが確実にずれる**（表示だけの問題が
+    ///    実害に格上げされる）。
+    /// 2. `redetect(at:)` はこのフレームを検出に掛けて `storePreScanResult` で
+    ///    **素材キー**に書き込む。合成フレームで検出すると座標系の違う結果が正規の検出として
+    ///    キャッシュへ入り、エクスポート（キャッシュヒットで検出をスキップ）まで汚染される。
+    /// 3. 再生用 `AVPlayerItem` が生きているまま videoComposition 付きの
+    ///    `AVAssetImageGenerator` を回すのは、過去に実機全滅を招いた
+    ///    「サムネ生成と再生の HW デコーダ衝突」と同じ形になる。
+    ///
+    /// 正しい直し方は「表示用フレーム（合成基準）と検出用フレーム（素材基準）を分ける」
+    /// ことで、`renderPreview` の座標系変更を伴う。S8 の範囲を超えるため **S9 以降**に送る。
     func frameAtCompositionTime(_ compositionTime: Double) -> UIImage? {
         let (sourceID, sourceTime) = resolveSourceTime(atComposition: compositionTime)
         guard let asset = sources[sourceID] ?? videoAsset else { return nil }
