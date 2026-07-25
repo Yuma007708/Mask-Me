@@ -1,4 +1,5 @@
 import SwiftUI
+import MosaicCore
 
 /// 編集画面：プレビュー（上）/ 調整バー（中・タブ選択でスライド表示）/
 /// カスタムタブバー（下）の3段構成。
@@ -28,6 +29,11 @@ struct EditorView: View {
         let faceBlockSize: Float
         let backgroundBlockSize: Float
         let manualRects: [CGRect]
+        // タイムライン復元（下書き v2）。v1 下書き・写真下書きは nil のままで、
+        // 従来どおり「素材全体 1 クリップ」として読み込まれる。
+        var timeline: TimelineState?
+        var sourceURLs: [UUID: URL] = [:]
+        var primarySourceID: UUID?
     }
 
     init(media: PickedMedia, recents: RecentItemsStore, resume: ResumeContext? = nil,
@@ -248,7 +254,17 @@ struct EditorView: View {
     private func loadMedia() {
         switch media {
         case .image(let image): model.load(image: image)
-        case .video(let url): model.load(videoURL: url)
+        case .video(let url):
+            // 下書き v2 のタイムライン復元は load の**前**に予約する
+            // （load は非同期にタイムラインを初期化するため、後から差し替えると
+            //   既定の単一クリップに上書きされる。queueTimelineRestore の doc 参照）。
+            if let resume, let timeline = resume.timeline, !timeline.clips.isEmpty,
+               let primary = resume.primarySourceID {
+                model.queueTimelineRestore(timeline: timeline,
+                                           sourceURLs: resume.sourceURLs,
+                                           primarySourceID: primary)
+            }
+            model.load(videoURL: url)
         }
         if let resume {
             model.applyRestoredParameters(
@@ -307,10 +323,15 @@ struct EditorView: View {
             )
             photoEditingActive = true
         case .video:
-            guard let sourceURL = model.sourceVideoURL else { return }
+            // タイムラインが参照する全素材を保存対象にする（v2）。
+            // クリップ未構築（読み込み中に離脱）の間は最後にロードした素材のみ。
+            let sources = model.draftSources
+            guard !sources.isEmpty else { return }
             let draft = draftStore.saveVideoDraft(
                 existing: videoDraftID,
-                sourceURL: sourceURL,
+                sources: sources,
+                sessionSourceIDs: model.sessionReferencedSourceIDs,
+                timeline: model.timeline,
                 faceMosaicOn: model.faceMosaicOn,
                 backgroundMosaicOn: model.backgroundMosaicOn,
                 faceBlockSize: model.faceBlockSize,

@@ -137,6 +137,11 @@ struct VideoTimelineView: View {
                             model.trimRange = model.trimRange.lowerBound...min(1, newUpper)
                         }
                     }
+                    .onEnded { _ in
+                        // ドラッグ確定時のみ履歴へ積む（onChanged ごとに積むと
+                        // 1 ドラッグが無数の undo ステップに割れる）。
+                        model.commitEdit()
+                    }
             )
     }
 

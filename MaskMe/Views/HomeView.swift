@@ -1,4 +1,5 @@
 import SwiftUI
+import MosaicCore
 
 /// Landing screen: two side-by-side entry buttons (写真 / 動画) on top,
 /// the recent-items list below.
@@ -46,6 +47,7 @@ struct HomeView: View {
     }
 
     /// 動画の「編集中」下書きをタップしたら、元動画＋保存パラメータで再開する。
+    /// v2 下書きはタイムライン（複数クリップ・rate・トランジション）も復元する。
     private func resume(_ draft: EditingDraft) {
         pickedMedia = .video(draftStore.sourceURL(for: draft))
         resumeContext = EditorView.ResumeContext(
@@ -54,7 +56,10 @@ struct HomeView: View {
             backgroundMosaicOn: draft.backgroundMosaicOn,
             faceBlockSize: draft.faceBlockSize,
             backgroundBlockSize: draft.backgroundBlockSize,
-            manualRects: draft.manualRects
+            manualRects: draft.manualRects,
+            timeline: draft.timeline.clips.isEmpty ? nil : draft.timeline,
+            sourceURLs: draftStore.sourceURLs(for: draft),
+            primarySourceID: draft.primarySource?.id
         )
         showEditor = true
     }

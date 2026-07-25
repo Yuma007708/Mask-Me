@@ -29,6 +29,10 @@ public final class MosaicEditorModel: ObservableObject {
     }
 
     /// Undo/Redo 用の編集スナップショット。
+    ///
+    /// S5 で `timeline` / `trimRange` を追加した。タイムライン編集
+    /// （split/remove/move/trim/setRate）もパラメータ編集と同じ履歴に積まれ、
+    /// undo/redo でクリップ ID・順序・rate まで完全復元される。
     struct EditSnapshot: Equatable {
         var faceMosaicOn: Bool
         var backgroundMosaicOn: Bool
@@ -36,6 +40,8 @@ public final class MosaicEditorModel: ObservableObject {
         var backgroundBlockSize: Float
         var selectedFaceIDs: Set<UUID>
         var manualRects: [CGRect]
+        var trimRange: ClosedRange<Double>
+        var timeline: TimelineState
     }
 
     // プレビュー
@@ -283,7 +289,11 @@ public final class MosaicEditorModel: ObservableObject {
         trimRange = 0...1
         // 素材ごとに新規 sourceID を発行する。init 固定のままだと、同一モデルで
         // 別動画をロードし直したとき前の素材の検出キャッシュと同じキー空間に混ざる。
-        currentSourceID = UUID()
+        // 下書き復元（queueTimelineRestore 済み）では保存時の素材IDを引き継ぐ:
+        // 新規発行すると初期スキャンのシード・顔サムネの帰属が復元タイムラインの
+        // どの素材とも一致せず、選択照合（selectedLandmarks の sourceID スコープ）
+        // から外れる。
+        currentSourceID = pendingTimelineRestore?.primarySourceID ?? UUID()
         let asset = AVAsset(url: url)
         videoAsset = asset
 
@@ -356,10 +366,7 @@ public final class MosaicEditorModel: ObservableObject {
             let seconds = (try? await asset.load(.duration))?.seconds ?? 0
             videoDuration = seconds
 
-            // 読み込み直後は素材全体を使う単一クリップ（編集はここから始まる）。
-            sources = [currentSourceID: asset]
-            timeline = TimelineState(clips: [TimelineClip(sourceID: currentSourceID,
-                                                          sourceStart: 0, sourceEnd: seconds)])
+            installInitialTimeline(primaryAsset: asset, seconds: seconds)
 
             // Composition の構築は renderer の有無と無関係に行う。
             // renderer が nil でも書き出し（composition 依存）は成立させたいので、
@@ -409,6 +416,36 @@ public final class MosaicEditorModel: ObservableObject {
         // 事前スキャンは廃止。再生しながらプレビューのフレームに検出を相乗りさせて
         // detectionCache を埋める（ライブ検出）。詳細は「ライブ検出」セクション参照。
         resetLiveDetection()
+    }
+
+    /// `load(videoURL:)` の Task 内でタイムラインを初期化する。
+    ///
+    /// 下書き復元の予約（`queueTimelineRestore`）があれば保存されていた素材表と
+    /// タイムラインをそのまま適用し（primary はロード済み asset を使い回して
+    /// 同一ファイルの二重ロードを避ける）、無ければ素材全体を使う単一クリップ
+    /// （編集はここから始まる）。
+    ///
+    /// 最後に履歴基準を取り直す: load 末尾の同期 `resetHistory()` はこの Task より先に
+    /// 走るため、基準スナップショットの timeline が空のまま残る。そのまま最初の編集を
+    /// commit すると「空タイムラインの undo エントリ」が積まれ、undo が実質 no-op の
+    /// 履歴になる（`apply(_:)` は空タイムラインを復元しない）。下書き再開時も
+    /// `applyRestoredParameters`（同期）→ ここ、の順なので、復元済みパラメータ＋
+    /// 復元タイムラインが揃った状態が基準になる。
+    private func installInitialTimeline(primaryAsset asset: AVAsset, seconds: Double) {
+        if let restore = pendingTimelineRestore {
+            pendingTimelineRestore = nil
+            var restoredSources: [UUID: AVAsset] = [:]
+            for (id, url) in restore.sourceURLs {
+                restoredSources[id] = (id == restore.primarySourceID) ? asset : AVAsset(url: url)
+            }
+            sources = restoredSources
+            timeline = restore.timeline
+        } else {
+            sources = [currentSourceID: asset]
+            timeline = TimelineState(clips: [TimelineClip(sourceID: currentSourceID,
+                                                          sourceStart: 0, sourceEnd: seconds)])
+        }
+        resetHistory()
     }
 
     // MARK: - 顔選択
@@ -848,6 +885,74 @@ public final class MosaicEditorModel: ObservableObject {
     /// 現在の手動矩形（正規化座標）。
     public var manualRects: [CGRect] { manualRegions.map(\.normalizedRect) }
 
+    /// 下書き復元の予約内容（S5）。`queueTimelineRestore` 参照。
+    struct TimelineRestoreRequest {
+        let timeline: TimelineState
+        let sourceURLs: [UUID: URL]
+        let primarySourceID: UUID
+    }
+
+    /// 下書き復元用の予約（S5）。`load(videoURL:)` が既定の「素材全体1クリップ」の
+    /// 代わりに適用するタイムラインと素材表。
+    ///
+    /// `load` は非同期 Task の中で timeline を初期化するため、load の後から timeline を
+    /// 差し替える方式だと「復元 → load Task が単一クリップで上書き」の順序逆転が起きる。
+    /// そこで load の**前**に予約し、load 自身が適用する（適用後は破棄）。
+    private var pendingTimelineRestore: TimelineRestoreRequest?
+
+    /// 下書きの復元内容を予約する。`load(videoURL:)` の**前**に呼ぶこと。
+    ///
+    /// - Parameters:
+    ///   - timeline: 保存されていたタイムライン（空なら予約しない =
+    ///     v1 下書き相当。load の既定「素材全体1クリップ」で復元される）。
+    ///   - sourceURLs: 素材ID → 下書きフォルダ内のコピー済み素材ファイル。
+    ///   - primarySourceID: `load(videoURL:)` へ渡す URL に対応する素材ID。
+    ///     初期スキャンのシード・顔サムネの帰属先をこのIDに揃える。
+    func queueTimelineRestore(timeline: TimelineState,
+                              sourceURLs: [UUID: URL],
+                              primarySourceID: UUID) {
+        guard !timeline.clips.isEmpty else { return }
+        pendingTimelineRestore = TimelineRestoreRequest(
+            timeline: timeline, sourceURLs: sourceURLs, primarySourceID: primarySourceID)
+    }
+
+    /// 下書き保存用: タイムラインが参照する素材の (素材ID, ファイルURL) 列。
+    /// クリップ出現順・重複なし。先頭が primary（`EditingDraft.sourceFileName` になり、
+    /// 再開時に最初へロードされる素材）。クリップ未構築の間は最後にロードした素材のみ
+    /// （v1 相当のフォールバック）。
+    var draftSources: [(id: UUID, url: URL)] {
+        guard !clips.isEmpty else {
+            guard let url = sourceVideoURL else { return [] }
+            return [(currentSourceID, url)]
+        }
+        var seen = Set<UUID>()
+        var result: [(id: UUID, url: URL)] = []
+        for clip in clips where !seen.contains(clip.sourceID) {
+            seen.insert(clip.sourceID)
+            // load / 復元経路の asset は常に AVAsset(url:)（= AVURLAsset）。
+            // URL を持たない asset（テスト直注入等）は下書きに保存できないので落とす。
+            guard let url = (sources[clip.sourceID] as? AVURLAsset)?.url else { continue }
+            result.append((clip.sourceID, url))
+        }
+        return result
+    }
+
+    /// 下書き再保存時の GC 保護リスト: 現在のタイムラインに加えて、undo / redo
+    /// スタック（と履歴基準 `lastCommitted`）の全スナップショットが参照する素材ID集合。
+    ///
+    /// 下書き再開中のセッションは素材実体として下書きフォルダ内のコピーを参照して
+    /// いるため、現在の `draftSources` だけを根拠に GC すると「クリップ削除 → 再保存」で
+    /// undo により復活し得るクリップの素材実体が消える。`DraftStore.saveVideoDraft` の
+    /// `sessionSourceIDs` にそのまま渡すこと（アーキテクチャ決定 7
+    /// 「素材 GC は下書き保存時のみ。セッション中は undo 用に保持」の担保）。
+    var sessionReferencedSourceIDs: Set<UUID> {
+        var ids = Set(timeline.clips.map(\.sourceID))
+        for snap in undoStack { ids.formUnion(snap.timeline.clips.map(\.sourceID)) }
+        for snap in redoStack { ids.formUnion(snap.timeline.clips.map(\.sourceID)) }
+        if let last = lastCommitted { ids.formUnion(last.timeline.clips.map(\.sourceID)) }
+        return ids
+    }
+
     /// 下書きから復元したパラメータを適用してプレビューを更新する。
     public func applyRestoredParameters(
         faceMosaicOn: Bool,
@@ -922,7 +1027,9 @@ public final class MosaicEditorModel: ObservableObject {
             faceBlockSize: faceBlockSize,
             backgroundBlockSize: backgroundBlockSize,
             selectedFaceIDs: Set(detectedFaces.filter(\.isSelected).map(\.id)),
-            manualRects: manualRegions.map(\.normalizedRect)
+            manualRects: manualRegions.map(\.normalizedRect),
+            trimRange: trimRange,
+            timeline: timeline
         )
     }
 
@@ -935,6 +1042,18 @@ public final class MosaicEditorModel: ObservableObject {
             detectedFaces[index].isSelected = snap.selectedFaceIDs.contains(detectedFaces[index].id)
         }
         manualRegions = snap.manualRects.map { ManualRegion(id: UUID(), normalizedRect: $0) }
+        trimRange = snap.trimRange
+        // タイムラインの復元。差分があるときだけ `replaceTimeline` が世代トークン付きの
+        // 非同期 rebuild を起動する（undo 連打では古い世代の合成結果が
+        // `rebuildComposition(generation:)` の照合で破棄される。新規機構は作らない）。
+        //
+        // 空タイムラインのスナップショットには適用しない: 空は「クリップ構築前」
+        // （写真モード常時・動画は load 完了前の窓）の状態であり、復元すると
+        // mapping が空になって時刻写像・尺の全経路が壊れる。動画 load 完了後の
+        // スナップショットは常に非空なので、この guard で失われる正規の履歴は無い。
+        if !snap.timeline.clips.isEmpty {
+            replaceTimeline(snap.timeline)
+        }
         recomputeBackgroundMask()
         renderPreview()
         previewController?.invalidate()

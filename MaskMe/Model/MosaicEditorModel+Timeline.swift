@@ -68,20 +68,32 @@ extension MosaicEditorModel {
         applyTimelineEdit { $0.settingRate(clipID: id, rate: rate) }
     }
 
-    /// 編集ラッパを適用し、変化があれば Composition を再構築する。
+    /// 編集ラッパを適用し、変化があれば Composition を再構築して編集履歴に確定する。
     ///
-    /// 再生位置は編集前の合成時刻を保持し、再構築後に新しい合成尺へクランプして
-    /// 復元する（編集のたびに先頭へ飛ばない）。変化が無い場合（純関数の
-    /// 「失敗時は self を返す」契約）は世代も進めず何もしない。
+    /// 変化が無い場合（純関数の「失敗時は self を返す」契約）は世代も履歴も進めず
+    /// 何もしない。履歴確定（`commitEdit`）により、タイムライン編集はパラメータ編集と
+    /// 同じ undo/redo スタックに積まれる（S5）。
     private func applyTimelineEdit(_ edit: (TimelineState) -> TimelineState) {
         let newState = edit(timeline)
+        guard newState != timeline else { return }
+        replaceTimeline(newState)
+        commitEdit()
+    }
+
+    /// タイムラインを差し替え、世代トークン付きの非同期 Composition 再構築を積む。
+    ///
+    /// 再生位置は差し替え前の合成時刻を保持し、再構築後に新しい合成尺へクランプして
+    /// 復元する（編集のたびに先頭へ飛ばない）。同一状態なら何もしない。
+    /// 履歴確定は行わない: 編集 API（`applyTimelineEdit`）は確定するが、
+    /// undo/redo の適用（`apply(_:)`）は lastCommitted を自前管理するため。
+    func replaceTimeline(_ newState: TimelineState) {
         guard newState != timeline else { return }
         let keepSeconds = compositionTime(forPosition: playbackPosition)
         timeline = newState  // didSet が mapping 追随・世代インクリメント・尺更新を行う
         let generation = timelineGeneration
         // exportVideo が await できるようタスクを世代付きで保持する（本体 doc 参照）。
         // 完了時の後始末は「自分がまだ現行タスクか」を世代で照合してから行う
-        // （連打編集で新しいタスクに置き換わっていたら触らない）。
+        // （連打編集・undo 連打で新しいタスクに置き換わっていたら触らない）。
         let task = Task { [weak self] in
             guard let self else { return }
             await self.rebuildComposition(generation: generation, keepingCompositionSeconds: keepSeconds)
