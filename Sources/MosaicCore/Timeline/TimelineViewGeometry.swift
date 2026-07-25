@@ -270,10 +270,11 @@ public enum TimelineBandLayout {
     /// - Parameter photoSourceIDs: 写真素材の素材ID集合。該当クリップのセグメントは
     ///   `isEdgeAdjustable == false`（端ドラッグが構造的に no-op になるため。
     ///   `TimelineApplySpan.isEdgeAdjustable` の doc 参照）。
-    ///   **既定値は必須**（`VideoTimelineView` の既存呼び出しを壊さないため）。
+    ///   **既定値は置かない**。「渡し忘れても動くが写真の端ハンドルだけ出てしまう」
+    ///   無言の劣化を作らないため（写真素材が無いことが自明な呼び出しは `[]` を明示する）。
     public static func applySpans(ranges: [MosaicApplyRange],
                                   mapping: TimelineMapping,
-                                  photoSourceIDs: Set<UUID> = []) -> [TimelineApplySpan] {
+                                  photoSourceIDs: Set<UUID>) -> [TimelineApplySpan] {
         var result: [TimelineApplySpan] = []
         for span in mapping.clipSpans {
             let clip = span.clip

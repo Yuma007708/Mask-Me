@@ -94,6 +94,10 @@ struct VideoTimelineView: View {
         .onAppear {
             bindPreviewBusy()
             isOnScreen = true
+            // 再生中にこの画面が現れた場合、`onChange` は発火しないのでストアの
+            // `isPlaying` が false のまま残る（HW デコーダ競合の緩和が効かない）。
+            // 初期シードをここで入れる。
+            thumbnails.setPlaying(model.isPlaying)
             updateSuspension(phase: scenePhase)
         }
         .onChange(of: model.isPlaying) { playing in
@@ -345,7 +349,9 @@ struct VideoTimelineView: View {
     /// 編集後に区間を引き直す（マージで id が変わり得るため id を保持し続けない）。
     /// 相互排他を効かせるため `rangeSelection` 経由で書く（クリップ選択が残らない）。
     private func reselectApplyRange(near time: Double) {
-        let spans = TimelineBandLayout.applySpans(ranges: model.timeline.applyRanges, mapping: model.mapping)
+        let spans = TimelineBandLayout.applySpans(ranges: model.timeline.applyRanges,
+                                                  mapping: model.mapping,
+                                                  photoSourceIDs: model.timeline.photoSourceIDs)
         rangeSelection.wrappedValue = spans.first { time >= $0.start && time < $0.end }?.rangeID
     }
 

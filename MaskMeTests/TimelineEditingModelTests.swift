@@ -584,7 +584,7 @@ final class TimelineEditingModelTests: XCTestCase {
         // 対照: クリップ全体を覆う区間 → 中央の手動矩形にモザイクが乗る（＝計測系が効いている）。
         // S11 で「区間 0 本 = 全区間 OFF」になったので、対照は全体区間で作る。
         let ungated = try await restore(url: checker, clip: wholeClip,
-                                        applyRanges: { MosaicApplyGate.fullCoverRanges(for: [$0]) },
+                                        applyRanges: { MosaicApplyGate.fullCoverRanges(for: [$0], photoSourceIDs: []) },
                                         restoreParameters: true)
         let ungatedStats = try centerPatchStats(of: try XCTUnwrap(
             ungated.previewImage, "初期プレビューが描かれていない"))
@@ -620,7 +620,7 @@ final class TimelineEditingModelTests: XCTestCase {
         let trimmed = try await restore(
             url: split,
             clip: { TimelineClip(sourceID: $0, sourceStart: 1, sourceEnd: 2) },
-            applyRanges: { MosaicApplyGate.fullCoverRanges(for: [$0]) }, restoreParameters: false)
+            applyRanges: { MosaicApplyGate.fullCoverRanges(for: [$0], photoSourceIDs: []) }, restoreParameters: false)
         let trimmedStats = try centerPatchStats(of: try XCTUnwrap(
             trimmed.previewImage, "初期プレビューが描かれていない"))
         XCTAssertEqual(trimmedStats.mean, 127.5, accuracy: 20.0,
@@ -880,7 +880,7 @@ final class TimelineEditingModelTests: XCTestCase {
     /// 半開区間 [start, end) の `end` ちょうどは区間外。
     func test_applyRangeGate_facesSwitchAtBoundaryFrames() {
         let model = makeDenseFaceModel()
-        setApplyRanges(model, MosaicApplyGate.fullCoverRanges(for: model.clips))
+        setApplyRanges(model, MosaicApplyGate.fullCoverRanges(for: model.clips, photoSourceIDs: []))
 
         XCTAssertFalse(model.displayFaces(at: 1.9).isEmpty, "全体区間で顔が返っていない")
         XCTAssertFalse(model.displayFaces(at: 8.0).isEmpty)
@@ -979,7 +979,7 @@ final class TimelineEditingModelTests: XCTestCase {
         model.cacheStore.store([faceA], sourceID: sourceA, time: 3.0)
         model.cacheStore.store([faceB], sourceID: sourceB, time: 1.0)
         XCTAssertEqual(model.mapping.sourceLocations(at: 3.0).count, 2, "重なり区間の前提が崩れている")
-        setApplyRanges(model, MosaicApplyGate.fullCoverRanges(for: model.clips))
+        setApplyRanges(model, MosaicApplyGate.fullCoverRanges(for: model.clips, photoSourceIDs: []))
         XCTAssertEqual(model.displayFaces(at: 3.0).count, 2, "全体区間では両素材の顔が union される")
 
         // B のクリップだけを適用区間にする。
@@ -1008,7 +1008,7 @@ final class TimelineEditingModelTests: XCTestCase {
         model.setTimelineForTesting(TimelineState(clips: [clipA, clipB], transitions: transitions))
 
         // 全クリップを覆う区間 → 全時刻 ON。
-        setApplyRanges(model, MosaicApplyGate.fullCoverRanges(for: model.clips))
+        setApplyRanges(model, MosaicApplyGate.fullCoverRanges(for: model.clips, photoSourceIDs: []))
         for t in stride(from: 0.0, to: 8.0, by: 0.5) {
             XCTAssertTrue(model.isMosaicActive(atComposition: t), "全体区間で OFF になっている t=\(t)")
         }
@@ -1038,7 +1038,8 @@ final class TimelineEditingModelTests: XCTestCase {
         model.addMosaicApplyRange(fromCompositionTime: 1, to: 2)
         XCTAssertEqual(model.effectiveApplyRanges.count, 1)
         XCTAssertEqual(TimelineBandLayout.applySpans(ranges: model.timeline.applyRanges,
-                                                     mapping: model.mapping).count, 1)
+                                                     mapping: model.mapping,
+                                                     photoSourceIDs: []).count, 1)
         XCTAssertTrue(model.displayFaces(at: 1.5).isEmpty == false)
         XCTAssertTrue(model.displayFaces(at: 3.0).isEmpty)
 
@@ -1047,7 +1048,8 @@ final class TimelineEditingModelTests: XCTestCase {
         XCTAssertEqual(model.timeline.applyRanges.count, 1,
                        "区間データが消えている（トリムを戻したら復活する設計を壊している）")
         XCTAssertTrue(TimelineBandLayout.applySpans(ranges: model.timeline.applyRanges,
-                                                    mapping: model.mapping).isEmpty,
+                                                    mapping: model.mapping,
+                                                    photoSourceIDs: []).isEmpty,
                       "前提が崩れている（孤児になっていない）")
         XCTAssertTrue(model.effectiveApplyRanges.isEmpty, "孤児区間がゲートに残っている")
 
@@ -2782,7 +2784,7 @@ final class TransitionOverlapModelTests: XCTestCase {
         model.setTimelineForTesting(TimelineState(
             clips: [clipA, clipB],
             transitions: [clipA.id: TransitionSpec(kind: kind, duration: 0.5)],
-            applyRanges: MosaicApplyGate.fullCoverRanges(for: [clipA, clipB])))
+            applyRanges: MosaicApplyGate.fullCoverRanges(for: [clipA, clipB], photoSourceIDs: [])))
         // 重なり区間（合成 [1.5, 2.0)）に対応する素材時刻に顔を仕込む。
         // A は素材時刻 1.5〜2.0、B は素材時刻 0.0〜0.5。
         for time in stride(from: 1.5, through: 2.0, by: 0.1) {
@@ -2881,7 +2883,7 @@ final class TransitionOverlapModelTests: XCTestCase {
         model.setTimelineForTesting(TimelineState(
             clips: [clipA, clipB],
             transitions: [clipA.id: TransitionSpec(kind: .slideLeft, duration: 0.5)],
-            applyRanges: MosaicApplyGate.fullCoverRanges(for: [clipA, clipB])))
+            applyRanges: MosaicApplyGate.fullCoverRanges(for: [clipA, clipB], photoSourceIDs: [])))
         // 重なり [1.5, 2.0)。t=1.85 → progress 0.7。
         // outgoing(A) は dx=−0.7、incoming(B) は dx=+0.3 平行移動する。
         for time in stride(from: 1.5, through: 2.0, by: 0.1) {
@@ -2919,7 +2921,7 @@ final class TransitionOverlapModelTests: XCTestCase {
         let sourceA = model.currentSourceID
         let clip = TimelineClip(sourceID: sourceA, sourceStart: 0, sourceEnd: 2)
         model.setTimelineForTesting(TimelineState(
-            clips: [clip], applyRanges: MosaicApplyGate.fullCoverRanges(for: [clip])))
+            clips: [clip], applyRanges: MosaicApplyGate.fullCoverRanges(for: [clip], photoSourceIDs: [])))
         // 240x320 を 320x240 のフレームへフィットした配置（x=0.21875 / 幅 0.5625）。
         let placement = AspectFit.placement(of: CGSize(width: 240, height: 320),
                                             in: CGSize(width: 320, height: 240))
@@ -3030,12 +3032,75 @@ final class PhotoClipDurationAndVolumeTests: XCTestCase {
         XCTAssertEqual(trimmed.sourceEnd, longer, accuracy: 1e-6,
                        "写真クリップを既定尺より長くできない")
         XCTAssertTrue(model.timeline.validate())
+        // **`validate()` だけ見ても足りない**（区間が孤児化してもクリップは健全なため）。
+        // 伸ばした先までゲートが ON かを実測で固定する。
+        assertPhotoClipFullyMosaicked(model, clipID: photo.id, label: "右端を伸ばした後")
+
+        // 左端トリム（伸ばした後に左を詰める）でも区間が孤児化しないこと。
+        // 写真の区間は [0, sourceEnd) 固定なので、`sourceStart` が動くと追従しない限り交差が切れる。
+        model.trimClip(id: photo.id, sourceStart: 4, sourceEnd: longer)
+        XCTAssertTrue(model.timeline.validate())
+        assertPhotoClipFullyMosaicked(model, clipID: photo.id, label: "左端を詰めた後")
 
         // capacity を超える指定は素材尺でクランプ（実体のない区間を作らない）。
         model.trimClip(id: photo.id, sourceStart: 0, sourceEnd: 999)
         let clamped = try XCTUnwrap(model.clips.last)
         XCTAssertEqual(clamped.sourceEnd, materialSeconds, accuracy: 1e-6,
                        "素材尺を超える範囲が素通りしている")
+    }
+
+    /// 写真クリップを分割しても、そのクリップの合成区間が全部 ON のままであること。
+    ///
+    /// 写真の素材時刻は常に 0 へ丸められるので、区間を分割点で割ると後半が
+    /// 永久にヒットしない（帯は 2 本出たままモザイクだけ消える = 不変条件 I1 違反）。
+    func test_splitPhotoClip_keepsMosaicActiveOnBothHalves() async throws {
+        let model = makeModel()
+        model.setClipsForTesting([TimelineClip(sourceID: model.currentSourceID,
+                                               sourceStart: 0, sourceEnd: 5)])
+        model.commitEdit()
+        await model.appendPhotoClip(image: solidImage(width: 320, height: 240))
+        await model.awaitPendingTimelineRebuild()
+
+        let photo = try XCTUnwrap(model.clips.last)
+        let layouts = TimelineBandLayout.clipLayouts(mapping: model.mapping)
+        let span = try XCTUnwrap(layouts.first { $0.clipID == photo.id })
+        let splitTime = (span.bandStart + span.bandEnd) / 2
+        model.playbackPosition = splitTime / model.videoDuration
+        XCTAssertTrue(model.timeline.canSplit(clipID: photo.id, atDisplayTime: splitTime))
+        model.splitClip(id: photo.id)
+        await model.awaitPendingTimelineRebuild()
+
+        XCTAssertEqual(model.clips.count, 3, "写真クリップが分割されていない")
+        XCTAssertTrue(model.timeline.validate())
+        for clip in model.clips.dropFirst() {
+            assertPhotoClipFullyMosaicked(model, clipID: clip.id, label: "分割後")
+        }
+    }
+
+    /// 指定クリップの合成区間を等間隔にサンプルし、全点でゲートが ON かつ帯が 1 本あること。
+    private func assertPhotoClipFullyMosaicked(_ model: MosaicEditorModel,
+                                               clipID: UUID, label: String,
+                                               file: StaticString = #filePath,
+                                               line: UInt = #line) {
+        let layouts = TimelineBandLayout.clipLayouts(mapping: model.mapping)
+        guard let layout = layouts.first(where: { $0.clipID == clipID }) else {
+            XCTFail("\(label): クリップが見つからない", file: file, line: line)
+            return
+        }
+        let bands = TimelineBandLayout.applySpans(ranges: model.timeline.applyRanges,
+                                                  mapping: model.mapping,
+                                                  photoSourceIDs: model.timeline.photoSourceIDs)
+            .filter { $0.clipID == clipID }
+        XCTAssertEqual(bands.count, 1, "\(label): 帯が 1 本でない", file: file, line: line)
+        var off = 0
+        let samples = 40
+        for index in 0..<samples {
+            let t = layout.bandStart
+                + (layout.bandEnd - layout.bandStart) * Double(index) / Double(samples)
+            if !model.isMosaicActive(atComposition: t) { off += 1 }
+        }
+        XCTAssertEqual(off, 0, "\(label): 写真クリップ内で OFF の時刻が \(off)/\(samples) 点ある",
+                       file: file, line: line)
     }
 
     /// 高ディテールの画像（圧縮の worst case。単色だと尺による差が出ない）。

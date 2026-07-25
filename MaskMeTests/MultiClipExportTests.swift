@@ -1576,7 +1576,7 @@ final class MultiClipExportTests: XCTestCase {
         // S11: `applyRanges: []` は「適用なし（全区間 OFF）」なので、そのままだと
         // 全ケースが「ゲートで止まっただけ」の空振りになる。clamp の効果を見るため
         // 全ケースでクリップ全体を覆う区間を渡す。
-        let allCovered = MosaicApplyGate.fullCoverRanges(for: clips)
+        let allCovered = MosaicApplyGate.fullCoverRanges(for: clips, photoSourceIDs: [])
 
         // 1) seed あり + clamp あり: 実検出ゼロ
         let (exporter, counter) = try makeCountingExporter()
@@ -1660,7 +1660,7 @@ final class MultiClipExportTests: XCTestCase {
         let (base, baseCounter) = try makeCountingExporter()
         let baseURL = try await base.export(
             asset: composition, mapping: mapping,
-            applyRanges: MosaicApplyGate.fullCoverRanges(for: clips)) { _ in }
+            applyRanges: MosaicApplyGate.fullCoverRanges(for: clips, photoSourceIDs: [])) { _ in }
         defer { try? FileManager.default.removeItem(at: baseURL) }
         XCTAssertGreaterThan(baseCounter.count, 0)
         let basePTS = try await videoPresentationTimes(of: baseURL)
@@ -1891,7 +1891,7 @@ final class MultiClipExportTests: XCTestCase {
         // 対照（両方にモザイク）は「全クリップを覆う区間」で作る。S11 で `[]` の意味が
         // 「全区間適用」→「適用なし」へ反転したため、空配列ではベースラインにならない。
         let bothURL = try await export(
-            applyRanges: MosaicApplyGate.fullCoverRanges(for: [clipA, clipB]), faceEnabled: true)
+            applyRanges: MosaicApplyGate.fullCoverRanges(for: [clipA, clipB], photoSourceIDs: []), faceEnabled: true)
         let gatedURL = try await export(
             applyRanges: [MosaicApplyRange(clipID: clipA.id, sourceID: sourceA,
                                            sourceStart: 0, sourceEnd: clipSeconds)],

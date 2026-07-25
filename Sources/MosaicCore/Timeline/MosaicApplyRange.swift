@@ -18,6 +18,13 @@ import Foundation
 /// 合成時刻由来の素材アンカー（例 [1,2)）を保存すると `isActive` が 0 を見て
 /// **絶対にヒットしない**。静止画に対する秒単位の ON/OFF を捨てる代わりに、
 /// 「素材時刻アンカー」という不変条件を全素材で保つ。
+/// **区間を作る／付け替える経路は全て写真扱いを持つこと**（`fullCoverRange(for:isPhoto:)` /
+/// `ranges(addingCompositionInterval:...)` / `ranges(replacingRangeID:...)` /
+/// `ranges(splittingClip:into:...)` / `ranges(trimmingPhotoClip:existing:)` /
+/// `TimelineState.migratedApplyRanges`）。渡し忘れを黙って通さないために引数は必須にし、
+/// `TimelineState.validate()` が「写真クリップの区間は `sourceStart == 0`」を検査する。
+/// 写真は素材時刻アンカーの自動追従が効かない（0 に丸められるため）ので、
+/// **トリムでは `sourceEnd` を引き直す**（`TimelineState.trimming`）。
 ///
 /// **どのクリップの使用範囲とも交差しなくなった区間（孤児区間）は消さずに温存する。**
 /// トリム・分割で一時的に外れただけの区間を消すと、トリムを戻しても undo しても
@@ -429,71 +436,5 @@ public enum MosaicApplyGate {
     private static func flush(_ accumulated: MergeAccumulator, clipID: UUID) -> MosaicApplyRange {
         MosaicApplyRange(id: accumulated.id, clipID: clipID, sourceID: accumulated.sourceID,
                          sourceStart: accumulated.start, sourceEnd: accumulated.end)
-    }
-
-    // MARK: - 全体を覆う区間のファクトリ（S11）
-
-    /// クリップ全体（そのクリップが使っている素材範囲）を覆う適用区間を 1 本作る。
-    ///
-    /// **新規プロジェクトと旧データ移行の唯一の生成器である。** アプリ層で
-    /// `MosaicApplyRange(...)` を直に書かないこと。
-    /// 壊れたクリップ（非有限・`sourceStart >= sourceEnd`）では nil。
-    public static func fullCoverRange(for clip: TimelineClip) -> MosaicApplyRange? {
-        guard clip.sourceStart.isFinite, clip.sourceEnd.isFinite,
-              clip.sourceStart < clip.sourceEnd else { return nil }
-        return MosaicApplyRange(clipID: clip.id, sourceID: clip.sourceID,
-                                sourceStart: clip.sourceStart, sourceEnd: clip.sourceEnd)
-    }
-
-    /// `fullCoverRange(for:)` をクリップ列へ適用する（壊れたクリップは飛ばす）。
-    public static func fullCoverRanges(for clips: [TimelineClip]) -> [MosaicApplyRange] {
-        clips.compactMap { fullCoverRange(for: $0) }
-    }
-
-    // MARK: - 編集操作の区間追従（S11）
-
-    /// クリップ分割に区間を追従させる。
-    ///
-    /// `atSourceTime`（= 後半クリップの `sourceStart`。以下 m）を境に、
-    /// `splittingClipID` に属する区間を前後のクリップへ振り分ける:
-    ///
-    /// - `sourceEnd <= m` → 前半へ（id 据え置き）
-    /// - `sourceStart >= m` → 後半へ付け替え（id 据え置き）
-    /// - m をまたぐ → 2 本に割る。前半片が元 id を継承し、後半片は新規 id
-    ///
-    /// クリップ使用範囲の外へはみ出した部分（トリム由来で温存されている区間）も
-    /// **m だけを基準に**前後へ振り分けるので温存される。他クリップの区間・順序は不変。
-    public static func ranges(splittingClipID clipID: UUID,
-                              atSourceTime m: Double,
-                              frontClipID: UUID,
-                              backClipID: UUID,
-                              existing: [MosaicApplyRange]) -> [MosaicApplyRange] {
-        guard m.isFinite else { return existing }
-        return existing.flatMap { range -> [MosaicApplyRange] in
-            guard range.clipID == clipID else { return [range] }
-            if range.sourceEnd <= m {
-                return [MosaicApplyRange(id: range.id, clipID: frontClipID, sourceID: range.sourceID,
-                                         sourceStart: range.sourceStart, sourceEnd: range.sourceEnd)]
-            }
-            if range.sourceStart >= m {
-                return [MosaicApplyRange(id: range.id, clipID: backClipID, sourceID: range.sourceID,
-                                         sourceStart: range.sourceStart, sourceEnd: range.sourceEnd)]
-            }
-            return [
-                MosaicApplyRange(id: range.id, clipID: frontClipID, sourceID: range.sourceID,
-                                 sourceStart: range.sourceStart, sourceEnd: m),
-                MosaicApplyRange(clipID: backClipID, sourceID: range.sourceID,
-                                 sourceStart: m, sourceEnd: range.sourceEnd)
-            ]
-        }
-    }
-
-    /// クリップ削除に区間を追従させる（**そのクリップの区間は消す**）。
-    ///
-    /// `clipID` は復活しないので、温存すると帯にも出ず削除もできない永久のゴミになる。
-    /// undo は `EditSnapshot.timeline` が状態ごと戻すため復元性は落ちない。
-    public static func ranges(removingClipID clipID: UUID,
-                              from ranges: [MosaicApplyRange]) -> [MosaicApplyRange] {
-        ranges.filter { $0.clipID != clipID }
     }
 }

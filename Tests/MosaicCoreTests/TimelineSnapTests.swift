@@ -20,7 +20,7 @@ final class TimelineSnapTests: XCTestCase {
         let mapping = TimelineMapping(clips: [first, second])
         let layouts = TimelineBandLayout.clipLayouts(mapping: mapping)
         let range = MosaicApplyRange(clipID: first.id, sourceID: first.sourceID, sourceStart: 1, sourceEnd: 2)
-        let spans = TimelineBandLayout.applySpans(ranges: [range], mapping: mapping)
+        let spans = TimelineBandLayout.applySpans(ranges: [range], mapping: mapping, photoSourceIDs: [])
 
         let candidates = TimelineSnap.candidates(layouts: layouts, applySpans: spans,
                                                  playheadTime: 7.5, totalDuration: mapping.totalDuration)
@@ -40,7 +40,7 @@ final class TimelineSnapTests: XCTestCase {
         let mapping = TimelineMapping(clips: [first, second])
         let layouts = TimelineBandLayout.clipLayouts(mapping: mapping)
         let range = MosaicApplyRange(clipID: first.id, sourceID: first.sourceID, sourceStart: 1, sourceEnd: 2)
-        let spans = TimelineBandLayout.applySpans(ranges: [range], mapping: mapping)
+        let spans = TimelineBandLayout.applySpans(ranges: [range], mapping: mapping, photoSourceIDs: [])
 
         // 適用区間を外すと、その両端（1・2）だけが消える。
         XCTAssertEqual(TimelineSnap.candidates(layouts: layouts, applySpans: spans,

@@ -83,6 +83,12 @@ struct TimelineClipBandView: View {
         // `@GestureState` リセットの経路に乗る）。`@GestureState` の変化を `onChange` で
         // 受けるので、横スクロールへの奪取などで**キャンセルされたときも nil へ戻る**
         // （`reorderDraft` の後始末と同じ形）。
+        //
+        // 代償として、区間トラックのリップルは帯より**1 レンダーパス遅れる**
+        // （帯は body 内で `trimDraft` を直読み、中継は `onChange` 経由のため）。
+        // 値は同一（実測でシフト量の差は 1e-9 以内）で、遅れはドラッグ中の 1 フレームだけ。
+        // これを消すには `.updating` の中で中継を書くしかなく、上記の経路に乗って
+        // ジェスチャが落ちる方が明確に悪いので、**遅れる側を選んでいる**。
         .onChange(of: trimDraft) { draft in
             trimPreviewRelay.update(makeTrimPreview(draft))
         }

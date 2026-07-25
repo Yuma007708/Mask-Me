@@ -21,7 +21,7 @@ public struct TimelineState: Codable, Equatable, Sendable {
     /// モザイク適用範囲（`clipID` + 素材時刻アンカー）。
     ///
     /// **空なら適用なし（全区間 OFF）**。S11 で意味が反転した（旧: 空 = 全区間適用）。新規プロジェクト・素材追加では
-    /// `MosaicApplyGate.fullCoverRanges(for:)` が「クリップ全体を覆う区間」を 1 本ずつ自動生成するため、区間 0 本に
+    /// `MosaicApplyGate.fullCoverRanges(for:photoSourceIDs:)` が「クリップ全体を覆う区間」を 1 本ずつ自動生成するため、区間 0 本に
     /// 到達する経路は**ユーザーの削除操作だけ**である（不変条件 I5: 自動生成は「新しいクリップが生まれる瞬間」以外で
     /// 走らせないこと）。
     public var applyRanges: [MosaicApplyRange]
@@ -55,7 +55,7 @@ public struct TimelineState: Codable, Equatable, Sendable {
     ///
     /// `MosaicApplyRange` 自身の Codable に旧形式フォールバックを入れてはならない
     /// （`decodeIfPresent ?? UUID()` はどのクリップとも一致しない sentinel を黙って残す）。
-    /// 旧形式の吸収はこの型 + `migratedApplyRanges(legacy:clips:)` の 1 経路だけ。
+    /// 旧形式の吸収はこの型 + `migratedApplyRanges(legacy:clips:photoSourceIDs:)` の 1 経路だけ。
     private struct LegacyApplyRange: Decodable {
         let id: UUID
         let sourceID: UUID
@@ -66,7 +66,7 @@ public struct TimelineState: Codable, Equatable, Sendable {
     /// `sources` キーを持たない旧 JSON（S6 より前に保存された下書き）は
     /// 空 = 全素材が動画、としてデコードする。
     ///
-    /// `schemaVersion` が無い（= v1）JSON は `migratedApplyRanges(legacy:clips:)` で
+    /// `schemaVersion` が無い（= v1）JSON は `migratedApplyRanges(legacy:clips:photoSourceIDs:)` で
     /// 新スキーマへ変換する。**v2 の JSON を v1 と誤認すると「ユーザーが全区間を削除した
     /// 状態」が「全体を覆う 1 本」に化ける**（新仕様の意味が黙って逆転する）ため、
     /// `encode(to:)` は `schemaVersion` を必ず書く。
@@ -80,7 +80,8 @@ public struct TimelineState: Codable, Equatable, Sendable {
             self.applyRanges = try container.decode([MosaicApplyRange].self, forKey: .applyRanges)
         } else {
             let legacy = try container.decode([LegacyApplyRange].self, forKey: .applyRanges)
-            self.applyRanges = Self.migratedApplyRanges(legacy: legacy, clips: clips)
+            self.applyRanges = Self.migratedApplyRanges(
+                legacy: legacy, clips: clips, photoSourceIDs: Self.photoSourceIDs(in: sources))
         }
     }
 
@@ -99,7 +100,7 @@ public struct TimelineState: Codable, Equatable, Sendable {
 
     /// v1 の適用区間を v2（`clipID` アンカー）へ変換する。
     ///
-    /// - 旧 `applyRanges` が空 → `fullCoverRanges(for: clips)`
+    /// - 旧 `applyRanges` が空 → `fullCoverRanges(for:photoSourceIDs:)`
     ///   （旧仕様の「空 = 全区間 ON」という**意味**を新スキーマで保存する）。
     /// - 非空 → 旧区間 r × クリップ c の交差を `MosaicApplyGate.clippedInterval` で判定し
     ///   （不変条件 I3 と同一式）、交差部分へ**クリップして**クリップごとに 1 本作る。
@@ -108,10 +109,19 @@ public struct TimelineState: Codable, Equatable, Sendable {
     ///   `applySpans` の両方で既に除外されており、帯にもゲートにも効いていなかったので
     ///   観測可能な挙動は変わらない。逆に素材範囲のまま各クリップへ複製すると、
     ///   S11 で直したバグ（隣接クリップへの染み出し）を移行時に自前で再現してしまう。
+    ///
+    /// **写真クリップだけは交差部分ではなく `[0, clip.sourceEnd)` を作る**（クリップあたり
+    /// 1 本まで）。交差部分をそのまま保存すると素材時刻 0 へ丸めるゲートに永久に
+    /// ヒットせず、「意味を保存する」はずの移行でモザイクが減る（実測: v1 の写真
+    /// クリップ [0,1.5)/[1.5,3.0) を復元すると合成 1.5 秒以降が全 OFF）。
     private static func migratedApplyRanges(legacy: [LegacyApplyRange],
-                                            clips: [TimelineClip]) -> [MosaicApplyRange] {
-        guard !legacy.isEmpty else { return MosaicApplyGate.fullCoverRanges(for: clips) }
+                                            clips: [TimelineClip],
+                                            photoSourceIDs: Set<UUID>) -> [MosaicApplyRange] {
+        guard !legacy.isEmpty else {
+            return MosaicApplyGate.fullCoverRanges(for: clips, photoSourceIDs: photoSourceIDs)
+        }
         var result: [MosaicApplyRange] = []
+        var coveredPhotoClipIDs: Set<UUID> = []
         for old in legacy {
             var inheritedID = false
             for clip in clips {
@@ -119,9 +129,12 @@ public struct TimelineState: Codable, Equatable, Sendable {
                 let candidate = MosaicApplyRange(clipID: clip.id, sourceID: old.sourceID,
                                                  sourceStart: old.sourceStart, sourceEnd: old.sourceEnd)
                 guard let clipped = MosaicApplyGate.clippedInterval(clip: clip, range: candidate) else { continue }
+                let isPhoto = photoSourceIDs.contains(clip.sourceID)
+                if isPhoto, !coveredPhotoClipIDs.insert(clip.id).inserted { continue }
                 result.append(MosaicApplyRange(id: inheritedID ? UUID() : old.id,
                                                clipID: clip.id, sourceID: old.sourceID,
-                                               sourceStart: clipped.start, sourceEnd: clipped.end))
+                                               sourceStart: isPhoto ? 0 : clipped.start,
+                                               sourceEnd: isPhoto ? clip.sourceEnd : clipped.end))
                 inheritedID = true
             }
         }
@@ -136,7 +149,10 @@ public struct TimelineState: Codable, Equatable, Sendable {
     }
 
     /// 写真素材の素材ID集合（`VideoMosaicExporter` へ渡す clamp 対象）。
-    public var photoSourceIDs: Set<UUID> {
+    public var photoSourceIDs: Set<UUID> { Self.photoSourceIDs(in: sources) }
+
+    /// デコード途中（まだ `self` が組み上がっていない）でも引ける版。
+    static func photoSourceIDs(in sources: [UUID: TimelineSource]) -> Set<UUID> {
         Set(sources.values.filter { $0.kind == .photo }.map(\.id))
     }
 
@@ -219,7 +235,7 @@ public struct TimelineState: Codable, Equatable, Sendable {
     /// **後半クリップの id に付け替える**（その境界は後半と次クリップの間に残るため）。前半と後半の間には新規
     /// トランジションを付けない。分割で短くなったクリップに対しては duration 制約のクランプ/破棄も適用される。
     ///
-    /// **適用区間も追従させる**（`MosaicApplyGate.ranges(splittingClipID:...)`）。区間は `clipID` アンカーなので、
+    /// **適用区間も追従させる**（`MosaicApplyGate.ranges(splittingClip:into:...)`）。区間は `clipID` アンカーなので、
     /// 分割で新しい clipID が生まれた側へ付け替えないと後半クリップの区間が丸ごと効かなくなる。
     public func splitting(at compositionTime: Double) -> TimelineState {
         let newClips = TimelineEditOperations.split(clips: clips, at: compositionTime)
@@ -234,9 +250,10 @@ public struct TimelineState: Codable, Equatable, Sendable {
             newTransitions[back.id] = spec
         }
         // 分割点の素材時刻 = 後半クリップの sourceStart（`TimelineEditOperations.split`）。
-        let newRanges = MosaicApplyGate.ranges(splittingClipID: front.id,
+        // 写真クリップは分割せず前後へ「全体を覆う区間」を配る（`isPhoto`）。
+        let newRanges = MosaicApplyGate.ranges(splittingClip: front, into: back,
                                                atSourceTime: back.sourceStart,
-                                               frontClipID: front.id, backClipID: back.id,
+                                               isPhoto: sourceKind(of: front.sourceID) == .photo,
                                                existing: applyRanges)
         return replacing(clips: newClips, transitions: newTransitions, applyRanges: newRanges)
             .normalizingTransitions()
@@ -286,14 +303,24 @@ public struct TimelineState: Codable, Equatable, Sendable {
     /// クリップ尺が縮んだ結果 `duration > min(両クリップ合成尺)/2` を破るトランジションは
     /// duration をクランプし、クランプ後 `TransitionSpec.minimumDuration` 未満になるものは破棄する。
     ///
-    /// **適用区間には意図的に何もしない。** `clipID` 不変・素材時刻アンカーなので、
+    /// **動画クリップの適用区間には意図的に何もしない。** `clipID` 不変・素材時刻アンカーなので、
     /// トリムで一時的にクリップ使用範囲から外れた区間はそのまま温存され
     /// （`effectiveRanges` がゲートから外す）、トリムを戻せば復活する。
+    ///
+    /// **写真クリップだけは区間の `sourceEnd` を引き直す**
+    /// （`MosaicApplyGate.ranges(trimmingPhotoClip:existing:)`）。写真の区間は
+    /// `[0, clip.sourceEnd)` でなければゲートに当たらないため、素材時刻アンカーの自動追従が
+    /// 効かない。引き直さないと「右端を伸ばしてから左端をトリム」で区間が孤児化して消える。
     public func trimming(clipID: UUID, sourceStart: Double, sourceEnd: Double) -> TimelineState {
         let newClips = TimelineEditOperations.trim(clips: clips, clipID: clipID,
                                                    sourceStart: sourceStart, sourceEnd: sourceEnd)
         guard newClips != clips else { return self }
-        return replacing(clips: newClips, transitions: transitions)
+        var newRanges: [MosaicApplyRange]?
+        if let trimmed = newClips.first(where: { $0.id == clipID }),
+           sourceKind(of: trimmed.sourceID) == .photo {
+            newRanges = MosaicApplyGate.ranges(trimmingPhotoClip: trimmed, existing: applyRanges)
+        }
+        return replacing(clips: newClips, transitions: transitions, applyRanges: newRanges)
             .normalizingTransitions()
     }
 
@@ -339,7 +366,10 @@ public struct TimelineState: Codable, Equatable, Sendable {
         var result = self
         result.clips.append(clip)
         if let source { result.sources[source.id] = source }
-        if coveringWithApplyRange, let range = MosaicApplyGate.fullCoverRange(for: clip) {
+        // 素材メタを入れた**後**に種別を引く（写真は区間が [0, sourceEnd) になる）。
+        let isPhoto = result.sourceKind(of: clip.sourceID) == .photo
+        if coveringWithApplyRange,
+           let range = MosaicApplyGate.fullCoverRange(for: clip, isPhoto: isPhoto) {
             result.applyRanges.append(range)
         }
         return result
@@ -445,37 +475,6 @@ public struct TimelineState: Codable, Equatable, Sendable {
         result.transitions = newTransitions
         if let newApplyRanges { result.applyRanges = newApplyRanges }
         return result
-    }
-
-    // MARK: - 不変条件
-
-    /// 不変条件を満たしているかを返す（デバッグ/テスト用）。
-    ///
-    /// - transitions のキーが実在する**非末尾**クリップであること
-    /// - 各トランジションが有限の `0 < duration <= min(両クリップ合成尺)/2`（浮動小数点誤差は許容）
-    /// - applyRanges が全て有限の `sourceStart < sourceEnd`
-    ///   （NaN は比較を素通りしてゲート判定を黙って全滅させるため、ここで明示的に弾く）
-    /// - 各適用区間の `clipID` が実在クリップを指し、その `sourceID` が一致すること
-    ///   （食い違うとその区間は永久に効かない。S11 の `clipID` アンカーの不変条件）
-    public func validate() -> Bool {
-        for (key, spec) in transitions {
-            guard let index = clips.firstIndex(where: { $0.id == key }), index + 1 < clips.count,
-                  spec.duration.isFinite, spec.duration > 0,
-                  spec.duration <= min(clips[index].duration, clips[index + 1].duration) / 2 + 1e-9
-            else { return false }
-        }
-        for range in applyRanges {
-            guard range.sourceStart.isFinite, range.sourceEnd.isFinite,
-                  range.sourceStart < range.sourceEnd else { return false }
-            guard let clip = clips.first(where: { $0.id == range.clipID }),
-                  clip.sourceID == range.sourceID else { return false }
-        }
-        // 素材メタは「キー = TimelineSource.id」で引く辞書。食い違うと kind の参照が
-        // 黙って .video フォールバックに落ちるため、不変条件として明示する。
-        for (key, source) in sources where source.id != key {
-            return false
-        }
-        return true
     }
 
     /// トランジションを duration 制約に合わせて正規化する。

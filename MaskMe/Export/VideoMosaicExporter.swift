@@ -432,7 +432,7 @@ public final class VideoMosaicExporter: @unchecked Sendable {
         /// クリップが 1 本も無い写像（`mapping` が空 = 素の AVAsset 書き出し）では
         /// ゲートが写像不能でフェイルオープンするため、従来どおり全フレームに適用される。
         /// 「全区間に適用」を明示したい呼び出しは
-        /// `MosaicApplyGate.fullCoverRanges(for: clips)` を渡すこと。
+        /// `MosaicApplyGate.fullCoverRanges(for: clips, photoSourceIDs:)` を渡すこと。
         /// `MosaicEditorModel` は `timeline.applyRanges` を渡す。
         applyRanges: [MosaicApplyRange] = [],
         videoComposition: AVVideoComposition? = nil,

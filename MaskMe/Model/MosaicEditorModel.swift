@@ -131,6 +131,19 @@ public final class MosaicEditorModel: ObservableObject {
     /// ストールした場合は効かないこともある）。UI はこの間「中止しています…」を
     /// 出して進捗オーバーレイを保つ。
     @Published public private(set) var isExportCancelling = false
+    /// エンコード完了後の「写真ライブラリへ保存中」フェーズ。
+    ///
+    /// このフェーズは**キャンセルできない**。`PHPhotoLibrary` の変更リクエストは
+    /// アセットを作り切るか失敗するかの二択で、途中で畳むと中途半端なアセットや
+    /// 孤児ファイルが残り得るためである（一般的な動画編集アプリも「書き出し」は
+    /// 中断可・「ライブラリへの保存」は中断不可で、保存中はキャンセル導線を出さない）。
+    /// UI はこのフラグでキャンセルボタンを引っ込め、文言を保存中へ切り替える。
+    ///
+    /// これが無いと「エンコード完了 → iCloud 写真ライブラリへ保存中（数十秒あり得る）」の
+    /// 窓でキャンセルを押せてしまい、`activeExporter?.cancel()` は完了済み exporter への
+    /// 無効なフラグ立てで終わり、保存だけ完走して「中止しています…」が貼り付いたまま
+    /// 「保存完了」になる。
+    @Published public private(set) var isExportSaving = false
     /// 進行中の exporter（キャンセル要求の宛先）。
     private var activeExporter: VideoMosaicExporter?
     /// 書き出しセッションのトークン。進捗コールバックは別スレッドから
@@ -140,8 +153,12 @@ public final class MosaicEditorModel: ObservableObject {
     private var exportSession = 0
 
     /// 進行中の書き出しを中断する（実際に畳まれるのは exporter が中断点に達した時点）。
+    ///
+    /// **写真ライブラリへの保存フェーズに入った後は何もしない**（`isExportSaving` の doc 参照）。
+    /// UI もそのフェーズではキャンセルボタンを出さないが、押下と遷移が競合しても
+    /// 「中止しています…」で固まらないようモデル側でも弾く。
     public func cancelExport() {
-        guard exportProgress != nil, !isExportCancelling else { return }
+        guard exportProgress != nil, !isExportCancelling, !isExportSaving else { return }
         isExportCancelling = true
         activeExporter?.cancel()
     }
@@ -646,8 +663,10 @@ public final class MosaicEditorModel: ObservableObject {
             // restore 分岐では**何もしない**: 旧データの変換は `TimelineState.init(from:)` で
             // 完了済みであり、ここで再生成すると「意図的に全削除した下書き」が復活する。
             let clip = TimelineClip(sourceID: currentSourceID, sourceStart: 0, sourceEnd: seconds)
+            // 初期クリップは常に動画素材（写真モードはこの経路を通らない）。
             timeline = TimelineState(clips: [clip],
-                                     applyRanges: MosaicApplyGate.fullCoverRanges(for: [clip]))
+                                     applyRanges: MosaicApplyGate.fullCoverRanges(
+                                        for: [clip], photoSourceIDs: []))
         }
         // 直後の resetHistory() が「生成済みの状態」を履歴の基準にするので、
         // undo の起点も自動生成後の状態になる（自動生成が undo を汚さない）。
@@ -1553,6 +1572,7 @@ public final class MosaicEditorModel: ObservableObject {
         }
         exportProgress = 0
         isExportCancelling = false
+        isExportSaving = false
         exportSession &+= 1
         let session = exportSession
         let exporter = VideoMosaicExporter(renderer: renderer, landmarker: landmarker)
@@ -1605,6 +1625,13 @@ public final class MosaicEditorModel: ObservableObject {
                     self.exportProgress = fraction
                 }
             }
+            // ここから先はキャンセル不可のフェーズ（`isExportSaving` の doc 参照）。
+            // 中断要求済みならライブラリへ書かずに畳む（ユーザーの意図どおり「保存しない」）。
+            if isExportCancelling {
+                try? FileManager.default.removeItem(at: url)   // tmp に書き出し済みの実体を残さない
+                throw CancellationError()
+            }
+            isExportSaving = true
             try await PhotosSaver.save(videoURL: url)
             if let thumb = previewImage {
                 recents.add(kind: .video, thumbnail: thumb)
@@ -1619,6 +1646,7 @@ public final class MosaicEditorModel: ObservableObject {
         exportSession &+= 1
         activeExporter = nil
         isExportCancelling = false
+        isExportSaving = false
         exportProgress = nil
     }
 

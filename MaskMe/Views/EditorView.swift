@@ -263,21 +263,30 @@ struct EditorView: View {
     /// writer 入力が ready になるまで再呼び出しされないため、`cancel()` が効くまでに
     /// 遅延がある（writer がストールした場合は効かないこともある）。
     /// 「中止しています…」を出して待つ設計にする。
+    ///
+    /// **エンコード完了後の「写真ライブラリへ保存中」フェーズではキャンセル導線を出さない**
+    /// （`MosaicEditorModel.isExportSaving` の doc 参照。押しても効かないボタンを出すと
+    /// 「中止しています…」が保存完了まで貼り付く）。
     @ViewBuilder
     private var exportOverlay: some View {
         if let progress = model.exportProgress {
             ZStack {
                 Color.black.opacity(0.4).ignoresSafeArea()
                 VStack(spacing: 12) {
-                    ProgressView(value: progress).frame(width: 200)
-                    Text("エクスポート中… \(Int(progress * 100))%").font(.callout)
-                    if model.isExportCancelling {
-                        Text("中止しています…")
-                            .font(.footnote)
-                            .foregroundStyle(Color(uiColor: .secondaryLabel))
+                    if model.isExportSaving {
+                        ProgressView().frame(width: 200)
+                        Text("写真ライブラリに保存中…").font(.callout)
                     } else {
-                        Button("キャンセル", role: .cancel) { model.cancelExport() }
-                            .font(.callout)
+                        ProgressView(value: progress).frame(width: 200)
+                        Text("エクスポート中… \(Int(progress * 100))%").font(.callout)
+                        if model.isExportCancelling {
+                            Text("中止しています…")
+                                .font(.footnote)
+                                .foregroundStyle(Color(uiColor: .secondaryLabel))
+                        } else {
+                            Button("キャンセル", role: .cancel) { model.cancelExport() }
+                                .font(.callout)
+                        }
                     }
                 }
                 .padding(24)

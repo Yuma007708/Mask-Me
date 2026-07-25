@@ -174,20 +174,20 @@ final class MosaicApplyRangeTests: XCTestCase {
         let clip = TimelineClip(sourceID: sourceA, sourceStart: 0, sourceEnd: 4)
         let ranges = [range(clip, 1, 2)]
         let before = TimelineMapping(clips: [clip])
-        XCTAssertEqual(TimelineBandLayout.applySpans(ranges: ranges, mapping: before).count, 1)
+        XCTAssertEqual(TimelineBandLayout.applySpans(ranges: ranges, mapping: before, photoSourceIDs: []).count, 1)
         XCTAssertEqual(gateOnRatio(ranges: ranges, mapping: before), 0.24988, accuracy: 1e-5)
 
         let trimmed = TimelineClip(id: clip.id, sourceID: sourceA, sourceStart: 2.5, sourceEnd: 4)
         let after = TimelineMapping(clips: [trimmed])
-        XCTAssertTrue(TimelineBandLayout.applySpans(ranges: ranges, mapping: after).isEmpty,
+        XCTAssertTrue(TimelineBandLayout.applySpans(ranges: ranges, mapping: after, photoSourceIDs: []).isEmpty,
                       "前提が崩れている（孤児になっていない）")
         XCTAssertTrue(MosaicApplyGate.effectiveRanges(ranges, mapping: after).isEmpty,
                       "孤児区間がゲートに残っている")
         XCTAssertEqual(gateOnRatio(ranges: ranges, mapping: after), 0.0, accuracy: 1e-9,
                        "帯 0 本なのにゲートが ON になっている")
-        print("[S11-gate] 帯 \(TimelineBandLayout.applySpans(ranges: ranges, mapping: before).count) 本 → "
+        print("[S11-gate] 帯 \(TimelineBandLayout.applySpans(ranges: ranges, mapping: before, photoSourceIDs: []).count) 本 → "
               + "ON 比率 \(gateOnRatio(ranges: ranges, mapping: before)) / "
-              + "帯 \(TimelineBandLayout.applySpans(ranges: ranges, mapping: after).count) 本 → "
+              + "帯 \(TimelineBandLayout.applySpans(ranges: ranges, mapping: after, photoSourceIDs: []).count) 本 → "
               + "ON 比率 \(gateOnRatio(ranges: ranges, mapping: after))")
         // 区間データそのものは温存されるので、トリムを戻せば復活する。
         XCTAssertEqual(gateOnRatio(ranges: ranges, mapping: before), 0.24988, accuracy: 1e-5)
@@ -209,7 +209,7 @@ final class MosaicApplyRangeTests: XCTestCase {
             // 境界 1 ulp: clipA の終端ちょうどから始まる区間は交差 0 なので帯にもゲートにも出ない。
             range(clipA, 2.0, 3.0)
         ]
-        let spans = TimelineBandLayout.applySpans(ranges: ranges, mapping: mapping)
+        let spans = TimelineBandLayout.applySpans(ranges: ranges, mapping: mapping, photoSourceIDs: [])
         let effective = MosaicApplyGate.effectiveRanges(ranges, mapping: mapping)
         XCTAssertEqual(spans.count, 2)
         XCTAssertEqual(effective.count, spans.count, "帯の本数と有効区間の個数が食い違う")
@@ -217,12 +217,12 @@ final class MosaicApplyRangeTests: XCTestCase {
                        "帯に出ている区間と有効区間の集合が食い違う")
         // 終端 1 ulp 手前まで縮めれば両方に出る（交差判定が同じ式である証拠）。
         let oneUlp = [range(clipA, 2.0.nextDown, 3.0)]
-        XCTAssertEqual(TimelineBandLayout.applySpans(ranges: oneUlp, mapping: mapping).count, 1)
+        XCTAssertEqual(TimelineBandLayout.applySpans(ranges: oneUlp, mapping: mapping, photoSourceIDs: []).count, 1)
         XCTAssertEqual(MosaicApplyGate.effectiveRanges(oneUlp, mapping: mapping).count, 1)
 
         // 帯 0 本（全部が孤児）= 全区間 OFF。
         let orphansOnly = Array(ranges.dropFirst(2))
-        XCTAssertTrue(TimelineBandLayout.applySpans(ranges: orphansOnly, mapping: mapping).isEmpty)
+        XCTAssertTrue(TimelineBandLayout.applySpans(ranges: orphansOnly, mapping: mapping, photoSourceIDs: []).isEmpty)
         XCTAssertEqual(gateOnRatio(ranges: orphansOnly, mapping: mapping), 0.0, accuracy: 1e-9)
     }
 
@@ -250,7 +250,7 @@ final class MosaicApplyRangeTests: XCTestCase {
         let mapping = TimelineMapping(clips: [photo])
         let ranges = [range(photo, 0, 3)]
         XCTAssertEqual(MosaicApplyGate.effectiveRanges(ranges, mapping: mapping).count, 1)
-        XCTAssertEqual(TimelineBandLayout.applySpans(ranges: ranges, mapping: mapping).count, 1)
+        XCTAssertEqual(TimelineBandLayout.applySpans(ranges: ranges, mapping: mapping, photoSourceIDs: []).count, 1)
     }
 
     /// 重なり区間ごとの適用対象素材（`gateState.activeSourceIDs`）が素材別に出ること。

@@ -265,7 +265,7 @@ final class TimelineBandLayoutTests: XCTestCase {
         let mapping = TimelineMapping(clips: clips)
         let ranges = MosaicApplyGate.ranges(addingCompositionInterval: 2, to: 7,
                                             mapping: mapping, existing: [])
-        let spans = TimelineBandLayout.applySpans(ranges: ranges, mapping: mapping)
+        let spans = TimelineBandLayout.applySpans(ranges: ranges, mapping: mapping, photoSourceIDs: [])
 
         // S11: clipID アンカーなのでクリップごとに 1 本ずつ（＝1 区間 1 セグメント。不変条件 I2）。
         XCTAssertEqual(ranges.count, 2)
@@ -285,7 +285,7 @@ final class TimelineBandLayoutTests: XCTestCase {
         let scaled = clip(source: source, start: 0, end: 8, rate: 2)
         let mapping = TimelineMapping(clips: [scaled])
         let ranges = [MosaicApplyRange(clipID: scaled.id, sourceID: source, sourceStart: 2, sourceEnd: 6)]
-        let spans = TimelineBandLayout.applySpans(ranges: ranges, mapping: mapping)
+        let spans = TimelineBandLayout.applySpans(ranges: ranges, mapping: mapping, photoSourceIDs: [])
 
         XCTAssertEqual(spans.count, 1)
         XCTAssertEqual(spans[0].start, 1, accuracy: 1e-12)
@@ -308,7 +308,7 @@ final class TimelineBandLayoutTests: XCTestCase {
             // 壊れた区間
             MosaicApplyRange(clipID: target.id, sourceID: used, sourceStart: .nan, sourceEnd: 3)
         ]
-        XCTAssertTrue(TimelineBandLayout.applySpans(ranges: ranges, mapping: mapping).isEmpty)
+        XCTAssertTrue(TimelineBandLayout.applySpans(ranges: ranges, mapping: mapping, photoSourceIDs: []).isEmpty)
     }
 
     /// 写真素材のセグメントは端ドラッグ不可としてマークされること（UI がハンドルを出さない）。
@@ -321,14 +321,14 @@ final class TimelineBandLayoutTests: XCTestCase {
         let photo = clip(source: photoSource, start: 0, end: 3)
         let video = clip(source: UUID(), start: 0, end: 3)
         let mapping = TimelineMapping(clips: [photo, video])
-        let ranges = MosaicApplyGate.fullCoverRanges(for: [photo, video])
+        let ranges = MosaicApplyGate.fullCoverRanges(for: [photo, video], photoSourceIDs: [])
         let spans = TimelineBandLayout.applySpans(ranges: ranges, mapping: mapping,
                                                   photoSourceIDs: [photoSource])
         XCTAssertEqual(spans.count, 2)
         XCTAssertFalse(spans[0].isEdgeAdjustable, "写真クリップにハンドルが出てしまう")
         XCTAssertTrue(spans[1].isEdgeAdjustable)
-        // 既定引数（渡し忘れ）では従来どおり全部 true。
-        XCTAssertTrue(TimelineBandLayout.applySpans(ranges: ranges, mapping: mapping)
+        // 写真素材を渡さなければ（動画だけの構成では）全部 true。
+        XCTAssertTrue(TimelineBandLayout.applySpans(ranges: ranges, mapping: mapping, photoSourceIDs: [])
             .allSatisfy(\.isEdgeAdjustable))
     }
 

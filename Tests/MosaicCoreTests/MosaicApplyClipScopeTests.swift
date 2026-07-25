@@ -33,7 +33,7 @@ final class MosaicApplyClipScopeTests: XCTestCase {
         let effective = MosaicApplyGate.effectiveRanges(onlyA, mapping: mapping)
 
         // B のセグメントは帯にも出ない（I1・I2）。
-        let spans = TimelineBandLayout.applySpans(ranges: onlyA, mapping: mapping)
+        let spans = TimelineBandLayout.applySpans(ranges: onlyA, mapping: mapping, photoSourceIDs: [])
         XCTAssertEqual(spans.count, 1, "1 本の区間が 2 セグメントに写っている（I2 違反）")
         XCTAssertEqual(spans[0].clipID, clipA.id)
 
@@ -100,20 +100,20 @@ final class MosaicApplyClipScopeTests: XCTestCase {
 
     func test_fullCoverRange_coversClipSourceRangeAndRejectsBrokenClips() throws {
         let clip = TimelineClip(sourceID: sourceA, sourceStart: 1.5, sourceEnd: 6)
-        let covered = try XCTUnwrap(MosaicApplyGate.fullCoverRange(for: clip))
+        let covered = try XCTUnwrap(MosaicApplyGate.fullCoverRange(for: clip, isPhoto: false))
         XCTAssertEqual(covered.clipID, clip.id)
         XCTAssertEqual(covered.sourceID, sourceA)
         XCTAssertEqual(covered.sourceStart, 1.5, accuracy: 1e-12)
         XCTAssertEqual(covered.sourceEnd, 6.0, accuracy: 1e-12)
 
         XCTAssertNil(MosaicApplyGate.fullCoverRange(
-            for: TimelineClip(sourceID: sourceA, sourceStart: 2, sourceEnd: 2)))
+            for: TimelineClip(sourceID: sourceA, sourceStart: 2, sourceEnd: 2), isPhoto: false))
         XCTAssertNil(MosaicApplyGate.fullCoverRange(
-            for: TimelineClip(sourceID: sourceA, sourceStart: 0, sourceEnd: .infinity)))
+            for: TimelineClip(sourceID: sourceA, sourceStart: 0, sourceEnd: .infinity), isPhoto: false))
 
         let clips = [clip, TimelineClip(sourceID: sourceA, sourceStart: 2, sourceEnd: 2)]
-        XCTAssertEqual(MosaicApplyGate.fullCoverRanges(for: clips).count, 1, "壊れたクリップは飛ばす")
-        XCTAssertTrue(MosaicApplyGate.fullCoverRanges(for: []).isEmpty)
+        XCTAssertEqual(MosaicApplyGate.fullCoverRanges(for: clips, photoSourceIDs: []).count, 1, "壊れたクリップは飛ばす")
+        XCTAssertTrue(MosaicApplyGate.fullCoverRanges(for: [], photoSourceIDs: []).isEmpty)
     }
 
     /// 全体を覆う区間 1 本だけの状態は、そのクリップの全合成時刻で ON になること。
@@ -121,7 +121,7 @@ final class MosaicApplyClipScopeTests: XCTestCase {
         let clips = [TimelineClip(sourceID: sourceA, sourceStart: 0, sourceEnd: 3),
                      TimelineClip(sourceID: UUID(), sourceStart: 0, sourceEnd: 2, rate: 2.0)]
         let mapping = TimelineMapping(clips: clips)
-        let ranges = MosaicApplyGate.fullCoverRanges(for: clips)
+        let ranges = MosaicApplyGate.fullCoverRanges(for: clips, photoSourceIDs: [])
         XCTAssertEqual(ranges.count, 2)
         var samples = 0
         for index in 0..<401 {
@@ -140,8 +140,10 @@ final class MosaicApplyClipScopeTests: XCTestCase {
     /// 分割の振り分け規則（またぐ / 前半のみ / 後半のみ / はみ出し / id 継承）。
     func test_ranges_splittingDistributesAroundSplitPoint() {
         let original = TimelineClip(sourceID: sourceA, sourceStart: 0, sourceEnd: 6)
-        let frontID = original.id
-        let backID = UUID()
+        let frontClip = TimelineClip(id: original.id, sourceID: sourceA, sourceStart: 0, sourceEnd: 3)
+        let backClip = TimelineClip(sourceID: sourceA, sourceStart: 3, sourceEnd: 6)
+        let frontID = frontClip.id
+        let backID = backClip.id
         let other = TimelineClip(sourceID: sourceA, sourceStart: 0, sourceEnd: 6)
         let frontOnly = range(original, 0.5, 1.5)
         let backOnly = range(original, 4, 5)
@@ -151,8 +153,7 @@ final class MosaicApplyClipScopeTests: XCTestCase {
         let untouched = range(other, 1, 2)
 
         let result = MosaicApplyGate.ranges(
-            splittingClipID: original.id, atSourceTime: 3,
-            frontClipID: frontID, backClipID: backID,
+            splittingClip: frontClip, into: backClip, atSourceTime: 3, isPhoto: false,
             existing: [frontOnly, backOnly, straddling, outsideBefore, outsideAfter, untouched])
 
         XCTAssertEqual(result.count, 7, "またぐ 1 本が 2 本に割れて 6 → 7 本")
@@ -178,8 +179,8 @@ final class MosaicApplyClipScopeTests: XCTestCase {
         XCTAssertEqual(result[6], untouched)
 
         // 非有限の分割点では無変更（他の編集操作と同じ「失敗時は無変更」契約）。
-        XCTAssertEqual(MosaicApplyGate.ranges(splittingClipID: original.id, atSourceTime: .nan,
-                                              frontClipID: frontID, backClipID: backID,
+        XCTAssertEqual(MosaicApplyGate.ranges(splittingClip: frontClip, into: backClip,
+                                              atSourceTime: .nan, isPhoto: false,
                                               existing: [frontOnly]),
                        [frontOnly])
     }
@@ -208,7 +209,8 @@ final class MosaicApplyClipScopeTests: XCTestCase {
         XCTAssertTrue(split.validate(), "分割後に clipID が実在クリップを指していない")
         // 帯とゲートは分割前後で一致し、ON になる合成時刻も変わらない（素材アンカーの効能）。
         XCTAssertEqual(TimelineBandLayout.applySpans(ranges: split.applyRanges,
-                                                     mapping: split.mapping).count, 2)
+                                                     mapping: split.mapping,
+                                                     photoSourceIDs: []).count, 2)
         for t in stride(from: 0.0, to: 6.0, by: 0.1) {
             let before = MosaicApplyGate.isActive(ranges: state.applyRanges, mapping: state.mapping,
                                                   compositionTime: t, photoSourceIDs: [])
@@ -240,7 +242,7 @@ final class MosaicApplyClipScopeTests: XCTestCase {
     func test_timelineState_appendingAddsFullCoverRange() {
         let base = TimelineClip(sourceID: sourceA, sourceStart: 0, sourceEnd: 4)
         let state = TimelineState(clips: [base],
-                                  applyRanges: MosaicApplyGate.fullCoverRanges(for: [base]))
+                                  applyRanges: MosaicApplyGate.fullCoverRanges(for: [base], photoSourceIDs: []))
         let added = TimelineClip(sourceID: UUID(), sourceStart: 0, sourceEnd: 3)
 
         let appended = state.appending(clip: added)
