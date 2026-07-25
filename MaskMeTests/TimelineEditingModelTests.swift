@@ -790,3 +790,433 @@ final class DraftStoreV2Tests: XCTestCase {
                       "参照し続けるはずの素材コピーが消えた")
     }
 }
+
+/// S6: `PhotoClipEncoder`（写真 → 静止 mp4 の事前エンコード）の出力検証。
+///
+/// 新規テストファイルは `xcodegen generate`（禁止）無しでは MaskMeTests ターゲットに
+/// 入らないため、このファイルに別クラスとして同居させている。
+final class PhotoClipEncoderTests: XCTestCase {
+    /// 単色のテスト画像（scale 1 = 指定サイズがそのままピクセル寸法）。
+    private func solidImage(width: CGFloat, height: CGFloat) -> UIImage {
+        let format = UIGraphicsImageRendererFormat.default()
+        format.scale = 1
+        return UIGraphicsImageRenderer(size: CGSize(width: width, height: height),
+                                       format: format).image { ctx in
+            UIColor.darkGray.setFill()
+            ctx.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        }
+    }
+
+    /// 4 象限が異なる色（TL 赤・TR 緑・BL 青・BR 白）のテスト画像。
+    /// EXIF 向きの正規化で「どの色がどの隅に来るか」を追跡するために使う。
+    private func quadrantImage(width: CGFloat, height: CGFloat) -> UIImage {
+        let format = UIGraphicsImageRendererFormat.default()
+        format.scale = 1
+        return UIGraphicsImageRenderer(size: CGSize(width: width, height: height),
+                                       format: format).image { ctx in
+            let halfW = width / 2
+            let halfH = height / 2
+            UIColor.red.setFill()
+            ctx.fill(CGRect(x: 0, y: 0, width: halfW, height: halfH))
+            UIColor.green.setFill()
+            ctx.fill(CGRect(x: halfW, y: 0, width: halfW, height: halfH))
+            UIColor.blue.setFill()
+            ctx.fill(CGRect(x: 0, y: halfH, width: halfW, height: halfH))
+            UIColor.white.setFill()
+            ctx.fill(CGRect(x: halfW, y: halfH, width: halfW, height: halfH))
+        }
+    }
+
+    /// 正規化座標（左上原点）で指定した位置のピクセル色（RGB 0...255）を読む。
+    private func pixelColor(in cgImage: CGImage, atNormalized point: CGPoint) -> [Int] {
+        let x = min(cgImage.width - 1, Int(CGFloat(cgImage.width) * point.x))
+        let yFromTop = min(cgImage.height - 1, Int(CGFloat(cgImage.height) * point.y))
+        var data = [UInt8](repeating: 0, count: 4)
+        guard let ctx = CGContext(
+            data: &data, width: 1, height: 1, bitsPerComponent: 8, bytesPerRow: 4,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return [] }
+        ctx.interpolationQuality = .none
+        // CGContext は左下原点: 上から yFromTop 行目 = 下から (height-1-yFromTop) 行目。
+        let yFromBottom = cgImage.height - 1 - yFromTop
+        ctx.draw(cgImage, in: CGRect(x: -CGFloat(x), y: -CGFloat(yFromBottom),
+                                     width: CGFloat(cgImage.width),
+                                     height: CGFloat(cgImage.height)))
+        return [Int(data[0]), Int(data[1]), Int(data[2])]
+    }
+
+    /// 出力 mp4 の先頭フレームを CGImage で取り出す。
+    private func firstFrame(of url: URL) throws -> CGImage {
+        let generator = AVAssetImageGenerator(asset: AVURLAsset(url: url))
+        generator.appliesPreferredTrackTransform = true
+        generator.requestedTimeToleranceBefore = .zero
+        generator.requestedTimeToleranceAfter = CMTime(seconds: 0.1, preferredTimescale: 600)
+        return try generator.copyCGImage(at: .zero, actualTime: nil)
+    }
+
+    /// 許容 90: H.264 の YUV 変換で純色（特に緑）は 1 チャンネルあたり最大 ~70 ずれる
+    /// 実測がある。象限の 4 色（赤/緑/青/白）はどのペアも必ずどこかのチャンネルで
+    /// 255 差があるため、90 でも隅の取り違え（向きの誤り）は検出できる。
+    private func assertColor(_ actual: [Int], near expected: [Int], tolerance: Int = 90,
+                             _ message: String, file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertEqual(actual.count, 3, message, file: file, line: line)
+        guard actual.count == 3 else { return }
+        for (a, e) in zip(actual, expected) {
+            XCTAssertLessThanOrEqual(abs(a - e), tolerance,
+                                     "\(message)（actual=\(actual) expected=\(expected)）",
+                                     file: file, line: line)
+        }
+    }
+
+    /// EXIF ミラー系 4 方位（upMirrored/downMirrored/leftMirrored/rightMirrored）も
+    /// エンコード前に正規化されること。解析的アンカー（upMirrored 左上=元画像右上の緑、
+    /// downMirrored 左上=元画像左下の青）でグラウンドトゥルース自体の破損も検知する。
+    func test_encode_normalizesMirroredEXIFOrientationsBeforeEncoding() async throws {
+        let base = try XCTUnwrap(quadrantImage(width: 64, height: 32).cgImage)
+        let corners = [CGPoint(x: 0.25, y: 0.25), CGPoint(x: 0.75, y: 0.25),
+                       CGPoint(x: 0.25, y: 0.75), CGPoint(x: 0.75, y: 0.75)]
+        for orientation in [UIImage.Orientation.upMirrored, .downMirrored,
+                            .leftMirrored, .rightMirrored] {
+            let oriented = UIImage(cgImage: base, scale: 1, orientation: orientation)
+            let format = UIGraphicsImageRendererFormat.default()
+            format.scale = 1
+            let expected = try XCTUnwrap(
+                UIGraphicsImageRenderer(size: oriented.size, format: format).image { _ in
+                    oriented.draw(in: CGRect(origin: .zero, size: oriented.size))
+                }.cgImage)
+            let encoded = try await PhotoClipEncoder().encode(image: oriented, seconds: 0.2)
+            defer { try? FileManager.default.removeItem(at: encoded.url) }
+            let frame = try firstFrame(of: encoded.url)
+            XCTAssertEqual(frame.width, expected.width, "orientation=\(orientation.rawValue): 幅不一致")
+            XCTAssertEqual(frame.height, expected.height, "orientation=\(orientation.rawValue): 高さ不一致")
+            for corner in corners {
+                assertColor(pixelColor(in: frame, atNormalized: corner),
+                            near: pixelColor(in: expected, atNormalized: corner),
+                            "orientation=\(orientation.rawValue) corner=\(corner)")
+            }
+        }
+        // 解析的アンカー（グラウンドトゥルース自体の破損検知）
+        let upMirrored = try await PhotoClipEncoder().encode(
+            image: UIImage(cgImage: base, scale: 1, orientation: .upMirrored), seconds: 0.2)
+        defer { try? FileManager.default.removeItem(at: upMirrored.url) }
+        assertColor(pixelColor(in: try firstFrame(of: upMirrored.url),
+                               atNormalized: CGPoint(x: 0.25, y: 0.25)),
+                    near: [0, 255, 0], ".upMirrored の左上が元画像の右上（緑）でない")
+        let downMirrored = try await PhotoClipEncoder().encode(
+            image: UIImage(cgImage: base, scale: 1, orientation: .downMirrored), seconds: 0.2)
+        defer { try? FileManager.default.removeItem(at: downMirrored.url) }
+        assertColor(pixelColor(in: try firstFrame(of: downMirrored.url),
+                               atNormalized: CGPoint(x: 0.25, y: 0.25)),
+                    near: [0, 0, 255], ".downMirrored の左上が元画像の左下（青）でない")
+    }
+
+    /// 尺の上限クランプ（60s）・15fps・音声トラックなし、が出力に反映されること。
+    func test_encode_clampsDurationTo60s_at15fps_withoutAudio() async throws {
+        let encoded = try await PhotoClipEncoder().encode(
+            image: solidImage(width: 320, height: 240), seconds: 100)
+        defer { try? FileManager.default.removeItem(at: encoded.url) }
+        XCTAssertEqual(encoded.duration, 60.0, accuracy: 1e-9, "返り値の尺が 60s にクランプされていない")
+
+        let asset = AVURLAsset(url: encoded.url)
+        let duration = try await asset.load(.duration)
+        XCTAssertEqual(CMTimeGetSeconds(duration), 60.0, accuracy: 0.1,
+                       "出力 mp4 の実尺が 60s にクランプされていない")
+        let videoTracks = try await asset.loadTracks(withMediaType: .video)
+        let videoTrack = try XCTUnwrap(videoTracks.first)
+        let fps = try await videoTrack.load(.nominalFrameRate)
+        XCTAssertEqual(Double(fps), 15.0, accuracy: 0.5, "フレームレートが 15fps でない")
+        let audioTracks = try await asset.loadTracks(withMediaType: .audio)
+        XCTAssertTrue(audioTracks.isEmpty, "写真クリップに音声トラックが入っている")
+    }
+
+    /// 指定秒数（クランプ内）がそのまま実尺になること。
+    func test_encode_producesRequestedDuration() async throws {
+        let encoded = try await PhotoClipEncoder().encode(
+            image: solidImage(width: 320, height: 240), seconds: 3.0)
+        defer { try? FileManager.default.removeItem(at: encoded.url) }
+        XCTAssertEqual(encoded.duration, 3.0, accuracy: 1e-9)
+        let duration = try await AVURLAsset(url: encoded.url).load(.duration)
+        XCTAssertEqual(CMTimeGetSeconds(duration), 3.0, accuracy: 0.05,
+                       "指定秒数どおりの実尺になっていない")
+    }
+
+    /// 長辺 1920px 超の画像が、アスペクト比を保って 1920px 上限へ縮小されること。
+    func test_encode_capsLongSideTo1920() async throws {
+        let encoded = try await PhotoClipEncoder().encode(
+            image: solidImage(width: 2560, height: 1440), seconds: 0.2)
+        defer { try? FileManager.default.removeItem(at: encoded.url) }
+        let tracks = try await AVURLAsset(url: encoded.url).loadTracks(withMediaType: .video)
+        let track = try XCTUnwrap(tracks.first)
+        let size = try await track.load(.naturalSize)
+        XCTAssertEqual(size.width, 1920, accuracy: 1, "長辺が 1920px に縮小されていない")
+        XCTAssertEqual(size.height, 1080, accuracy: 1, "アスペクト比が維持されていない")
+    }
+
+    /// EXIF 4 方位（up/down/left/right）の写真が、**エンコード前に**向き正規化され、
+    /// 出力フレームのピクセルが表示どおりの向きになること（正規化前エンコード事故の検出）。
+    func test_encode_normalizesEXIFOrientationBeforeEncoding() async throws {
+        let base = try XCTUnwrap(quadrantImage(width: 64, height: 32).cgImage)
+        let corners = [CGPoint(x: 0.25, y: 0.25), CGPoint(x: 0.75, y: 0.25),
+                       CGPoint(x: 0.25, y: 0.75), CGPoint(x: 0.75, y: 0.75)]
+        for orientation in [UIImage.Orientation.up, .down, .left, .right] {
+            let oriented = UIImage(cgImage: base, scale: 1, orientation: orientation)
+            // UIKit の描画（orientation 適用済み）を期待値のグラウンドトゥルースにする。
+            let format = UIGraphicsImageRendererFormat.default()
+            format.scale = 1
+            let expected = try XCTUnwrap(
+                UIGraphicsImageRenderer(size: oriented.size, format: format).image { _ in
+                    oriented.draw(in: CGRect(origin: .zero, size: oriented.size))
+                }.cgImage)
+
+            let encoded = try await PhotoClipEncoder().encode(image: oriented, seconds: 0.2)
+            defer { try? FileManager.default.removeItem(at: encoded.url) }
+            let frame = try firstFrame(of: encoded.url)
+
+            XCTAssertEqual(frame.width, expected.width,
+                           "orientation=\(orientation.rawValue): 出力幅が表示向きと一致しない")
+            XCTAssertEqual(frame.height, expected.height,
+                           "orientation=\(orientation.rawValue): 出力高さが表示向きと一致しない")
+            for corner in corners {
+                assertColor(pixelColor(in: frame, atNormalized: corner),
+                            near: pixelColor(in: expected, atNormalized: corner),
+                            "orientation=\(orientation.rawValue) corner=\(corner): " +
+                            "向き正規化がエンコード前に行われていない")
+            }
+        }
+        // 解析的な検証（グラウンドトゥルース自体の破損検知）: .down は 180° 回転なので
+        // 表示の左上 = 元画像の右下（白）。.up は元のまま左上 = 赤。
+        let up = try await PhotoClipEncoder().encode(
+            image: UIImage(cgImage: base, scale: 1, orientation: .up), seconds: 0.2)
+        defer { try? FileManager.default.removeItem(at: up.url) }
+        assertColor(pixelColor(in: try firstFrame(of: up.url), atNormalized: corners[0]),
+                    near: [255, 0, 0], ".up の左上が元画像の左上（赤）でない")
+        let down = try await PhotoClipEncoder().encode(
+            image: UIImage(cgImage: base, scale: 1, orientation: .down), seconds: 0.2)
+        defer { try? FileManager.default.removeItem(at: down.url) }
+        assertColor(pixelColor(in: try firstFrame(of: down.url), atNormalized: corners[0]),
+                    near: [255, 255, 255], ".down の左上が元画像の右下（白）でない")
+    }
+}
+
+/// S6: 写真クリップのモデル層テスト（appendPhotoClip・素材時刻 clamp・検出抑止）。
+@MainActor
+final class PhotoClipModelTests: XCTestCase {
+    private func makeModel() -> MosaicEditorModel {
+        MosaicEditorModel(mode: .video, recents: RecentItemsStore())
+    }
+
+    private func fakeFace(cx: Double = 0.5, cy: Double = 0.4, size: Double = 0.2) -> FaceLandmarkSet {
+        let half = size / 2
+        let points = [
+            FaceLandmark(x: Float(cx - half), y: Float(cy - half)),
+            FaceLandmark(x: Float(cx + half), y: Float(cy - half)),
+            FaceLandmark(x: Float(cx - half), y: Float(cy + half)),
+            FaceLandmark(x: Float(cx + half), y: Float(cy + half))
+        ]
+        return FaceLandmarkSet(points: points, confidence: 1)
+    }
+
+    private func solidImage(width: CGFloat, height: CGFloat) -> UIImage {
+        let format = UIGraphicsImageRendererFormat.default()
+        format.scale = 1
+        return UIGraphicsImageRenderer(size: CGSize(width: width, height: height),
+                                       format: format).image { ctx in
+            UIColor.darkGray.setFill()
+            ctx.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        }
+    }
+
+    /// テスト用の単色動画（320x240 = PhotoClipEncoder 出力と同解像度。
+    /// S6 時点の builder は解像度混在を明示エラーにするため揃える）。
+    private func makeTestVideo(seconds: Double) async throws -> URL {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(UUID().uuidString).mp4")
+        let writer = try AVAssetWriter(outputURL: url, fileType: .mp4)
+        let input = AVAssetWriterInput(mediaType: .video, outputSettings: [
+            AVVideoCodecKey: AVVideoCodecType.h264,
+            AVVideoWidthKey: 320,
+            AVVideoHeightKey: 240
+        ])
+        input.expectsMediaDataInRealTime = false
+        let adaptor = AVAssetWriterInputPixelBufferAdaptor(
+            assetWriterInput: input,
+            sourcePixelBufferAttributes: [
+                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+                kCVPixelBufferWidthKey as String: 320,
+                kCVPixelBufferHeightKey as String: 240
+            ])
+        writer.add(input)
+        writer.startWriting()
+        writer.startSession(atSourceTime: .zero)
+        for i in 0..<Int(seconds * 30) {
+            while !input.isReadyForMoreMediaData {
+                try await Task.sleep(nanoseconds: 1_000_000)
+            }
+            var pb: CVPixelBuffer?
+            CVPixelBufferCreate(kCFAllocatorDefault, 320, 240, kCVPixelFormatType_32BGRA, nil, &pb)
+            guard let buffer = pb else { continue }
+            CVPixelBufferLockBaseAddress(buffer, [])
+            memset(CVPixelBufferGetBaseAddress(buffer), 0x40,
+                   CVPixelBufferGetBytesPerRow(buffer) * 240)
+            CVPixelBufferUnlockBaseAddress(buffer, [])
+            adaptor.append(buffer, withPresentationTime: CMTime(value: CMTimeValue(i), timescale: 30))
+        }
+        input.markAsFinished()
+        await writer.finishWriting()
+        return url
+    }
+
+    private func waitUntilLoaded(_ model: MosaicEditorModel,
+                                 timeout: TimeInterval = 30) async throws {
+        let deadline = Date().addingTimeInterval(timeout)
+        while model.isLoading {
+            if Date() > deadline {
+                XCTFail("動画の読み込みが \(timeout)s 以内に完了しない")
+                return
+            }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+    }
+
+    /// appendPhotoClip が「動画素材を追加」経路へ無分岐で合流すること:
+    /// クリップ末尾追加・kind=.photo 登録・t=0 seed・合成尺追随・composition 再構築・
+    /// 下書き素材列（draftSources）への追随・undo/redo まで既存機構で動く。
+    func test_appendPhotoClip_joinsExistingSourceAppendPath() async throws {
+        let url = try await makeTestVideo(seconds: 1.0)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let model = makeModel()
+        model.load(videoURL: url)
+        try await waitUntilLoaded(model)
+
+        await model.appendPhotoClip(image: solidImage(width: 320, height: 240), seconds: 2.0)
+        await model.awaitPendingTimelineRebuild()
+
+        XCTAssertNil(model.errorMessage, "写真クリップの追加でエラーになった")
+        XCTAssertEqual(model.clips.count, 2, "写真クリップが追加されていない")
+        let photoClip = try XCTUnwrap(model.clips.last)
+        XCTAssertEqual(photoClip.sourceStart, 0, accuracy: 1e-9)
+        XCTAssertEqual(photoClip.sourceEnd, 2.0, accuracy: 0.05, "写真クリップの尺が指定秒数でない")
+        XCTAssertEqual(model.timeline.sourceKind(of: photoClip.sourceID), .photo,
+                       "素材種別が .photo で登録されていない")
+        XCTAssertEqual(model.videoDuration, 3.0, accuracy: 0.1, "合成尺が写真クリップ分伸びていない")
+        XCTAssertTrue(model.cacheStore.hasEntry(sourceID: photoClip.sourceID, time: 0),
+                      "写真の検出が素材時刻 t=0 に seed されていない")
+        XCTAssertEqual(model.compositionGeneration, model.timelineGeneration)
+        let composition = try XCTUnwrap(model.composition)
+        XCTAssertEqual(CMTimeGetSeconds(composition.duration), 3.0, accuracy: 0.1,
+                       "composition が写真クリップ込みで再構築されていない")
+        XCTAssertEqual(model.draftSources.count, 2,
+                       "写真素材が下書き保存の素材列（draftSources）に載っていない")
+        XCTAssertTrue(model.timeline.validate())
+
+        // 既存の undo/redo 機構にそのまま乗ること（専用機構を作っていない証明）
+        model.undo()
+        XCTAssertEqual(model.clips.count, 1, "undo で写真クリップの追加が取り消されない")
+        model.redo()
+        XCTAssertEqual(model.clips.count, 2, "redo で写真クリップが復元されない")
+        XCTAssertEqual(model.timeline.sourceKind(of: photoClip.sourceID), .photo,
+                       "redo 後に素材種別が失われた")
+    }
+
+    /// 一時ディレクトリ内の PhotoClipEncoder 出力（photoclip-*.mp4）の集合。
+    /// reject 時にエンコード済み一時ファイルが残留しないことの検証に使う。
+    private func photoClipTempFiles() -> Set<String> {
+        let dir = FileManager.default.temporaryDirectory
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []
+        return Set(names.filter { $0.hasPrefix("photoclip-") })
+    }
+
+    /// Major-2 回帰: 解像度不一致の写真 append は**一切の状態変異より前に** reject され、
+    /// クリップ数・世代・sources・検出キャッシュが完全に無変化のまま、具体的な
+    /// エラーメッセージが通知され、エンコード済み一時 mp4 が削除されること。
+    /// 修正前は commitEdit 後の非同期 rebuild が `mixedVideoFormats` ガードで落ち、
+    /// 壊れたクリップ・世代不一致（compositionGeneration ≠ timelineGeneration =
+    /// export 恒久拒否）・汎用エラーが残留し、復旧手段が undo しかなかった（実測）。
+    func test_appendPhotoClip_mismatchedResolution_rejectsWithoutStateMutation() async throws {
+        let url = try await makeTestVideo(seconds: 1.0)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let model = makeModel()
+        model.load(videoURL: url)
+        try await waitUntilLoaded(model)
+        await model.awaitPendingTimelineRebuild()
+
+        let clipsBefore = model.clips
+        let generationBefore = model.timelineGeneration
+        let sourcesBefore = Set(model.sources.keys)
+        let cacheKeysBefore = Set(model.cacheStore.allEntries.keys)
+        let facesBefore = model.detectedFaces.count
+        let tempFilesBefore = photoClipTempFiles()
+
+        // 320x240 の動画に 100x80 の写真（builder の mixedVideoFormats と同じ不一致）
+        await model.appendPhotoClip(image: solidImage(width: 100, height: 80), seconds: 2.0)
+        await model.awaitPendingTimelineRebuild()
+
+        XCTAssertEqual(model.clips, clipsBefore, "reject 後にクリップが変化した（壊れたクリップの残留）")
+        XCTAssertEqual(model.timelineGeneration, generationBefore, "reject で世代トークンが進んだ")
+        XCTAssertEqual(model.compositionGeneration, model.timelineGeneration,
+                       "reject 後に世代不一致（export 恒久拒否状態）が残った")
+        XCTAssertEqual(Set(model.sources.keys), sourcesBefore, "reject 後に sources へ素材が登録された")
+        XCTAssertEqual(Set(model.cacheStore.allEntries.keys), cacheKeysBefore,
+                       "reject 後に検出キャッシュへ seed が書き込まれた")
+        XCTAssertEqual(model.detectedFaces.count, facesBefore,
+                       "reject 後に検出顔リストへ写真の顔が追加された")
+        let message = try XCTUnwrap(model.errorMessage, "reject の理由がユーザーに通知されない")
+        XCTAssertTrue(message.contains("縦横比"),
+                      "エラーメッセージが具体的でない（汎用エラーに落ちている）: \(message)")
+        XCTAssertEqual(photoClipTempFiles(), tempFilesBefore,
+                       "reject 時にエンコード済み一時 mp4 が削除されていない")
+    }
+
+    /// クリップ未構築（動画ロード前）では追加せず、理由を errorMessage で知らせること。
+    func test_appendPhotoClip_withoutTimeline_reportsError() async {
+        let model = makeModel()
+        await model.appendPhotoClip(image: solidImage(width: 320, height: 240))
+        XCTAssertTrue(model.clips.isEmpty)
+        XCTAssertNotNil(model.errorMessage, "追加できない理由が通知されない（無言 no-op）")
+    }
+
+    /// 写真クリップ区間の素材時刻が 0 に clamp され、t=0 seed 後は
+    /// 2 回目以降の実検出（shouldDetectPreviewFrame）が発火しないこと。
+    /// ライブ検出の書き込みも bucket 0 へ集約され、キャッシュが 1 エントリのまま増えないこと。
+    func test_photoRegion_clampsSourceTimeToZero_andSuppressesRedetection() {
+        let model = makeModel()
+        let videoID = model.currentSourceID
+        let photoID = UUID()
+        model.setTimelineForTesting(TimelineState(
+            clips: [
+                TimelineClip(sourceID: videoID, sourceStart: 0, sourceEnd: 2),
+                TimelineClip(sourceID: photoID, sourceStart: 0, sourceEnd: 3)
+            ],
+            sources: [photoID: TimelineSource(id: photoID, kind: .photo)]))
+
+        // 写像 → clamp: 写真区間（合成 [2,5)）は常に素材時刻 0
+        let resolved = model.resolveSourceTime(atComposition: 3.5)
+        XCTAssertEqual(resolved.sourceID, photoID)
+        XCTAssertEqual(resolved.time, 0, "写真区間の素材時刻が 0 に clamp されない")
+        // 動画区間は恒等（挙動不変）
+        let videoResolved = model.resolveSourceTime(atComposition: 1.0)
+        XCTAssertEqual(videoResolved.sourceID, videoID)
+        XCTAssertEqual(videoResolved.time, 1.0, accuracy: 1e-9)
+
+        // seed 前は検出対象、seed 後は写真区間のどの時刻でも検出しない
+        XCTAssertTrue(model.shouldDetectPreviewFrame(at: 3.5), "seed 前に検出が抑止されている")
+        model.cacheStore.store([fakeFace()], sourceID: photoID, time: 0)
+        XCTAssertFalse(model.shouldDetectPreviewFrame(at: 2.0),
+                       "seed 済みの写真区間で 2 回目の実検出が発火する")
+        XCTAssertFalse(model.shouldDetectPreviewFrame(at: 4.9),
+                       "seed 済みの写真区間（別バケット相当の時刻）で実検出が発火する")
+
+        // lookup も全時刻が seed にヒットする
+        XCTAssertFalse(model.lookupFaces(at: 2.1).isEmpty, "写真区間の lookup が seed にヒットしない")
+        XCTAssertFalse(model.lookupFaces(at: 4.5).isEmpty)
+
+        // ライブ検出の書き込みも bucket 0 に集約され、エントリが増殖しない
+        let entriesBefore = model.cacheStore.allEntries.keys.filter { $0.sourceID == photoID }
+        model.storeLiveDetection([fakeFace()], at: 4.0, source: UIImage())
+        let entriesAfter = model.cacheStore.allEntries.keys.filter { $0.sourceID == photoID }
+        XCTAssertEqual(entriesBefore.count, 1)
+        XCTAssertEqual(entriesAfter.count, 1,
+                       "写真区間のライブ検出書き込みが素材時刻 0 以外のバケットを作った")
+        XCTAssertEqual(entriesAfter.first?.bucket, 0)
+    }
+}

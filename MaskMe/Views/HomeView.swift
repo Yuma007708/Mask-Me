@@ -91,6 +91,7 @@ extension MediaPicker.Filter: Identifiable {
         switch self {
         case .images: return 0
         case .videos: return 1
+        case .videosAndImages: return 2
         }
     }
 }

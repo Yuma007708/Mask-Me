@@ -520,6 +520,321 @@ final class MultiClipExportTests: XCTestCase {
         XCTAssertEqual(CMTimeGetSeconds(range.duration), 1.0, accuracy: 0.15,
                        "音声トラックが scaleTimeRange されていない（映像と尺がずれる）")
     }
+
+    // MARK: - 写真クリップ（S6）
+
+    /// テスト用の写真クリップ mp4（320x240 = makeTestVideo と同解像度。
+    /// S6 時点の builder は解像度混在を明示エラーにするため揃える）。
+    private func makePhotoClip(seconds: Double) async throws -> PhotoClipEncoder.EncodedPhotoClip {
+        let format = UIGraphicsImageRendererFormat.default()
+        format.scale = 1
+        let image = UIGraphicsImageRenderer(size: CGSize(width: width, height: height),
+                                            format: format).image { ctx in
+            UIColor.darkGray.setFill()
+            ctx.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        }
+        return try await PhotoClipEncoder().encode(image: image, seconds: seconds)
+    }
+
+    /// 音声なしの写真クリップを先頭に置いた「写真 + 動画」結合エクスポートが完走し、
+    /// 出力尺が合成尺（3s + 2s）になり、**後続クリップの音声が正しい位置**
+    /// （写真区間は無音・動画区間 [3,5) に有音）に載ること。
+    /// 音声トラックを持たない素材を挟んだときの音声 cursor 同期
+    /// （builder の empty range 挿入）の回帰ガード。
+    func test_photoLeaderPlusVideo_exportKeepsAudioInSync() async throws {
+        guard MTLCreateSystemDefaultDevice() != nil else {
+            throw XCTSkip("Metal デバイスが無い環境ではスキップ")
+        }
+        let videoURL = try await makeTestVideo(seconds: 2.0, withAudio: true)
+        defer { try? FileManager.default.removeItem(at: videoURL) }
+        let photo = try await makePhotoClip(seconds: 3.0)
+        defer { try? FileManager.default.removeItem(at: photo.url) }
+
+        let photoID = UUID()
+        let videoID = UUID()
+        let clips = [
+            TimelineClip(sourceID: photoID, sourceStart: 0, sourceEnd: photo.duration),
+            TimelineClip(sourceID: videoID, sourceStart: 0, sourceEnd: 2)
+        ]
+        let sources: [UUID: AVAsset] = [photoID: AVURLAsset(url: photo.url),
+                                        videoID: AVURLAsset(url: videoURL)]
+        let composition = try await TimelineCompositionBuilder().build(clips: clips, sources: sources)
+        let compositionDuration = try await composition.load(.duration)
+        XCTAssertEqual(CMTimeGetSeconds(compositionDuration), 5.0, accuracy: 0.1,
+                       "写真クリップ入り composition の尺が合成尺と一致しない")
+
+        let caches: [UUID: [Double: [FaceLandmarkSet]]] = [
+            photoID: [0.0: [fakeFace(cx: 0.5, cy: 0.5)]]
+        ]
+        let exporter = try makeExporter()
+        let outURL = try await exporter.export(
+            asset: composition,
+            detectionCaches: caches,
+            mapping: TimelineMapping(clips: clips),
+            photoSourceIDs: [photoID]
+        ) { _ in }
+        defer { try? FileManager.default.removeItem(at: outURL) }
+
+        let out = AVURLAsset(url: outURL)
+        let duration = try await out.load(.duration)
+        XCTAssertEqual(CMTimeGetSeconds(duration), 5.0, accuracy: 0.2,
+                       "写真 + 動画結合の出力尺が合成尺と一致しない")
+        let audioTracks = try await out.loadTracks(withMediaType: .audio)
+        XCTAssertEqual(audioTracks.count, 1, "写真クリップを挟むと音声トラックが消える")
+        // 写真区間（[0,3)）は無音・動画区間（[3,5)）に素材の音がそのまま載ること。
+        let photoRMS = try await audioRMS(url: outURL, window: 0.5...2.5)
+        let videoRMS = try await audioRMS(url: outURL, window: 3.3...4.7)
+        XCTAssertLessThan(photoRMS, 0.03, "写真区間（無音のはず）に音が載っている（cursor ずれ）")
+        XCTAssertGreaterThan(videoRMS, 0.1, "動画区間の音が無音（音声全損 or 位置ずれ）")
+    }
+
+    /// `AudioExportPipeline.decide` の純ロジック契約: パススルー（bit 同一の無変換
+    /// コピー）は「トリムなし かつ 音声 empty edit なし」のときだけ。それ以外は
+    /// すべて再エンコード（empty edit を無音として尊重する PCM デコード経路）。
+    func test_audioPipelineDecision_passthroughOnlyWithoutTrimAndEmptyEdits() {
+        XCTAssertEqual(AudioExportPipeline.decide(isTrimming: false, hasEmptyAudioSegments: false),
+                       .passthrough)
+        XCTAssertEqual(AudioExportPipeline.decide(isTrimming: true, hasEmptyAudioSegments: false),
+                       .reencode)
+        XCTAssertEqual(AudioExportPipeline.decide(isTrimming: false, hasEmptyAudioSegments: true),
+                       .reencode)
+        XCTAssertEqual(AudioExportPipeline.decide(isTrimming: true, hasEmptyAudioSegments: true),
+                       .reencode)
+    }
+
+    /// Major-1 回帰: 写真クリップを**中間**に挟んだ「動画A + 写真 + 動画B」で、
+    /// B の音声が合成 [4,6) の正しい位置に載り、写真区間 [2,4) が無音であること。
+    /// 修正前はパススルー音声読み（AVAssetReaderTrackOutput）が empty edit を尊重せず、
+    /// B の音声が [2,4) へ前ズレして末尾 [4,6) が無音になった（実測。プレビューの
+    /// AVPlayer は正しいため、プレビューと書き出しで音位置が食い違っていた）。
+    func test_photoBetweenVideos_keepsFollowingAudioPosition() async throws {
+        guard MTLCreateSystemDefaultDevice() != nil else {
+            throw XCTSkip("Metal デバイスが無い環境ではスキップ")
+        }
+        let videoAURL = try await makeTestVideo(seconds: 2.0, withAudio: true)
+        defer { try? FileManager.default.removeItem(at: videoAURL) }
+        let videoBURL = try await makeTestVideo(seconds: 2.0, withAudio: true)
+        defer { try? FileManager.default.removeItem(at: videoBURL) }
+        let photo = try await makePhotoClip(seconds: 2.0)
+        defer { try? FileManager.default.removeItem(at: photo.url) }
+
+        let aID = UUID()
+        let photoID = UUID()
+        let bID = UUID()
+        let clips = [
+            TimelineClip(sourceID: aID, sourceStart: 0, sourceEnd: 2),
+            TimelineClip(sourceID: photoID, sourceStart: 0, sourceEnd: photo.duration),
+            TimelineClip(sourceID: bID, sourceStart: 0, sourceEnd: 2)
+        ]
+        let sources: [UUID: AVAsset] = [aID: AVURLAsset(url: videoAURL),
+                                        photoID: AVURLAsset(url: photo.url),
+                                        bID: AVURLAsset(url: videoBURL)]
+        let composition = try await TimelineCompositionBuilder().build(clips: clips, sources: sources)
+
+        let exporter = try makeExporter()
+        let outURL = try await exporter.export(
+            asset: composition,
+            mapping: TimelineMapping(clips: clips),
+            photoSourceIDs: [photoID]
+        ) { _ in }
+        defer { try? FileManager.default.removeItem(at: outURL) }
+
+        let out = AVURLAsset(url: outURL)
+        let duration = try await out.load(.duration)
+        XCTAssertEqual(CMTimeGetSeconds(duration), 6.0, accuracy: 0.2,
+                       "動画+写真+動画の出力尺が合成尺と一致しない")
+        let audioTracks = try await out.loadTracks(withMediaType: .audio)
+        XCTAssertEqual(audioTracks.count, 1, "写真を中間に挟むと音声トラックが消える")
+        let headRMS = try await audioRMS(url: outURL, window: 0.3...1.7)
+        let photoRMS = try await audioRMS(url: outURL, window: 2.3...3.7)
+        let tailRMS = try await audioRMS(url: outURL, window: 4.3...5.7)
+        XCTAssertGreaterThan(headRMS, 0.1, "先頭動画 A の音が載っていない")
+        XCTAssertLessThan(photoRMS, 0.03,
+                          "写真区間（無音のはず）に音が載っている（B の音声が前ズレ）")
+        XCTAssertGreaterThan(tailRMS, 0.1,
+                             "後続動画 B の音が [4,6) に載っていない（末尾無音 = 前ズレ）")
+    }
+
+    /// Major-1 回帰（rate≠1 併用）: 先頭動画を 2 倍速にした「動画A(2x) + 写真 + 動画B」
+    /// でも B の音声が合成 [3,5) の正しい位置に載ること（前ズレの同型バグの固定）。
+    func test_photoBetweenVideosWithRate_keepsFollowingAudioPosition() async throws {
+        guard MTLCreateSystemDefaultDevice() != nil else {
+            throw XCTSkip("Metal デバイスが無い環境ではスキップ")
+        }
+        let videoAURL = try await makeTestVideo(seconds: 2.0, withAudio: true)
+        defer { try? FileManager.default.removeItem(at: videoAURL) }
+        let videoBURL = try await makeTestVideo(seconds: 2.0, withAudio: true)
+        defer { try? FileManager.default.removeItem(at: videoBURL) }
+        let photo = try await makePhotoClip(seconds: 2.0)
+        defer { try? FileManager.default.removeItem(at: photo.url) }
+
+        let aID = UUID()
+        let photoID = UUID()
+        let bID = UUID()
+        // 合成: A(2s→1s) [0,1) 有音・写真 [1,3) 無音・B [3,5) 有音
+        let clips = [
+            TimelineClip(sourceID: aID, sourceStart: 0, sourceEnd: 2, rate: 2.0),
+            TimelineClip(sourceID: photoID, sourceStart: 0, sourceEnd: photo.duration),
+            TimelineClip(sourceID: bID, sourceStart: 0, sourceEnd: 2)
+        ]
+        let sources: [UUID: AVAsset] = [aID: AVURLAsset(url: videoAURL),
+                                        photoID: AVURLAsset(url: photo.url),
+                                        bID: AVURLAsset(url: videoBURL)]
+        let composition = try await TimelineCompositionBuilder().build(clips: clips, sources: sources)
+
+        let exporter = try makeExporter()
+        let outURL = try await exporter.export(
+            asset: composition,
+            mapping: TimelineMapping(clips: clips),
+            photoSourceIDs: [photoID]
+        ) { _ in }
+        defer { try? FileManager.default.removeItem(at: outURL) }
+
+        let out = AVURLAsset(url: outURL)
+        let duration = try await out.load(.duration)
+        XCTAssertEqual(CMTimeGetSeconds(duration), 5.0, accuracy: 0.2,
+                       "rate 併用の出力尺が合成尺と一致しない")
+        let headRMS = try await audioRMS(url: outURL, window: 0.1...0.9)
+        let photoRMS = try await audioRMS(url: outURL, window: 1.3...2.7)
+        let tailRMS = try await audioRMS(url: outURL, window: 3.3...4.7)
+        XCTAssertGreaterThan(headRMS, 0.1, "2 倍速動画 A の音が載っていない")
+        XCTAssertLessThan(photoRMS, 0.03,
+                          "写真区間（無音のはず）に音が載っている（rate 併用で前ズレ）")
+        XCTAssertGreaterThan(tailRMS, 0.1,
+                             "後続動画 B の音が [3,5) に載っていない（rate 併用で前ズレ）")
+    }
+
+    /// 写真クリップを**末尾**に置いた「動画 + 写真」で、動画の音声位置が保たれ
+    /// 写真区間が無音のままであること（現状 pass の挙動を固定。empty edit が末尾に
+    /// あるケースも再エンコード経路へ回るため、退行しないことを実測で担保する）。
+    func test_photoTrailerAfterVideo_keepsAudioPosition() async throws {
+        guard MTLCreateSystemDefaultDevice() != nil else {
+            throw XCTSkip("Metal デバイスが無い環境ではスキップ")
+        }
+        let videoURL = try await makeTestVideo(seconds: 2.0, withAudio: true)
+        defer { try? FileManager.default.removeItem(at: videoURL) }
+        let photo = try await makePhotoClip(seconds: 2.0)
+        defer { try? FileManager.default.removeItem(at: photo.url) }
+
+        let videoID = UUID()
+        let photoID = UUID()
+        let clips = [
+            TimelineClip(sourceID: videoID, sourceStart: 0, sourceEnd: 2),
+            TimelineClip(sourceID: photoID, sourceStart: 0, sourceEnd: photo.duration)
+        ]
+        let sources: [UUID: AVAsset] = [videoID: AVURLAsset(url: videoURL),
+                                        photoID: AVURLAsset(url: photo.url)]
+        let composition = try await TimelineCompositionBuilder().build(clips: clips, sources: sources)
+
+        let exporter = try makeExporter()
+        let outURL = try await exporter.export(
+            asset: composition,
+            mapping: TimelineMapping(clips: clips),
+            photoSourceIDs: [photoID]
+        ) { _ in }
+        defer { try? FileManager.default.removeItem(at: outURL) }
+
+        let out = AVURLAsset(url: outURL)
+        let duration = try await out.load(.duration)
+        XCTAssertEqual(CMTimeGetSeconds(duration), 4.0, accuracy: 0.2,
+                       "動画+写真（末尾）の出力尺が合成尺と一致しない")
+        let audioTracks = try await out.loadTracks(withMediaType: .audio)
+        XCTAssertEqual(audioTracks.count, 1, "写真を末尾に置くと音声トラックが消える")
+        let headRMS = try await audioRMS(url: outURL, window: 0.3...1.7)
+        let tailRMS = try await audioRMS(url: outURL, window: 2.3...3.7)
+        XCTAssertGreaterThan(headRMS, 0.1, "動画区間の音が載っていない")
+        XCTAssertLessThan(tailRMS, 0.03, "末尾の写真区間（無音のはず）に音が載っている")
+    }
+
+    /// FaceLandmarking の検出呼び出し回数を数える注入用フェイク
+    /// （export の検出は videoQueue 上で走るためロックで保護する）。
+    private final class CountingLandmarker: FaceLandmarking, @unchecked Sendable {
+        private let lock = NSLock()
+        private var callCount = 0
+        var count: Int {
+            lock.lock()
+            defer { lock.unlock() }
+            return callCount
+        }
+        private func record() {
+            lock.lock()
+            callCount += 1
+            lock.unlock()
+        }
+        func landmarks(in image: UIImage) -> FaceLandmarkSet? {
+            record()
+            return nil
+        }
+        func landmarks(in image: UIImage, timestampMs: Int) -> FaceLandmarkSet? {
+            record()
+            return nil
+        }
+        func allLandmarks(in image: UIImage) -> [FaceLandmarkSet] {
+            record()
+            return []
+        }
+        func allLandmarks(in image: UIImage, timestampMs: Int) -> [FaceLandmarkSet] {
+            record()
+            return []
+        }
+    }
+
+    private func makeCountingExporter() throws -> (VideoMosaicExporter, CountingLandmarker) {
+        let renderer = try MosaicRenderer(evaluator: TrackingEvaluator(smoothing: 1.0))
+        let landmarker = CountingLandmarker()
+        return (VideoMosaicExporter(renderer: renderer, landmarker: landmarker), landmarker)
+    }
+
+    /// 写真クリップ区間では t=0 の seed だけが使われ、エクスポート中に
+    /// **実検出が一度も走らない**こと（素材時刻 clamp によるキャッシュヒット）。
+    /// seed が「顔なし」の空エントリでも実検出には落ちないこと、および
+    /// clamp なし（photoSourceIDs 未指定）では実検出が走ること（計測フックの実証）も固定する。
+    func test_photoClipExport_neverRunsRealDetection() async throws {
+        guard MTLCreateSystemDefaultDevice() != nil else {
+            throw XCTSkip("Metal デバイスが無い環境ではスキップ")
+        }
+        let photo = try await makePhotoClip(seconds: 3.0)
+        defer { try? FileManager.default.removeItem(at: photo.url) }
+        let photoID = UUID()
+        let clips = [TimelineClip(sourceID: photoID, sourceStart: 0, sourceEnd: photo.duration)]
+        let sources: [UUID: AVAsset] = [photoID: AVURLAsset(url: photo.url)]
+        let composition = try await TimelineCompositionBuilder().build(clips: clips, sources: sources)
+        let mapping = TimelineMapping(clips: clips)
+
+        // 1) seed あり + clamp あり: 実検出ゼロ
+        let (exporter, counter) = try makeCountingExporter()
+        let outURL = try await exporter.export(
+            asset: composition,
+            detectionCaches: [photoID: [0.0: [fakeFace(cx: 0.5, cy: 0.5)]]],
+            mapping: mapping,
+            photoSourceIDs: [photoID]
+        ) { _ in }
+        defer { try? FileManager.default.removeItem(at: outURL) }
+        XCTAssertEqual(counter.count, 0,
+                       "seed 済み写真クリップのエクスポートで実検出が走った（clamp が効いていない）")
+
+        // 2) seed が空エントリ（スキャン済みで顔なし）でも実検出に落ちない
+        let (emptySeedExporter, emptySeedCounter) = try makeCountingExporter()
+        let emptySeedURL = try await emptySeedExporter.export(
+            asset: composition,
+            detectionCaches: [photoID: [0.0: []]],
+            mapping: mapping,
+            photoSourceIDs: [photoID]
+        ) { _ in }
+        defer { try? FileManager.default.removeItem(at: emptySeedURL) }
+        XCTAssertEqual(emptySeedCounter.count, 0,
+                       "顔なし seed の写真クリップで毎フレーム実検出が走っている")
+
+        // 3) 対照実験: clamp なし・キャッシュなしなら実検出が走る（計測フックの実証）
+        let (controlExporter, controlCounter) = try makeCountingExporter()
+        let controlURL = try await controlExporter.export(
+            asset: composition,
+            mapping: mapping
+        ) { _ in }
+        defer { try? FileManager.default.removeItem(at: controlURL) }
+        XCTAssertGreaterThan(controlCounter.count, 0,
+                             "対照実験で実検出が観測できない（検出カウントのフックが壊れている）")
+    }
 }
 
 #endif

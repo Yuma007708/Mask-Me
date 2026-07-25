@@ -171,6 +171,11 @@ public final class MosaicEditorModel: ObservableObject {
     func setClipsForTesting(_ clips: [TimelineClip]) {
         timeline = TimelineState(clips: clips)
     }
+    /// テスト専用: タイムライン全体（sources の素材種別を含む）を直接差し替える。
+    /// 写真クリップ（`TimelineSource.kind == .photo`）入りの状態を再現するために使う。
+    func setTimelineForTesting(_ state: TimelineState) {
+        timeline = state
+    }
     /// 素材IDから AVAsset への対応表。
     ///
     /// **アクセスレベル変更**: 元は `private` だったが、`rebuildComposition`
@@ -218,7 +223,10 @@ public final class MosaicEditorModel: ObservableObject {
     @Published private var redoStack: [EditSnapshot] = []
     private var lastCommitted: EditSnapshot?
 
-    private let detectionSettings: DetectionSettings
+    /// **アクセスレベル変更（S6）**: 元は `private let` だったが、`appendPhotoClip`
+    /// （`MosaicEditorModel+Timeline.swift`）が写真の検出 seed 用スキャナーを
+    /// `makeFaceLandmarker(forVideo:settings:)` で作るため `internal`（無印）にした。
+    let detectionSettings: DetectionSettings
 
     public init(
         mode: Mode,
@@ -1149,6 +1157,9 @@ public final class MosaicEditorModel: ObservableObject {
                 manualRegions: manualRegions,
                 detectionCaches: detectionCaches,
                 mapping: mapping,
+                // 写真素材の素材時刻は exporter 側でも 0 に clamp する
+                // （t=0 seed に全フレームがヒットし、写真区間で実検出が走らない）。
+                photoSourceIDs: timeline.photoSourceIDs,
                 faceEnabled: faceMosaicOn,
                 backgroundEnabled: backgroundMosaicOn,
                 backgroundBlock: backgroundBlockSize,

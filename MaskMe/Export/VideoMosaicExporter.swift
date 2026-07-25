@@ -57,9 +57,18 @@ enum AudioExportPipeline: Equatable {
     case passthrough
     case reencode
 
-    /// 現時点の判定基準はトリムの有無だけ（rate≠1 のピッチ保持等は S7 の仕事）。
-    static func decide(isTrimming: Bool) -> AudioExportPipeline {
-        isTrimming ? .reencode : .passthrough
+    /// 判定基準（rate≠1 のピッチ保持等は S7 の仕事）:
+    /// - `isTrimming`: トリムはサンプル精度の切り出しが要るため再エンコード。
+    /// - `hasEmptyAudioSegments`: 音声トラックに empty edit がある
+    ///   （= 写真クリップ等、音声なし素材を含むタイムライン）。圧縮パススルー読み
+    ///   （`AVAssetReaderTrackOutput`）は empty edit を尊重せず実データを詰めて
+    ///   返すため、後続クリップの音声が empty 区間ぶん前ズレして末尾が無音になる
+    ///   （動画+写真+動画で実測。プレビューの AVPlayer は正しく再生するので
+    ///   書き出しだけ食い違う）。デコード読み（`AVAssetReaderAudioMixOutput`）は
+    ///   empty edit を無音として尊重する。判定は composition の音声トラック
+    ///   セグメント（`AVAssetTrack.segments` の `isEmpty`）という実データで行う。
+    static func decide(isTrimming: Bool, hasEmptyAudioSegments: Bool) -> AudioExportPipeline {
+        (isTrimming || hasEmptyAudioSegments) ? .reencode : .passthrough
     }
 }
 
@@ -70,8 +79,9 @@ import Metal
 // swiftlint:disable file_length type_body_length
 
 /// 動画をフレームごとに処理してモザイクを適用し、新しい .mp4 ファイルを生成する。
-/// 音声はトリム無しなら元トラックをそのまま（再エンコードせず）保持し、
-/// トリム時のみ AAC 再エンコードする（`AudioExportPipeline` 参照）。
+/// 音声は無変換構成（トリム無し・empty edit 無し）なら元トラックをそのまま
+/// （再エンコードせず）保持し、トリム時と音声 empty edit（音声なし素材を含む
+/// タイムライン）時のみ AAC 再エンコードする（`AudioExportPipeline` 参照）。
 public final class VideoMosaicExporter: @unchecked Sendable {
     public enum ExportError: Error {
         case noVideoTrack
@@ -104,6 +114,12 @@ public final class VideoMosaicExporter: @unchecked Sendable {
 
     /// 検出入力の最大幅（速度段で決まる）。pump 開始時に設定し detectAll が参照する。
     private var detectMaxWidth: Double = 800
+
+    /// 写真素材（静止 mp4）の素材ID集合（S6）。export 開始時に設定する。
+    /// 写像で得た素材時刻をこの素材だけ 0 に clamp し、t=0 の検出 seed へ全フレームを
+    /// ヒットさせる（`TimelineState.clampedSourceTime` と同じ規則。写真は全フレーム
+    /// 同一なので、区間内で実検出を繰り返さない）。
+    private var photoSourceIDs: Set<UUID> = []
 
     private func resetPerf() {
         perfDetectSec = 0; perfRenderSec = 0; perfSegSec = 0; perfDecodeSec = 0
@@ -153,6 +169,9 @@ public final class VideoMosaicExporter: @unchecked Sendable {
     ///     同じクリップ列から作ること。クリップ境界の時系列リセット判定にも使う。
     ///     空の写像ではキャッシュ参照と境界リセットが無効になるだけで、
     ///     全フレーム自前検出で完走する（素の AVAsset 書き出し・テスト互換）。
+    ///   - photoSourceIDs: 写真素材（静止 mp4）の素材ID集合。写像後の素材時刻を
+    ///     0 に clamp して t=0 の検出 seed にヒットさせる（`photoSourceIDs` プロパティ
+    ///     の doc 参照。`MosaicEditorModel` は `timeline.photoSourceIDs` を渡す）。
     ///   - faceEnabled: 顔モザイク全体の ON/OFF。手動矩形も顔検出の補助なので
     ///     これに従う（false なら顔・手動矩形ともに適用しない）。
     public func export(
@@ -161,6 +180,7 @@ public final class VideoMosaicExporter: @unchecked Sendable {
         manualRegions: [ManualRegion] = [],
         detectionCaches: [UUID: [Double: [FaceLandmarkSet]]] = [:],
         mapping: TimelineMapping = TimelineMapping(clips: []),
+        photoSourceIDs: Set<UUID> = [],
         faceEnabled: Bool = true,
         backgroundEnabled: Bool = false,
         backgroundBlock: Float = 28,
@@ -173,6 +193,7 @@ public final class VideoMosaicExporter: @unchecked Sendable {
         trimRange: ClosedRange<Double> = 0...1,
         progress: @Sendable @escaping (Double) -> Void
     ) async throws -> URL {
+        self.photoSourceIDs = photoSourceIDs
         guard let videoTrack = try await asset.loadTracks(withMediaType: .video).first else {
             throw ExportError.noVideoTrack
         }
@@ -203,14 +224,21 @@ public final class VideoMosaicExporter: @unchecked Sendable {
 
         // 音声経路の決定（パススルー / 再エンコード。判定は AudioExportPipeline に集約）。
         //
-        // トリム時は**別リーダー + AVAssetReaderAudioMixOutput（デコード済み PCM）**で読む。
-        // 圧縮パススルー読みは copyNextSampleBuffer がセグメント単位の巨大バッチで届き、
-        // ①マルチセグメント composition + timeRange で -16364 失敗、②自前ゲートでは
-        // トリム範囲と交差するバッチを丸ごと採否してしまい音声全損、の両方を実測済み。
-        // デコード済み PCM なら reader.timeRange がサンプル精度で機能する
-        // （MultiClipExportTests の trim 系テストが RMS 解析込みで固定している）。
-        // 映像は従来どおり主リーダー側の timeRange で制限する。
-        let audioPipeline = AudioExportPipeline.decide(isTrimming: isTrimming)
+        // 再エンコード時は**別リーダー + AVAssetReaderAudioMixOutput（デコード済み PCM）**
+        // で読む。圧縮パススルー読みは copyNextSampleBuffer がセグメント単位の巨大バッチで
+        // 届き、①マルチセグメント composition + timeRange で -16364 失敗、②自前ゲートでは
+        // トリム範囲と交差するバッチを丸ごと採否してしまい音声全損、③empty edit を
+        // 尊重せず後続クリップの音声が前ズレ、をいずれも実測済み。
+        // デコード済み PCM なら reader.timeRange がサンプル精度で機能し、empty edit も
+        // 無音として尊重される（MultiClipExportTests の trim 系・写真中間配置テストが
+        // RMS 解析込みで固定している）。映像は従来どおり主リーダー側の timeRange で制限する。
+        var audioHasEmptySegments = false
+        if let audioTrack {
+            let segments = (try? await audioTrack.load(.segments)) ?? []
+            audioHasEmptySegments = segments.contains { $0.isEmpty }
+        }
+        let audioPipeline = AudioExportPipeline.decide(
+            isTrimming: isTrimming, hasEmptyAudioSegments: audioHasEmptySegments)
         var audioOutput: AVAssetReaderOutput?
         var separateAudioReader: AVAssetReader?
         if let audioTrack {
@@ -235,9 +263,14 @@ public final class VideoMosaicExporter: @unchecked Sendable {
                     audioSettings: Self.reencodeDecodeSettings(matching: audioFormat))
                 out.alwaysCopiesSampleData = false
                 let audioReader = try AVAssetReader(asset: asset)
-                audioReader.timeRange = CMTimeRange(
-                    start: CMTime(seconds: trimStartSec, preferredTimescale: 600),
-                    duration: CMTime(seconds: trimEndSec - trimStartSec, preferredTimescale: 600))
+                // timeRange の制限（と pump 側の shiftSample）はトリム時だけ。
+                // empty edit 起因の再エンコードは全長を 0 起点のまま読む
+                // （decision と shift の適用条件を連動させる）。
+                if isTrimming {
+                    audioReader.timeRange = CMTimeRange(
+                        start: CMTime(seconds: trimStartSec, preferredTimescale: 600),
+                        duration: CMTime(seconds: trimEndSec - trimStartSec, preferredTimescale: 600))
+                }
                 if audioReader.canAdd(out) {
                     audioReader.add(out)
                     audioOutput = out
@@ -344,8 +377,8 @@ public final class VideoMosaicExporter: @unchecked Sendable {
     // swiftlint:disable:next function_parameter_count function_body_length
     private func pump(
         reader: AVAssetReader,
-        /// トリム時のみ非 nil: 音声をトリム範囲の PCM デコードで読む専用リーダー
-        /// （export の doc 参照）。
+        /// 再エンコード時のみ非 nil: 音声を PCM デコードで読む専用リーダー
+        /// （トリム時はトリム範囲に制限。export の doc 参照）。
         audioReader: AVAssetReader?,
         writer: AVAssetWriter,
         outputURL: URL,
@@ -429,10 +462,10 @@ public final class VideoMosaicExporter: @unchecked Sendable {
                 }
             }
 
-            // 音声：パススルー（トリム無し）はサンプルをそのままコピー。
-            // 再エンコード（トリム時・audioReader 非 nil）は timeRange で切られた
-            // デコード済み PCM を受け取り、PTS を trimStart 分シフトして writer
-            // タイムラインを 0 起点に揃えてから AAC 入力へ渡す（トリム精度は
+            // 音声：パススルー（無変換構成）はサンプルをそのままコピー。
+            // 再エンコード（audioReader 非 nil）はデコード済み PCM を受け取って
+            // AAC 入力へ渡す。トリム時は timeRange で切られた PCM の PTS を
+            // trimStart 分シフトして writer タイムラインを 0 起点に揃える（トリム精度は
             // PCM サンプル単位。映像側 shiftSample と同じ 0 起点に一致する）。
             if let audioInput, let audioOutput {
                 let audioSourceReader = audioReader ?? reader
@@ -538,13 +571,22 @@ public final class VideoMosaicExporter: @unchecked Sendable {
                 // 素材スコープのキャッシュから近傍フレームを探す（なければ新規検出）。
                 // 参照キーは写像済みの素材内時刻（丸め・近傍補間は写像の後）。
                 let fromCache: [FaceLandmarkSet]
+                // 写真素材で t=0 の seed が「検出済みで顔なし」（空エントリ）のとき true。
+                // 写真は全フレーム同一なので、seed が空でも実検出には落とさない
+                // （毎フレーム同じ静止画を再検出する無駄と、seed と食い違う結果の混入を防ぐ）。
+                var photoSeededEmpty = false
                 if let location, let sourceCache = detectionCaches[location.sourceID] {
                     fromCache = lookupCache(sourceCache, at: location.time)
+                    photoSeededEmpty = fromCache.isEmpty
+                        && photoSourceIDs.contains(location.sourceID)
+                        && sourceCache[0] != nil
                 } else {
                     fromCache = []
                 }
                 if !fromCache.isEmpty {
                     cachedLandmarkSets = filterToSelected(fromCache, targets: selectedFaceTargets)
+                } else if photoSeededEmpty {
+                    cachedLandmarkSets = []
                 } else {
                     let t0 = CFAbsoluteTimeGetCurrent()
                     let detected = detectAll(in: sourceBuffer, timestampMs: timestampMs)
@@ -680,14 +722,22 @@ public final class VideoMosaicExporter: @unchecked Sendable {
     /// 合成時刻を素材位置へ解決する。半開区間の外に出た有限時刻（終端フレームの
     /// PTS 揺らぎ）はタイムライン端へクランプして写像する
     /// （`MosaicEditorModel.resolveSourceTime(atComposition:)` と同じ規則）。
+    /// 写真素材（`photoSourceIDs`）は写像の**後**に素材時刻を 0 へ clamp する
+    /// （`TimelineState.clampedSourceTime` と同じ規則。clipID はそのまま残すので
+    /// クリップ境界の時系列リセット判定には影響しない）。
     /// 写像が空（クリップなし）のときは nil（キャッシュ参照なし・自前検出）。
     private func resolveLocation(
         _ mapping: TimelineMapping, at compositionTime: Double
     ) -> TimelineMapping.SourceLocation? {
-        if let location = mapping.sourceLocation(at: compositionTime) { return location }
-        guard compositionTime.isFinite, mapping.totalDuration > 0 else { return nil }
-        let clamped = min(max(compositionTime, 0), mapping.totalDuration.nextDown)
-        return mapping.sourceLocation(at: clamped)
+        var resolved = mapping.sourceLocation(at: compositionTime)
+        if resolved == nil, compositionTime.isFinite, mapping.totalDuration > 0 {
+            let clamped = min(max(compositionTime, 0), mapping.totalDuration.nextDown)
+            resolved = mapping.sourceLocation(at: clamped)
+        }
+        guard let location = resolved else { return nil }
+        guard photoSourceIDs.contains(location.sourceID) else { return location }
+        return TimelineMapping.SourceLocation(
+            clipID: location.clipID, sourceID: location.sourceID, time: 0)
     }
 
     /// クリップ境界を跨いだ最初のフレームで時系列状態をリセットする。
@@ -793,7 +843,7 @@ public final class VideoMosaicExporter: @unchecked Sendable {
         return (input, adaptor)
     }
 
-    /// 再エンコード経路（トリム時）のデコード設定（AVAssetReaderAudioMixOutput 用）。
+    /// 再エンコード経路のデコード設定（AVAssetReaderAudioMixOutput 用）。
     ///
     /// ≤2ch は nil（ネイティブの非圧縮 LinearPCM デコード）。>2ch（5.1ch 等）は
     /// リーダー段で 16bit ステレオ PCM へダウンミックスする。6ch のままデコードして
@@ -813,7 +863,7 @@ public final class VideoMosaicExporter: @unchecked Sendable {
         ]
     }
 
-    /// 再エンコード経路（トリム時）の AAC 出力設定。サンプルレートは元素材に合わせ
+    /// 再エンコード経路の AAC 出力設定。サンプルレートは元素材に合わせ
     /// （取得できなければ 44.1kHz。AAC エンコーダ上限の 48kHz 超は 48kHz へ）、
     /// チャンネル数は**最大 2（ステレオ）にクランプ**する。レート変換・ダウンミックスは
     /// AVAssetWriterInput が行う。

@@ -33,17 +33,26 @@ extension MosaicEditorModel {
     /// **後**に行う（`DetectionCacheKey.init` が丸めを担う）。合成時刻で先に丸めると
     /// rate≠1 のクリップで丸め誤差が rate 倍に拡大され、素材時刻のバケットが
     /// 分裂・ずれを起こす（DetectionCacheSyncTests の丸め順序テスト参照）。
+    ///
+    /// **写真クリップ（S6）**: 写像で得た素材時刻は最後に
+    /// `TimelineState.clampedSourceTime` を通す。写真素材（`TimelineSource.kind == .photo`）
+    /// は全フレーム同一なので素材時刻を 0 に clamp し、`appendPhotoClip` が t=0 に
+    /// seed した 1 エントリへ全経路（lookup・ライブ検出の書き込み・
+    /// `shouldDetectPreviewFrame` の既検出判定）をヒットさせる。これにより写真区間では
+    /// 2 回目以降の実検出・重複 submit が発生しない。動画素材では恒等（挙動不変）。
     func resolveSourceTime(atComposition time: Double) -> (sourceID: UUID, time: Double) {
         if let location = mapping.sourceLocation(at: time) {
-            return (location.sourceID, location.time)
+            return (location.sourceID,
+                    timeline.clampedSourceTime(location.time, sourceID: location.sourceID))
         }
         if !clips.isEmpty, time.isFinite, mapping.totalDuration > 0 {
             let clamped = min(max(time, 0), mapping.totalDuration.nextDown)
             if let location = mapping.sourceLocation(at: clamped) {
-                return (location.sourceID, location.time)
+                return (location.sourceID,
+                        timeline.clampedSourceTime(location.time, sourceID: location.sourceID))
             }
         }
-        return (currentSourceID, time)
+        return (currentSourceID, timeline.clampedSourceTime(time, sourceID: currentSourceID))
     }
 
     // MARK: - 検出キャッシュ参照

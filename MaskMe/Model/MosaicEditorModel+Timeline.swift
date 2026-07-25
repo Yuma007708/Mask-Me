@@ -1,6 +1,7 @@
 import AVFoundation
 import Foundation
 import MosaicCore
+import UIKit
 
 #if canImport(Metal)
 
@@ -66,6 +67,99 @@ extension MosaicEditorModel {
     /// 指定クリップの再生倍率（0.1x〜10x にクランプ）を設定する。
     public func setClipRate(id: UUID, rate: Double) {
         applyTimelineEdit { $0.settingRate(clipID: id, rate: rate) }
+    }
+
+    // MARK: - 写真クリップ（S6）
+
+    /// 写真を静止 mp4 へエンコードし、タイムライン末尾へクリップとして追加する。
+    ///
+    /// `PhotoClipEncoder`（15fps・上限 60s クランプ・長辺 1920px・EXIF 正規化済み）で
+    /// 事前エンコードした mp4 を既存の「動画素材を追加」経路へ無分岐で合流させる:
+    /// `sources` 登録 → `TimelineState.appending`（kind = .photo の素材メタ付き）→
+    /// 世代トークン付き rebuild → `commitEdit`。下書き保存（`draftSources`）と
+    /// undo/redo（EditSnapshot の timeline）は既存機構がそのまま追随する。
+    ///
+    /// 追加前に解像度・向きを既存素材と照合し、builder の `mixedVideoFormats` と
+    /// 同一基準で不一致なら**状態を一切変えずに** reject する（S8 で解禁予定）。
+    ///
+    /// 検出は写真の全フレームが同一なので素材時刻 t=0 に 1 回だけ seed する。
+    /// 以後の lookup・ライブ検出は `resolveSourceTime` の clamp（写真素材 → 素材時刻 0）
+    /// でこの seed にヒットし、写真区間で 2 回目以降の実検出・重複 submit は走らない。
+    ///
+    /// - Parameter seconds: クリップの尺（秒）。既定 3 秒は UI（S9）実装までの固定値。
+    ///   上限 60s へのクランプはエンコーダ側が保証する。
+    public func appendPhotoClip(image: UIImage, seconds: Double = 3.0) async {
+        // クリップ未構築（動画ロード完了前・写真モード）では追加先のタイムラインが無い。
+        // 書き出しと同じく、ユーザーが結果を待つ操作なので黙って no-op にしない。
+        guard mode == .video, !timeline.clips.isEmpty else {
+            errorMessage = "動画の読み込みが完了してから写真を追加してください"
+            return
+        }
+        do {
+            let encoded = try await PhotoClipEncoder().encode(image: image, seconds: seconds)
+            // load / 復元経路と同じく AVURLAsset として登録する（draftSources が
+            // URL を取り出して下書きへコピーできる形）。
+            let photoAsset = AVAsset(url: encoded.url)
+            // 解像度・向きの事前照合。builder の `mixedVideoFormats` と同一基準
+            // （`TimelineCompositionBuilder.videoFormat` の Equatable 比較）で、
+            // **一切の状態変異（sources 登録・seed・commitEdit）より前に**不一致を弾く。
+            // commit 後の非同期 rebuild で落とすと、壊れたクリップ・世代不一致
+            // （export 恒久拒否）・汎用エラーが残留し、復旧手段が undo しかなくなる
+            // （実測）。reject 時は状態を完全に無変化に保ち、エンコード済み一時 mp4
+            // だけ削除する。レターボックス化はしない（S8 の AVVideoComposition が
+            // 解像度混在を正式解禁する）。
+            guard await photoFormatMatchesTimeline(photoAsset) else {
+                try? FileManager.default.removeItem(at: encoded.url)
+                errorMessage = "写真の縦横比が動画と一致しないため追加できません（今後対応予定です）"
+                return
+            }
+            let sourceID = UUID()
+            sources[sourceID] = photoAsset
+            seedPhotoDetection(encoded.normalizedImage, sourceID: sourceID)
+            let clip = TimelineClip(sourceID: sourceID, sourceStart: 0, sourceEnd: encoded.duration)
+            applyTimelineEdit {
+                $0.appending(clip: clip, source: TimelineSource(id: sourceID, kind: .photo))
+            }
+        } catch {
+            errorMessage = "写真の追加に失敗しました"
+        }
+    }
+
+    /// エンコード済み写真素材の映像フォーマットが既存タイムラインと一致するか。
+    ///
+    /// 基準は先頭クリップの素材（builder が `reference` に取るのと同じ「先頭」。
+    /// 既存クリップは構築済み composition の存在により相互一致が保証されている）。
+    /// 判定は `TimelineCompositionBuilder.videoFormat` の Equatable 比較で、builder の
+    /// `mixedVideoFormats` ガードと同一（判定ロジックの二重実装を避ける）。
+    /// フォーマットが取得できない場合も不一致扱い（builder に投げれば必ず失敗する組
+    /// なので、事前 reject が安全側）。
+    private func photoFormatMatchesTimeline(_ photoAsset: AVAsset) async -> Bool {
+        guard let firstClip = timeline.clips.first,
+              let referenceAsset = sources[firstClip.sourceID],
+              let reference = try? await TimelineCompositionBuilder.videoFormat(of: referenceAsset),
+              let photoFormat = try? await TimelineCompositionBuilder.videoFormat(of: photoAsset)
+        else { return false }
+        return photoFormat == reference
+    }
+
+    /// 写真クリップの検出 seed（素材時刻 t=0 の 1 回だけ）。
+    ///
+    /// ライブ検出・初期スキャンと同じ縮小幅（`downscaleForDetection`）で検出する。
+    /// 空結果も記録する: 「スキャン済みで顔なし」の事実が
+    /// `shouldDetectPreviewFrame` の再検出とホールドフォールバックの貼り付きを止める
+    /// （ライブ検出の空エントリと同じ意味論）。
+    private func seedPhotoDetection(_ normalizedImage: UIImage, sourceID: UUID) {
+        let scanner = makeFaceLandmarker(forVideo: false, settings: detectionSettings)
+        let faces = scanner.allLandmarks(in: Self.downscaleForDetection(normalizedImage))
+        cacheStore.store(faces, sourceID: sourceID, time: 0)
+        guard !faces.isEmpty else { return }
+        // 写真を追加する意図は「この顔にモザイクを掛けたい」なので即選択する
+        // （detectInRegion と同じ理由。未選択のままだと写真区間だけモザイクが乗らない）。
+        detectedFaces += faces.map { lm in
+            FaceTarget(id: UUID(), landmarks: lm,
+                       thumbnail: generateThumbnail(for: lm, from: normalizedImage),
+                       isSelected: true, sourceID: sourceID)
+        }
     }
 
     /// 編集ラッパを適用し、変化があれば Composition を再構築して編集履歴に確定する。
