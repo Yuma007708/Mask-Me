@@ -61,11 +61,21 @@ final class MosaicPreviewController {
 
     /// asset から再生用の AVPlayerItem を作り、フレーム出力と再生終了監視を結線する。
     /// `videoOutput` は item と 1:1 なので毎回作り直して差し替える。
+    ///
+    /// ピッチ保持（S7）もここで設定する。item 単位のプロパティなので、
+    /// タイムライン編集のたびに composition を差し替えても設定が落ちないよう
+    /// 「item を作る 1 箇所」に置くこと（`setupPlayer` と `replaceAsset` の共通経路）。
     private func makePlayerItem(for asset: AVAsset) -> AVPlayerItem {
         let output = AVPlayerItemVideoOutput(pixelBufferAttributes: Self.outputPixelBufferAttributes)
         self.videoOutput = output
 
         let item = AVPlayerItem(asset: asset)
+        // rate≠1 クリップ（scaleTimeRange 済みの scaled audio edit）を音程を変えずに
+        // 再生する。iOS 15 以降の既定は timeDomain（音声向けの中品質）なので明示する。
+        // `.spectral` は 1/32〜32 倍に対応し、`TimelineClip.rateRange`（0.1〜10）を
+        // 完全に含む。書き出し側（AVAssetReaderAudioMixOutput）と同じ設定に揃えることで、
+        // プレビューと書き出しで音程が食い違わない。
+        item.audioTimePitchAlgorithm = .spectral
         item.add(output)
 
         // 再生終了を監視（item 単位。差し替え時は旧 item の監視を外して付け替える）

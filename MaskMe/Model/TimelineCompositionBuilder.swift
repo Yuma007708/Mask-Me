@@ -126,7 +126,9 @@ struct TimelineCompositionBuilder {
 
     /// クリップ 1 本分の音声を合成トラックへ差し込む。音声は無い素材もあるため、
     /// あるときだけ実データを挿入し、映像と同じ区間を同じ合成尺へスケールして
-    /// トラック間の同期を保つ（ピッチ保持は S7 のプレビュー/エクスポート側で扱う）。
+    /// トラック間の同期を保つ。ピッチ保持は再生・書き出し側の
+    /// `audioTimePitchAlgorithm`（`.spectral`）で行う
+    /// （`MosaicPreviewController.makePlayerItem` / `VideoMosaicExporter` の再エンコード経路）。
     ///
     /// 音声トラックを持たない素材（写真クリップ等）の区間は明示的に empty range で
     /// 埋める（S6）。これで音声トラックのセグメント列が映像と同じ時間軸を保ち、

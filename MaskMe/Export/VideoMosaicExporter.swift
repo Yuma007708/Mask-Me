@@ -44,8 +44,19 @@ public enum ExportSpeed: Sendable, CaseIterable {
     }
 }
 
-/// 音声書き出しの経路。S7 の AudioPipelineDecision へ育てる土台として、
-/// 分岐判定をこの決定関数 1 箇所に閉じ込める。
+/// 音声トラックの実データから求めた、再エンコードが要るかどうかの判定材料。
+/// `AudioExportPipeline.decide` の入力を 1 つにまとめ、
+/// 「合成結果の音声トラックを見て決める」という規則を型で表す。
+struct AudioTrackConditions: Equatable {
+    /// 音声トラックに empty edit（無音区間）がある。
+    var hasEmptySegments = false
+    /// 音声トラックにスケール編集（rate≠1）のセグメントがある。
+    var hasScaledSegments = false
+    /// 音声トラックのフォーマット記述が複数種類ある（48k/44.1k 混在など）。
+    var hasMixedFormats = false
+}
+
+/// 音声書き出しの経路。分岐判定をこの決定関数 1 箇所に閉じ込める。
 ///
 /// - `passthrough`: 元パケットを無変換コピー（フェーズ1 の bit 同一忠実度を温存）。
 /// - `reencode`: PCM デコード読み → AAC 再エンコード。圧縮パススルーの読みは
@@ -57,7 +68,7 @@ enum AudioExportPipeline: Equatable {
     case passthrough
     case reencode
 
-    /// 判定基準（rate≠1 のピッチ保持等は S7 の仕事）:
+    /// 判定基準（1 つでも真なら `.reencode`。すべて偽のときだけ `.passthrough`）:
     /// - `isTrimming`: トリムはサンプル精度の切り出しが要るため再エンコード。
     /// - `hasEmptyAudioSegments`: 音声トラックに empty edit がある
     ///   （= 写真クリップ等、音声なし素材を含むタイムライン）。圧縮パススルー読み
@@ -65,10 +76,103 @@ enum AudioExportPipeline: Equatable {
     ///   返すため、後続クリップの音声が empty 区間ぶん前ズレして末尾が無音になる
     ///   （動画+写真+動画で実測。プレビューの AVPlayer は正しく再生するので
     ///   書き出しだけ食い違う）。デコード読み（`AVAssetReaderAudioMixOutput`）は
-    ///   empty edit を無音として尊重する。判定は composition の音声トラック
-    ///   セグメント（`AVAssetTrack.segments` の `isEmpty`）という実データで行う。
-    static func decide(isTrimming: Bool, hasEmptyAudioSegments: Bool) -> AudioExportPipeline {
-        (isTrimming || hasEmptyAudioSegments) ? .reencode : .passthrough
+    ///   empty edit を無音として尊重する。
+    /// - `hasScaledAudioSegments`: rate≠1 のクリップがある（S7）。
+    ///   `scaleTimeRange` は edit（`AVAssetTrackSegment.timeMapping` の source と
+    ///   target で長さが違う状態）としてしか表現されないため、圧縮パススルーで
+    ///   元パケットをコピーすると**スケールが一切反映されない**
+    ///   （映像だけ倍速・音声は等速のまま尺超過）。デコード読みなら
+    ///   `audioTimePitchAlgorithm`（`.spectral`）付きで時間スケールが適用される。
+    /// - `hasMixedAudioFormats`: 音声トラックに複数フォーマット（48kHz 素材と
+    ///   44.1kHz 素材の連結など）が混在する。パススルーの writer 入力は
+    ///   `sourceFormatHint` を 1 つしか持てず、別フォーマットのパケットが来た時点で
+    ///   破綻する。再エンコードなら共通の PCM へ揃えてから 1 つの AAC に書ける。
+    ///
+    /// 判定材料はすべて composition の音声トラックの実データ
+    /// （`AVAssetTrack.segments` / `.formatDescriptions`）から求める
+    /// （`AudioTrackConditions.from(segments:formatDescriptions:)`）。
+    ///
+    /// 入口はこの 1 つだけにしてある（条件を個別 Bool で受ける素の入口は置かない）。
+    /// 呼び出し側が条件の導出（`AudioTrackConditions.from`）をバイパスできると、
+    /// 条件が増えたときに渡し忘れが静かに `.passthrough` へ落ちるため。
+    static func decide(isTrimming: Bool,
+                       conditions: AudioTrackConditions) -> AudioExportPipeline {
+        let needsReencode = isTrimming
+            || conditions.hasEmptySegments
+            || conditions.hasScaledSegments
+            || conditions.hasMixedFormats
+        return needsReencode ? .reencode : .passthrough
+    }
+}
+
+extension AudioTrackConditions {
+    /// 合成結果の音声トラックのセグメント列とフォーマット記述から判定材料を求める。
+    static func from(segments: [AVAssetTrackSegment],
+                     formatDescriptions: [CMFormatDescription]) -> AudioTrackConditions {
+        AudioTrackConditions(
+            hasEmptySegments: segments.contains { $0.isEmpty },
+            hasScaledSegments: segments.contains { isScaled($0) },
+            hasMixedFormats: hasMixedFormats(formatDescriptions))
+    }
+
+    /// スケール判定の許容差 = 1/1200 秒。**絶対値であってクリップ長に比例させない。**
+    ///
+    /// 根拠は `TimelineCompositionBuilder` が timescale 600 で挿入すること
+    /// （目盛は 1/600s、1 量あたりの丸め誤差の上限はその半分）。誤差の源が丸めなので、
+    /// 尺に比例する相対許容差にすると長いクリップほど鈍くなり、微小 rate が
+    /// 「スケールなし」に化けて `.passthrough` へ落ちる
+    /// （= 映像だけ速度変更・音声は等速のまま、という S7 が塞いだ穴の再発）。
+    ///
+    /// 半目盛にしてあるのは、600 グリッド上では **source と target の差も 1/600 の
+    /// 整数倍にしかならない**ため。実測でも等速タイムラインの差は例外なく厳密に 0 で、
+    /// 最小のスケールは差 1 目盛（= 1/600s）として現れる。半目盛なら
+    /// 「差 0 は等速・差 1 目盛以上はスケール」を素直に分けられ、なおかつ
+    /// 別 timescale の素材が混じったときの端数（数十 µs 規模）は吸収できる。
+    /// これより細かい rate 差は composition 上に差として存在しない
+    /// （= 反映すべきスケールが無い）ので、取りこぼしにはならない。
+    static let scaleTolerance = CMTime(value: 1, timescale: 1200)
+
+    /// スケール編集（rate≠1）のセグメントか。`timeMapping` の source と target の
+    /// 長さが違えばスケール（Apple の Time pitch algorithm settings の定義と同じ）。
+    ///
+    /// `TimelineClip.rateRange` は 0.1...10 の**連続値**（`TimelineEditOperations.setRate`
+    /// は任意の Double を受ける）なので、「rate 変更は必ず 1 割以上動く」とは仮定できない。
+    /// 一方 rate=1 のときは builder が `scaleTimeRange` を呼ばない
+    /// （`TimelineCompositionBuilder`）ため source と target は同一値になる。
+    /// よって固定許容差（`scaleTolerance`）で十分で、誤検知の余地もほぼ無い。
+    /// CMTime のまま比較して Double 変換の丸めを挟まない。
+    static func isScaled(_ segment: AVAssetTrackSegment) -> Bool {
+        guard !segment.isEmpty else { return false }
+        let mapping = segment.timeMapping
+        let source = mapping.source.duration
+        let target = mapping.target.duration
+        guard source.isNumeric, target.isNumeric,
+              source > .zero, target > .zero else { return false }
+        let diff = CMTimeAbsoluteValue(CMTimeSubtract(source, target))
+        return diff > scaleTolerance
+    }
+
+    /// フォーマット記述が複数種類あるか（コーデック・サンプルレート・チャンネル数で比較）。
+    ///
+    /// - 記述が 1 つ以下なら「混在なし」（比較対象が無い＝連結による混在は起こりえない）。
+    /// - 安全側（混在あり）に倒すのは **ASBD が取れなかったとき**だけ。
+    ///   フォーマットが読めない相手を「同じ」と見なしてパススルーすると、
+    ///   writer 入力の `sourceFormatHint` と実パケットの食い違いで破綻するため。
+    /// - 比較するのは formatID / sampleRate / channels の 3 項目のみ。
+    ///   esds（AAC プロファイル・ビットレート）の違いは「混在なし」＝パススルーになる。
+    ///   ビットレート差だけなら同一コンテナへパケットを並べても実害が出ないことは
+    ///   確認済み。将来 HE-AAC 等のプロファイル差で問題が出たら esds 比較を足すこと。
+    static func hasMixedFormats(_ formats: [CMFormatDescription]) -> Bool {
+        guard formats.count > 1 else { return false }
+        guard let first = CMAudioFormatDescriptionGetStreamBasicDescription(formats[0])?.pointee
+        else { return true }
+        return formats.dropFirst().contains { format in
+            guard let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(format)?.pointee
+            else { return true }
+            return asbd.mFormatID != first.mFormatID
+                || asbd.mSampleRate != first.mSampleRate
+                || asbd.mChannelsPerFrame != first.mChannelsPerFrame
+        }
     }
 }
 
@@ -79,9 +183,9 @@ import Metal
 // swiftlint:disable file_length type_body_length
 
 /// 動画をフレームごとに処理してモザイクを適用し、新しい .mp4 ファイルを生成する。
-/// 音声は無変換構成（トリム無し・empty edit 無し）なら元トラックをそのまま
-/// （再エンコードせず）保持し、トリム時と音声 empty edit（音声なし素材を含む
-/// タイムライン）時のみ AAC 再エンコードする（`AudioExportPipeline` 参照）。
+/// 音声は**無変換構成**（トリム無し・empty edit 無し・rate≠1 無し・単一フォーマット）
+/// なら元トラックをそのまま（再エンコードせず）保持し、それ以外は
+/// AAC 再エンコードする（判定は `AudioExportPipeline.decide` の 1 箇所）。
 public final class VideoMosaicExporter: @unchecked Sendable {
     public enum ExportError: Error {
         case noVideoTrack
@@ -188,8 +292,9 @@ public final class VideoMosaicExporter: @unchecked Sendable {
         /// 動画の書き出し範囲（0...1 正規化）。既定は全長。
         /// 範囲外のフレーム/音声サンプルは reader.timeRange で読まず、writer 側の
         /// 時刻を `trimRange.lowerBound` 分シフトして出力尺を短縮する。
-        /// トリム時の音声はパススルーではなく AAC 再エンコードになる
-        /// （`AudioExportPipeline` 参照。トリム無しは従来どおり無変換コピー）。
+        /// トリム時の音声はパススルーではなく AAC 再エンコードになり、末尾の余剰は
+        /// `clampAudioSample` で切る（`AudioExportPipeline` 参照。
+        /// トリム無し・無変換構成は従来どおり無変換コピー）。
         trimRange: ClosedRange<Double> = 0...1,
         progress: @Sendable @escaping (Double) -> Void
     ) async throws -> URL {
@@ -203,9 +308,16 @@ public final class VideoMosaicExporter: @unchecked Sendable {
         let naturalSize = try await videoTrack.load(.naturalSize)
         let transform = try await videoTrack.load(.preferredTransform)
         let estimatedDataRate = (try? await videoTrack.load(.estimatedDataRate)) ?? 0
+        // 音声トラックの実データ（フォーマット記述・セグメント列）を 1 度だけ読み、
+        // 経路判定（`AudioExportPipeline.decide`）と writer 設定の両方に使う。
         var audioFormat: CMFormatDescription?
+        var audioConditions = AudioTrackConditions()
         if let audioTrack {
-            audioFormat = (try? await audioTrack.load(.formatDescriptions))?.first
+            let formats = (try? await audioTrack.load(.formatDescriptions)) ?? []
+            let segments = (try? await audioTrack.load(.segments)) ?? []
+            audioFormat = formats.first
+            audioConditions = AudioTrackConditions.from(segments: segments,
+                                                        formatDescriptions: formats)
         }
 
         // --- Reader: 映像（BGRA）＋ 音声（パススルー） ---
@@ -232,13 +344,8 @@ public final class VideoMosaicExporter: @unchecked Sendable {
         // デコード済み PCM なら reader.timeRange がサンプル精度で機能し、empty edit も
         // 無音として尊重される（MultiClipExportTests の trim 系・写真中間配置テストが
         // RMS 解析込みで固定している）。映像は従来どおり主リーダー側の timeRange で制限する。
-        var audioHasEmptySegments = false
-        if let audioTrack {
-            let segments = (try? await audioTrack.load(.segments)) ?? []
-            audioHasEmptySegments = segments.contains { $0.isEmpty }
-        }
         let audioPipeline = AudioExportPipeline.decide(
-            isTrimming: isTrimming, hasEmptyAudioSegments: audioHasEmptySegments)
+            isTrimming: isTrimming, conditions: audioConditions)
         var audioOutput: AVAssetReaderOutput?
         var separateAudioReader: AVAssetReader?
         if let audioTrack {
@@ -251,16 +358,19 @@ public final class VideoMosaicExporter: @unchecked Sendable {
                     audioOutput = out
                 }
             case .reencode:
-                // ≤2ch は audioSettings nil = 非圧縮（LinearPCM）のネイティブデコード。
-                // >2ch（5.1ch 等）はデコード段でステレオ PCM へダウンミックスする
-                // （`reencodeDecodeSettings(matching:)` 参照）。
-                // TODO(S7): trim × rate>1 は音声末尾に約 0.11s の余剰が残る
-                //   （AudioMixOutput.timeRange × scaleTimeRange 固有）。S7 で対応。
-                // TODO(S7): トリム出力尺の accuracy（0.2）の締め付けと trim×rate の
-                //   組み合わせテスト追加も S7 で行う。
+                // デコードは AAC 出力と同じサンプルレート・チャンネル数の LinearPCM に
+                // 揃える（`reencodeDecodeSettings(matching:)` 参照）。>2ch のダウンミックスも
+                // 48k/44.1k 混在素材のレート統一もここで済ませ、writer 側は
+                // 単一フォーマットの PCM だけを受け取る。
                 let out = AVAssetReaderAudioMixOutput(
                     audioTracks: [audioTrack],
                     audioSettings: Self.reencodeDecodeSettings(matching: audioFormat))
+                // rate≠1（scaleTimeRange 済み）のとき音程を保ったまま時間スケールを
+                // 適用する。`.spectral` は 1/32〜32 倍まで対応し、
+                // `TimelineClip.rateRange`（0.1〜10）を完全に含む。
+                // 未設定だとオフライン処理の既定（spectral）に依存することになるため
+                // 明示して固定する。
+                out.audioTimePitchAlgorithm = .spectral
                 out.alwaysCopiesSampleData = false
                 let audioReader = try AVAssetReader(asset: asset)
                 // timeRange の制限（と pump 側の shiftSample）はトリム時だけ。
@@ -365,6 +475,10 @@ public final class VideoMosaicExporter: @unchecked Sendable {
             speed: speed,
             trimStartSec: trimStartSec,
             trimEndSec: trimEndSec,
+            // 再エンコード経路だけ末尾上限を掛ける（パススルーは bit 同一を保つため
+            // 一切触らない）。上限は writer タイムライン上の想定尺 = effectiveDuration。
+            audioEndLimitSec: audioPipeline == .reencode
+                ? CMTimeGetSeconds(effectiveDuration) : nil,
             cache: cache,
             progress: progress
         )
@@ -374,7 +488,7 @@ public final class VideoMosaicExporter: @unchecked Sendable {
     // MARK: - Pump（ビジーウェイトなしの読み書き）
 
     // フェーズ2でこのファイルに本格的に手を入れる際に解消する予定の構造的負債
-    // swiftlint:disable:next function_parameter_count function_body_length
+    // swiftlint:disable:next function_parameter_count
     private func pump(
         reader: AVAssetReader,
         /// 再エンコード時のみ非 nil: 音声を PCM デコードで読む専用リーダー
@@ -401,6 +515,9 @@ public final class VideoMosaicExporter: @unchecked Sendable {
         speed: ExportSpeed,
         trimStartSec: Double,
         trimEndSec: Double,
+        /// 再エンコード時のみ非 nil: writer タイムライン上で音声を打ち切る上限秒
+        /// （= 出力の想定尺）。`clampAudioSample` の doc 参照。
+        audioEndLimitSec: Double?,
         cache: CVMetalTextureCache,
         progress: @Sendable @escaping (Double) -> Void
     ) async throws -> URL {
@@ -468,32 +585,15 @@ public final class VideoMosaicExporter: @unchecked Sendable {
             // trimStart 分シフトして writer タイムラインを 0 起点に揃える（トリム精度は
             // PCM サンプル単位。映像側 shiftSample と同じ 0 起点に一致する）。
             if let audioInput, let audioOutput {
-                let audioSourceReader = audioReader ?? reader
-                let audioQueue = DispatchQueue(label: "mask-me.export.audio")
                 group.enter()
-                audioInput.requestMediaDataWhenReady(on: audioQueue) {
-                    while audioInput.isReadyForMoreMediaData {
-                        guard audioSourceReader.status == .reading,
-                              let sample = audioOutput.copyNextSampleBuffer() else {
-                            audioInput.markAsFinished()
-                            group.leave()
-                            return
-                        }
-                        // セグメント境界で samples=0・pts 不定のマーカーバッファが
-                        // 届くことがある（マルチクリップ composition の実測）。
-                        // writer に渡すと失敗するため読み飛ばす。
-                        guard CMSampleBufferGetNumSamples(sample) > 0 else { continue }
-                        if trimStartSec > 0.001 {
-                            // シフト失敗（タイミング情報が取れない異常バッファ）は
-                            // 落とす。未シフトのまま書くと出力タイムラインが壊れる。
-                            if let shifted = Self.shiftSample(sample, byMinusSeconds: trimStartSec) {
-                                audioInput.append(shifted)
-                            }
-                        } else {
-                            audioInput.append(sample)
-                        }
-                    }
-                }
+                startAudioPump(
+                    sourceReader: audioReader ?? reader,
+                    cancelableReader: audioReader,
+                    output: audioOutput,
+                    input: audioInput,
+                    trimStartSec: trimStartSec,
+                    audioEndLimitSec: audioEndLimitSec,
+                    onFinish: { group.leave() })
             }
 
             group.notify(queue: DispatchQueue.global(qos: .userInitiated)) {
@@ -516,6 +616,71 @@ public final class VideoMosaicExporter: @unchecked Sendable {
             }
         }
     }
+
+    // 引数が多いのは読み書きの相手（リーダー/出力/入力）と時間軸の補正値を
+    // 1 つのループに集約しているため。まとめる型を増やすより素直に渡す。
+    // swiftlint:disable function_parameter_count
+    /// 音声の読み書きループを writer 入力へ結線する（`pump` から 1 回だけ呼ぶ）。
+    ///
+    /// - Parameters:
+    ///   - sourceReader: 読み出し元。再エンコード時は音声専用リーダー、
+    ///     パススルー時は主リーダー。状態監視にだけ使う。
+    ///   - cancelableReader: 途中で止めてよいリーダー（音声専用のときだけ非 nil）。
+    ///     主リーダーと同一のときに止めると映像を巻き添えにするため分けて受け取る。
+    ///   - trimStartSec: >0.001 のとき PTS をこの秒数ぶん負方向へシフトし、
+    ///     writer タイムラインを 0 起点に揃える。
+    ///   - audioEndLimitSec: 再エンコード時のみ非 nil。writer タイムライン上の末尾上限。
+    ///     シフトの有無とは独立に適用する（トリムしない rate≠1 でも余剰は出る）。
+    ///   - onFinish: 音声の書き込みが終わったとき 1 回だけ呼ぶ。
+    private func startAudioPump(
+        sourceReader: AVAssetReader,
+        cancelableReader: AVAssetReader?,
+        output: AVAssetReaderOutput,
+        input: AVAssetWriterInput,
+        trimStartSec: Double,
+        audioEndLimitSec: Double?,
+        onFinish: @escaping () -> Void
+    ) {
+        let audioQueue = DispatchQueue(label: "mask-me.export.audio")
+        input.requestMediaDataWhenReady(on: audioQueue) {
+            while input.isReadyForMoreMediaData {
+                guard sourceReader.status == .reading,
+                      let sample = output.copyNextSampleBuffer() else {
+                    input.markAsFinished()
+                    onFinish()
+                    return
+                }
+                // セグメント境界で samples=0・pts 不定のマーカーバッファが
+                // 届くことがある（マルチクリップ composition の実測）。
+                // writer に渡すと失敗するため読み飛ばす。
+                guard CMSampleBufferGetNumSamples(sample) > 0 else { continue }
+                // シフト失敗（タイミング情報が取れない異常バッファ）は落とす。
+                // 未シフトのまま書くと出力タイムラインが壊れる。
+                let placed = trimStartSec > 0.001
+                    ? Self.shiftSample(sample, byMinusSeconds: trimStartSec)
+                    : sample
+                guard let placed else { continue }
+                guard let limit = audioEndLimitSec else {
+                    input.append(placed)
+                    continue
+                }
+                switch Self.clampAudioSample(placed, toEndSeconds: limit) {
+                case .append(let clamped):
+                    input.append(clamped)
+                case .finished(let ptsSec):
+                    print(String(format: "[MMEXPORT] audio tail clamp: limit=%.3fs "
+                                 + "firstDroppedPts=%.3fs", limit, ptsSec))
+                    input.markAsFinished()
+                    // 残りは全部範囲外なのでデコードを続ける意味がない。
+                    cancelableReader?.cancelReading()
+                    onFinish()
+                    return
+                }
+            }
+        }
+    }
+
+    // swiftlint:enable function_parameter_count
 
     // フェーズ2でこのファイルに本格的に手を入れる際に解消する予定の構造的負債
     // swiftlint:disable:next function_parameter_count
@@ -843,36 +1008,30 @@ public final class VideoMosaicExporter: @unchecked Sendable {
         return (input, adaptor)
     }
 
-    /// 再エンコード経路のデコード設定（AVAssetReaderAudioMixOutput 用）。
-    ///
-    /// ≤2ch は nil（ネイティブの非圧縮 LinearPCM デコード）。>2ch（5.1ch 等）は
-    /// リーダー段で 16bit ステレオ PCM へダウンミックスする。6ch のままデコードして
-    /// 2ch AAC の writer 入力へ渡すと、writer 側のチャンネル変換が -12780 で
-    /// 失敗する（6ch .mp4 で実測）ため、変換はミックス機能を持つリーダー側で行う。
-    static func reencodeDecodeSettings(matching format: CMFormatDescription?) -> [String: Any]? {
-        guard let format,
-              let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(format)?.pointee,
-              asbd.mChannelsPerFrame > 2 else { return nil }
-        return [
-            AVFormatIDKey: kAudioFormatLinearPCM,
-            AVNumberOfChannelsKey: 2,
-            AVLinearPCMBitDepthKey: 16,
-            AVLinearPCMIsFloatKey: false,
-            AVLinearPCMIsBigEndianKey: false,
-            AVLinearPCMIsNonInterleaved: false
-        ]
+    /// 再エンコード経路で PCM デコードと AAC 出力の両方に使う音声フォーマット。
+    /// 1 箇所で決めることで「デコード結果と writer 入力設定の食い違い」を構造的に防ぐ。
+    struct ReencodeAudioFormat: Equatable {
+        /// 元素材のレート（AAC エンコーダ上限の 48kHz 超は 48kHz へ）。既定 44.1kHz。
+        let sampleRate: Double
+        /// 最大 2（ステレオ）にクランプ。>2ch はダウンミックスする。
+        let channels: Int
     }
 
-    /// 再エンコード経路の AAC 出力設定。サンプルレートは元素材に合わせ
-    /// （取得できなければ 44.1kHz。AAC エンコーダ上限の 48kHz 超は 48kHz へ）、
-    /// チャンネル数は**最大 2（ステレオ）にクランプ**する。レート変換・ダウンミックスは
-    /// AVAssetWriterInput が行う。
+    /// 元素材のフォーマット記述から再エンコード経路の音声フォーマットを決める。
     ///
-    /// 3ch 以上（5.1ch 等）を AVChannelLayoutKey 無しで指定すると AVAssetWriterInput の
-    /// init が `NSInvalidArgumentException`（ObjC 例外・Swift で catch 不能）を投げて
-    /// プロセスごと落ちる（6ch .mov で実測）。レイアウトを正しく引き回すより、
-    /// モザイクアプリの書き出しとして十分なステレオへのダウンミックスで固定する。
-    static func aacAudioSettings(matching format: CMFormatDescription?) -> [String: Any] {
+    /// 3ch 以上（5.1ch 等）を AVChannelLayoutKey 無しで AAC 出力設定に指定すると
+    /// AVAssetWriterInput の init が `NSInvalidArgumentException`（ObjC 例外・
+    /// Swift で catch 不能）を投げてプロセスごと落ちる（6ch .mov で実測）。
+    /// レイアウトを正しく引き回すより、モザイクアプリの書き出しとして十分な
+    /// ステレオへのダウンミックスで固定する。
+    ///
+    /// **フォーマット混在タイムラインでは先頭クリップに全体が揃う**（呼び出し側が
+    /// `formatDescriptions.first` だけを渡すため）。44.1kHz 素材 + 48kHz 素材の連結なら
+    /// 出力は全体 44.1kHz になる。意図的な仕様: 再エンコード経路は単一設定の writer 入力
+    /// 1 本で書くので、どこか 1 つに揃えるしかない。リサンプルはリーダー
+    /// （`AVAssetReaderAudioMixOutput` + `reencodeDecodeSettings`）が行うため
+    /// 後続クリップの音が壊れることはない（`MultiClipExportTests` の混在テストが固定）。
+    static func reencodeAudioFormat(matching format: CMFormatDescription?) -> ReencodeAudioFormat {
         var sampleRate = 44_100.0
         var channels = 2
         if let format,
@@ -880,11 +1039,41 @@ public final class VideoMosaicExporter: @unchecked Sendable {
             if asbd.mSampleRate > 0 { sampleRate = min(asbd.mSampleRate, 48_000) }
             if asbd.mChannelsPerFrame > 0 { channels = min(Int(asbd.mChannelsPerFrame), 2) }
         }
+        return ReencodeAudioFormat(sampleRate: sampleRate, channels: channels)
+    }
+
+    /// 再エンコード経路のデコード設定（AVAssetReaderAudioMixOutput 用）。
+    ///
+    /// AAC 出力と同じレート・チャンネル数の 16bit インターリーブ PCM を明示する。
+    /// リーダー段で揃えきる理由:
+    /// - >2ch（5.1ch 等）を 6ch のままデコードして 2ch AAC の writer 入力へ渡すと、
+    ///   writer 側のチャンネル変換が -12780 で失敗する（6ch .mp4 で実測）。
+    /// - 48kHz 素材と 44.1kHz 素材が混在するタイムラインでは、デコード結果の
+    ///   フォーマット記述が途中で変わる。単一設定の writer 入力に渡せないため、
+    ///   ミックス機能を持つリーダー側で 1 つのレートへ統一する。
+    static func reencodeDecodeSettings(matching format: CMFormatDescription?) -> [String: Any] {
+        let target = reencodeAudioFormat(matching: format)
+        return [
+            AVFormatIDKey: kAudioFormatLinearPCM,
+            AVSampleRateKey: target.sampleRate,
+            AVNumberOfChannelsKey: target.channels,
+            AVLinearPCMBitDepthKey: 16,
+            AVLinearPCMIsFloatKey: false,
+            AVLinearPCMIsBigEndianKey: false,
+            AVLinearPCMIsNonInterleaved: false
+        ]
+    }
+
+    /// 再エンコード経路の AAC 出力設定。レート・チャンネル数は
+    /// `reencodeAudioFormat(matching:)` が決めた値（デコード設定と同一）を使う。
+    /// 入力 PCM と完全に一致するので、writer 側での再変換は発生しない。
+    static func aacAudioSettings(matching format: CMFormatDescription?) -> [String: Any] {
+        let target = reencodeAudioFormat(matching: format)
         return [
             AVFormatIDKey: kAudioFormatMPEG4AAC,
-            AVSampleRateKey: sampleRate,
-            AVNumberOfChannelsKey: channels,
-            AVEncoderBitRateKey: 96_000 * channels
+            AVSampleRateKey: target.sampleRate,
+            AVNumberOfChannelsKey: target.channels,
+            AVEncoderBitRateKey: 96_000 * target.channels
         ]
     }
 
@@ -897,6 +1086,61 @@ public final class VideoMosaicExporter: @unchecked Sendable {
     private func makeOutputURL() -> URL {
         FileManager.default.temporaryDirectory
             .appendingPathComponent("mosaic-\(UUID().uuidString).mp4")
+    }
+
+    /// `clampAudioSample(_:toEndSeconds:)` の結果。
+    enum AudioTailClamp {
+        /// 範囲内（必要なら末尾サンプルを切り詰め済み）。writer に渡してよい。
+        case append(CMSampleBuffer)
+        /// 先頭から範囲外。音声は打ち切ってよい（付随値は捨てたバッファの PTS 秒）。
+        case finished(Double)
+    }
+
+    /// writer タイムライン上の上限 `limit` を超える音声を捨てる（再エンコード時のみ使う）。
+    ///
+    /// なぜ要るか: スケール編集（rate≠1）の音声は時間伸縮処理（`.spectral`）を通るため、
+    /// リーダーは**処理ブロック単位で切り上げた長さ**を返す。2s・44.1kHz モノラルを
+    /// rate=2 で読むと、想定の 44,100 フレーム（1.000s）に対し 49,152 フレーム
+    /// （= 48 × 1024、1.1146s）が返る＝**約 0.11s の余剰**（実測）。
+    /// トリム時も同じで、`AVAssetReader.timeRange` は範囲末尾を跨ぐ処理ブロックまで返す。
+    /// 出力尺は映像・音声のうち長い方で決まるので、そのまま書くと
+    /// 「映像 1.00s・音声 1.11s」の出力になり、尺全体が伸びる。
+    ///
+    /// PCM デコード済みバッファはサンプル単位で切れるため、範囲を跨ぐバッファは
+    /// 収まるサンプル数だけ切り出す（`CMSampleBufferCopySampleBufferForRange`）。
+    /// 切り出しに失敗した異常時は元をそのまま返す（欠落より余剰を選ぶ）が、
+    /// **無言では返さない**（余剰が黙って復活する経路を残さないため `[MMEXPORT]` に出す）。
+    static func clampAudioSample(_ sample: CMSampleBuffer,
+                                 toEndSeconds limit: Double) -> AudioTailClamp {
+        let ptsSec = CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sample))
+        guard ptsSec.isFinite else { return .append(sample) }
+        if ptsSec >= limit { return .finished(ptsSec) }
+
+        let numSamples = CMSampleBufferGetNumSamples(sample)
+        let durationSec = CMTimeGetSeconds(CMSampleBufferGetDuration(sample))
+        guard numSamples > 0, durationSec.isFinite, durationSec > 0 else {
+            return .append(sample)
+        }
+        if ptsSec + durationSec <= limit { return .append(sample) }
+
+        let perSampleSec = durationSec / Double(numSamples)
+        let fitting = Int(((limit - ptsSec) / perSampleSec).rounded(.down))
+        // 1 サンプルも入らないなら、そもそも上の pts 判定で弾けている想定。
+        // 念のため下限 1・上限 numSamples にクランプする。
+        let keep = min(max(fitting, 1), numSamples)
+        guard keep < numSamples else { return .append(sample) }
+        var truncated: CMSampleBuffer?
+        let status = CMSampleBufferCopySampleBufferForRange(
+            allocator: kCFAllocatorDefault,
+            sampleBuffer: sample,
+            sampleRange: CFRange(location: 0, length: keep),
+            sampleBufferOut: &truncated)
+        if status == noErr, let truncated { return .append(truncated) }
+        // 失敗しても書き出しは続ける（欠落より余剰）が、末尾に余剰が残った事実は残す。
+        print(String(format: "[MMEXPORT] audio tail clamp FAILED: err=%d limit=%.3fs "
+                     + "pts=%.3fs keep=%d/%d (末尾に余剰が残る)",
+                     Int(status), limit, ptsSec, keep, numSamples))
+        return .append(sample)
     }
 
     /// トリム開始時刻ぶんだけ PTS と DTS を負方向にシフトした CMSampleBuffer を返す。

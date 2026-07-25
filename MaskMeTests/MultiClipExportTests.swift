@@ -26,10 +26,14 @@ final class MultiClipExportTests: XCTestCase {
     ///
     /// `audioChannels` に 6 を指定すると音声を 5.1ch（6ch・チャンネルレイアウト付き
     /// AAC）で書く。>2ch 素材（5.1ch 撮影動画等）の書き出し経路を再現するために使う。
+    ///
+    /// `audioSampleRate` はサンプルレート混在（48kHz 素材 + 44.1kHz 素材の連結）を
+    /// 再現するために使う。
     private func makeTestVideo(
         seconds: Double, withAudio: Bool,
         audioAmplitude: @escaping (Double) -> Double = { _ in 1.0 },
-        audioChannels: Int? = nil
+        audioChannels: Int? = nil,
+        audioSampleRate: Double = 44100.0
     ) async throws -> URL {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("\(UUID().uuidString).mp4")
@@ -63,7 +67,7 @@ final class MultiClipExportTests: XCTestCase {
                 let layoutData = Data(bytes: &layout, count: MemoryLayout<AudioChannelLayout>.size)
                 aIn = AVAssetWriterInput(mediaType: .audio, outputSettings: [
                     AVFormatIDKey: kAudioFormatMPEG4AAC,
-                    AVSampleRateKey: 44100.0,
+                    AVSampleRateKey: audioSampleRate,
                     AVNumberOfChannelsKey: channels,
                     AVChannelLayoutKey: layoutData,
                     AVEncoderBitRateKey: 256_000
@@ -71,7 +75,7 @@ final class MultiClipExportTests: XCTestCase {
             } else {
                 aIn = AVAssetWriterInput(mediaType: .audio, outputSettings: [
                     AVFormatIDKey: kAudioFormatMPEG4AAC,
-                    AVSampleRateKey: 44100.0,
+                    AVSampleRateKey: audioSampleRate,
                     AVNumberOfChannelsKey: 1,
                     AVEncoderBitRateKey: 64000
                 ])
@@ -86,7 +90,8 @@ final class MultiClipExportTests: XCTestCase {
 
         if let audioInput {
             try appendSineAudio(to: audioInput, seconds: seconds,
-                                channels: audioChannels ?? 1, amplitude: audioAmplitude)
+                                channels: audioChannels ?? 1, sampleRate: audioSampleRate,
+                                amplitude: audioAmplitude)
             audioInput.markAsFinished()
         }
 
@@ -112,10 +117,10 @@ final class MultiClipExportTests: XCTestCase {
 
     /// 16bit 整数・インターリーブの LinearPCM フォーマット記述を作る
     /// （>2ch は 5.1ch のチャンネルレイアウトを付ける。6ch 前提）。
-    private func makePCMFormat(channels: Int) -> CMFormatDescription? {
+    private func makePCMFormat(channels: Int, sampleRate: Double = 44100.0) -> CMFormatDescription? {
         let bytesPerFrame = UInt32(2 * channels)
         var asbd = AudioStreamBasicDescription(
-            mSampleRate: 44100.0,
+            mSampleRate: sampleRate,
             mFormatID: kAudioFormatLinearPCM,
             mFormatFlags: kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked,
             mBytesPerPacket: bytesPerFrame, mFramesPerPacket: 1, mBytesPerFrame: bytesPerFrame,
@@ -144,9 +149,10 @@ final class MultiClipExportTests: XCTestCase {
     /// `channels` > 1 のときは全チャンネルに同一波形をインターリーブで書く。
     private func appendSineAudio(to input: AVAssetWriterInput, seconds: Double,
                                  channels: Int = 1,
+                                 sampleRate: Double = 44100.0,
                                  amplitude: (Double) -> Double = { _ in 1.0 }) throws {
-        let sampleRate = 44100.0
-        guard let format = makePCMFormat(channels: channels) else { return }
+        guard let format = makePCMFormat(channels: channels, sampleRate: sampleRate)
+        else { return }
 
         let chunk = 1024
         let totalFrames = Int(seconds * sampleRate)
@@ -364,13 +370,13 @@ final class MultiClipExportTests: XCTestCase {
 
         let out = AVURLAsset(url: outURL)
         let duration = try await out.load(.duration)
-        XCTAssertEqual(CMTimeGetSeconds(duration), 1.0, accuracy: 0.2,
+        XCTAssertEqual(CMTimeGetSeconds(duration), 1.0, accuracy: 0.05,
                        "トリム書き出しの出力尺が選択範囲（後半 1s）と一致しない")
         let audioTracks = try await out.loadTracks(withMediaType: .audio)
         XCTAssertEqual(audioTracks.count, 1, "トリム書き出しで音声トラックが消えている")
         if let audio = audioTracks.first {
             let range = try await audio.load(.timeRange)
-            XCTAssertEqual(CMTimeGetSeconds(range.duration), 1.0, accuracy: 0.2,
+            XCTAssertEqual(CMTimeGetSeconds(range.duration), 1.0, accuracy: 0.05,
                            "音声トラックの尺が映像とずれている")
         }
         // 出力は全区間が有音区間（合成 [1,2) = 素材 [2,3)）のはず。
@@ -411,7 +417,7 @@ final class MultiClipExportTests: XCTestCase {
 
         let out = AVURLAsset(url: outURL)
         let duration = try await out.load(.duration)
-        XCTAssertEqual(CMTimeGetSeconds(duration), 1.0, accuracy: 0.2)
+        XCTAssertEqual(CMTimeGetSeconds(duration), 1.0, accuracy: 0.05)
         let audioTracks = try await out.loadTracks(withMediaType: .audio)
         XCTAssertEqual(audioTracks.count, 1, "境界跨ぎトリムで音声トラックが消えている")
         let headRMS = try await audioRMS(url: outURL, window: 0.05...0.4)
@@ -451,12 +457,12 @@ final class MultiClipExportTests: XCTestCase {
 
         let out = AVURLAsset(url: outURL)
         let duration = try await out.load(.duration)
-        XCTAssertEqual(CMTimeGetSeconds(duration), 1.0, accuracy: 0.2)
+        XCTAssertEqual(CMTimeGetSeconds(duration), 1.0, accuracy: 0.05)
         let audioTracks = try await out.loadTracks(withMediaType: .audio)
         XCTAssertEqual(audioTracks.count, 1, "6ch 素材のトリム書き出しで音声トラックが消えている")
         if let audio = audioTracks.first {
             let range = try await audio.load(.timeRange)
-            XCTAssertEqual(CMTimeGetSeconds(range.duration), 1.0, accuracy: 0.2)
+            XCTAssertEqual(CMTimeGetSeconds(range.duration), 1.0, accuracy: 0.05)
         }
         let rms = try await audioRMS(url: outURL, window: 0.1...0.9)
         XCTAssertGreaterThan(rms, 0.1, "6ch 素材のダウンミックス音声が載っていない")
@@ -489,12 +495,12 @@ final class MultiClipExportTests: XCTestCase {
 
         let out = AVURLAsset(url: outURL)
         let duration = try await out.load(.duration)
-        XCTAssertEqual(CMTimeGetSeconds(duration), 2.0, accuracy: 0.2)
+        XCTAssertEqual(CMTimeGetSeconds(duration), 2.0, accuracy: 0.05)
         let audioTracks = try await out.loadTracks(withMediaType: .audio)
         XCTAssertEqual(audioTracks.count, 1, "トリム書き出しで音声が消えている")
         if let audio = audioTracks.first {
             let range = try await audio.load(.timeRange)
-            XCTAssertEqual(CMTimeGetSeconds(range.duration), 2.0, accuracy: 0.2,
+            XCTAssertEqual(CMTimeGetSeconds(range.duration), 2.0, accuracy: 0.05,
                            "音声トラックの尺が映像とずれている")
         }
         let headRMS = try await audioRMS(url: outURL, window: 0.05...0.4)
@@ -588,18 +594,453 @@ final class MultiClipExportTests: XCTestCase {
         XCTAssertGreaterThan(videoRMS, 0.1, "動画区間の音が無音（音声全損 or 位置ずれ）")
     }
 
-    /// `AudioExportPipeline.decide` の純ロジック契約: パススルー（bit 同一の無変換
-    /// コピー）は「トリムなし かつ 音声 empty edit なし」のときだけ。それ以外は
-    /// すべて再エンコード（empty edit を無音として尊重する PCM デコード経路）。
-    func test_audioPipelineDecision_passthroughOnlyWithoutTrimAndEmptyEdits() {
-        XCTAssertEqual(AudioExportPipeline.decide(isTrimming: false, hasEmptyAudioSegments: false),
-                       .passthrough)
-        XCTAssertEqual(AudioExportPipeline.decide(isTrimming: true, hasEmptyAudioSegments: false),
-                       .reencode)
-        XCTAssertEqual(AudioExportPipeline.decide(isTrimming: false, hasEmptyAudioSegments: true),
-                       .reencode)
-        XCTAssertEqual(AudioExportPipeline.decide(isTrimming: true, hasEmptyAudioSegments: true),
-                       .reencode)
+    /// `AudioExportPipeline.decide` の純ロジック契約（真理値表を全 16 通り固定）:
+    /// パススルー（bit 同一の無変換コピー）は**立っている条件が 0 個のときだけ**で、
+    /// 1 個以上あれば再エンコード。
+    ///
+    /// 期待値を `decide` と同じ OR 式で書くと実装の写経になり、条件が増えたときの
+    /// 「OR に足し忘れ」を検出できない。ここでは期待値を**立っているビットの個数**
+    /// （`bits == 0` か否か）だけから決め、条件の列挙に依存させない。
+    func test_audioPipelineDecision_passthroughOnlyWhenNoTransform() {
+        for bits in 0..<16 {
+            let trimming = bits & 1 != 0
+            let conditions = AudioTrackConditions(hasEmptySegments: bits & 2 != 0,
+                                                  hasScaledSegments: bits & 4 != 0,
+                                                  hasMixedFormats: bits & 8 != 0)
+            let expected: AudioExportPipeline = bits == 0 ? .passthrough : .reencode
+            XCTAssertEqual(
+                AudioExportPipeline.decide(isTrimming: trimming, conditions: conditions),
+                expected,
+                "decide(trim: \(trimming), conditions: \(conditions)) が期待と違う")
+        }
+    }
+
+    /// 「条件が 5 個目に増えたのに `decide` の OR へ足し忘れ」を捕まえる契約テスト。
+    ///
+    /// `AudioTrackConditions` の各条件を**単独で**立てて全て `.reencode` になることを
+    /// 確かめ、あわせて条件の個数そのものを固定する。新しい条件が増えると個数の
+    /// アサートが落ちるので、`decide` とこのテスト両方の更新が強制される
+    /// （足し忘れたまま増やすと、その条件は無言で `.passthrough` に落ちる）。
+    func test_everyAudioTrackConditionAloneForcesReencode() {
+        let fields: [(String, WritableKeyPath<AudioTrackConditions, Bool>)] = [
+            ("hasEmptySegments", \.hasEmptySegments),
+            ("hasScaledSegments", \.hasScaledSegments),
+            ("hasMixedFormats", \.hasMixedFormats)
+        ]
+        XCTAssertEqual(Mirror(reflecting: AudioTrackConditions()).children.count, fields.count,
+                       "AudioTrackConditions の条件が増減した。decide の OR とこのテストの "
+                       + "fields を更新すること（足し忘れると無言で passthrough に落ちる）")
+        for (name, keyPath) in fields {
+            var conditions = AudioTrackConditions()
+            conditions[keyPath: keyPath] = true
+            XCTAssertEqual(AudioExportPipeline.decide(isTrimming: false, conditions: conditions),
+                           .reencode, "\(name) が単独で再エンコードを選ばせていない")
+        }
+        XCTAssertEqual(
+            AudioExportPipeline.decide(isTrimming: true, conditions: AudioTrackConditions()),
+            .reencode, "isTrimming が単独で再エンコードを選ばせていない")
+        XCTAssertEqual(
+            AudioExportPipeline.decide(isTrimming: false, conditions: AudioTrackConditions()),
+            .passthrough, "全条件が偽なのにパススルーにならない")
+    }
+
+    /// `decide` の**入力**（合成結果の音声トラックから読む実データ）が
+    /// 想定どおり立つこと。純ロジックだけ固定しても入口がズレたら意味が無いので、
+    /// 実際の composition から `AudioTrackConditions` を組んで確かめる。
+    func test_audioTrackConditions_fromRealComposition() async throws {
+        let url = try await makeTestVideo(seconds: 2.0, withAudio: true)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let url48 = try await makeTestVideo(seconds: 2.0, withAudio: true, audioSampleRate: 48000.0)
+        defer { try? FileManager.default.removeItem(at: url48) }
+        let photo = try await makePhotoClip(seconds: 1.0)
+        defer { try? FileManager.default.removeItem(at: photo.url) }
+
+        let aID = UUID(), bID = UUID(), photoID = UUID()
+        let sources: [UUID: AVAsset] = [aID: AVURLAsset(url: url),
+                                        bID: AVURLAsset(url: url48),
+                                        photoID: AVURLAsset(url: photo.url)]
+
+        func conditions(_ clips: [TimelineClip]) async throws -> AudioTrackConditions {
+            let composition = try await TimelineCompositionBuilder()
+                .build(clips: clips, sources: sources)
+            let tracks = try await composition.loadTracks(withMediaType: .audio)
+            let track = try XCTUnwrap(tracks.first)
+            let segments = try await track.load(.segments)
+            let formats = try await track.load(.formatDescriptions)
+            return AudioTrackConditions.from(segments: segments, formatDescriptions: formats)
+        }
+
+        // 無変換（等速・単一素材）: すべて偽 = パススルー相当。
+        let plain = try await conditions([TimelineClip(sourceID: aID, sourceStart: 0, sourceEnd: 2)])
+        XCTAssertEqual(plain, AudioTrackConditions(), "無変換タイムラインで変換条件が立っている")
+
+        // rate=2: スケール編集だけが立つ。
+        let scaled = try await conditions(
+            [TimelineClip(sourceID: aID, sourceStart: 0, sourceEnd: 2, rate: 2.0)])
+        XCTAssertTrue(scaled.hasScaledSegments, "rate=2 のスケール編集を検出できていない")
+        XCTAssertFalse(scaled.hasEmptySegments)
+        XCTAssertFalse(scaled.hasMixedFormats)
+
+        // 写真（音声なし素材）を挟む: empty edit だけが立つ。
+        let withPhoto = try await conditions([
+            TimelineClip(sourceID: photoID, sourceStart: 0, sourceEnd: photo.duration),
+            TimelineClip(sourceID: aID, sourceStart: 0, sourceEnd: 2)
+        ])
+        XCTAssertTrue(withPhoto.hasEmptySegments, "音声なし素材の empty edit を検出できていない")
+        XCTAssertFalse(withPhoto.hasScaledSegments)
+
+        // 44.1kHz + 48kHz の連結: フォーマット混在だけが立つ。
+        let mixed = try await conditions([
+            TimelineClip(sourceID: aID, sourceStart: 0, sourceEnd: 2),
+            TimelineClip(sourceID: bID, sourceStart: 0, sourceEnd: 2)
+        ])
+        XCTAssertTrue(mixed.hasMixedFormats, "48k/44.1k 混在を検出できていない")
+        XCTAssertFalse(mixed.hasScaledSegments)
+        XCTAssertFalse(mixed.hasEmptySegments)
+    }
+
+    // MARK: - M-1: スケール判定の許容差（微小 rate を取りこぼさない）
+
+    /// 合成結果の音声トラックを取り出す（スケール判定系のテストで共有）。
+    private func audioTrack(_ clips: [TimelineClip],
+                            sources: [UUID: AVAsset]) async throws -> AVAssetTrack {
+        let composition = try await TimelineCompositionBuilder().build(clips: clips,
+                                                                      sources: sources)
+        let tracks = try await composition.loadTracks(withMediaType: .audio)
+        return try XCTUnwrap(tracks.first, "合成に音声トラックが無い")
+    }
+
+    private func audioConditions(_ clips: [TimelineClip],
+                                 sources: [UUID: AVAsset]) async throws -> AudioTrackConditions {
+        let track = try await audioTrack(clips, sources: sources)
+        let segments = try await track.load(.segments)
+        let formats = try await track.load(.formatDescriptions)
+        return AudioTrackConditions.from(segments: segments, formatDescriptions: formats)
+    }
+
+    /// 各セグメントの source − target 秒（スケール判定が見ている実量）。
+    private func scaleDiffsSeconds(_ clips: [TimelineClip],
+                                   sources: [UUID: AVAsset]) async throws -> [Double] {
+        let segments = try await audioTrack(clips, sources: sources).load(.segments)
+        return segments.map { segment in
+            CMTimeGetSeconds(segment.timeMapping.source.duration)
+                - CMTimeGetSeconds(segment.timeMapping.target.duration)
+        }
+    }
+
+    /// **微小な rate 変更**（|rate − 1| < 1%）がスケール編集として検出されること。
+    ///
+    /// 許容差をクリップ長に比例させていた頃（`max(source * 0.005, 0.005)`）は
+    /// rate=1.001〜1.004 が「スケールなし」と判定され、音声だけ `.passthrough` に
+    /// 落ちて **速度変更が音声に反映されない**（映像だけ速くなる）状態だった。
+    /// `TimelineClip.rateRange` は連続値なので「rate 変更は必ず 1 割以上動く」は
+    /// 成り立たない。許容差は timescale 600 の丸め由来の**固定値**であること。
+    /// 実測の diff は 1/600s の整数倍（= 差 1 目盛が最小のスケール）で、
+    /// 等速タイムラインの diff は厳密に 0
+    /// （`test_audioTrackConditions_noFalsePositiveOnUnscaledTimelines` が固定）。
+    func test_audioTrackConditions_detectsMicroRateChange() async throws {
+        let url2 = try await makeTestVideo(seconds: 2.0, withAudio: true)
+        defer { try? FileManager.default.removeItem(at: url2) }
+        let url4 = try await makeTestVideo(seconds: 4.0, withAudio: true)
+        defer { try? FileManager.default.removeItem(at: url4) }
+
+        let id2 = UUID(), id4 = UUID()
+        let sources: [UUID: AVAsset] = [id2: AVURLAsset(url: url2), id4: AVURLAsset(url: url4)]
+
+        for (sourceID, seconds) in [(id2, 2.0), (id4, 4.0)] {
+            for rate in [1.001, 1.002, 1.004, 1.01, 0.999, 0.996] {
+                let clips = [TimelineClip(sourceID: sourceID, sourceStart: 0,
+                                          sourceEnd: seconds, rate: rate)]
+                let conditions = try await audioConditions(clips, sources: sources)
+                let diffs = try await scaleDiffsSeconds(clips, sources: sources)
+                print("[S7] microRate seconds=\(seconds) rate=\(rate) "
+                      + "scaled=\(conditions.hasScaledSegments) diffs=\(diffs)")
+                XCTAssertTrue(conditions.hasScaledSegments,
+                              "rate=\(rate)（素材 \(seconds)s）のスケール編集を取りこぼした。"
+                              + "音声だけ速度変更が反映されない経路に落ちる。")
+            }
+        }
+    }
+
+    /// 逆方向のガード: **無変換構成でスケール扱いされない**こと（パススルー契約の維持）。
+    /// 許容差を締めた副作用で等速タイムラインが再エンコードへ落ちると、
+    /// フェーズ1 からの bit 同一忠実度が黙って壊れる。
+    func test_audioTrackConditions_noFalsePositiveOnUnscaledTimelines() async throws {
+        let url2 = try await makeTestVideo(seconds: 2.0, withAudio: true)
+        defer { try? FileManager.default.removeItem(at: url2) }
+        let url4 = try await makeTestVideo(seconds: 4.0, withAudio: true)
+        defer { try? FileManager.default.removeItem(at: url4) }
+
+        let idA = UUID(), idB = UUID()
+        let sources: [UUID: AVAsset] = [idA: AVURLAsset(url: url2), idB: AVURLAsset(url: url4)]
+
+        let cases: [(String, [TimelineClip])] = [
+            ("単一・全長", [TimelineClip(sourceID: idA, sourceStart: 0, sourceEnd: 2)]),
+            ("同一素材 2 クリップ", [
+                TimelineClip(sourceID: idA, sourceStart: 0, sourceEnd: 1),
+                TimelineClip(sourceID: idA, sourceStart: 1, sourceEnd: 2)
+            ]),
+            ("別素材 2 クリップ", [
+                TimelineClip(sourceID: idA, sourceStart: 0, sourceEnd: 2),
+                TimelineClip(sourceID: idB, sourceStart: 0, sourceEnd: 2)
+            ]),
+            ("端数境界", [
+                TimelineClip(sourceID: idB, sourceStart: 0.3333, sourceEnd: 1.6667),
+                TimelineClip(sourceID: idB, sourceStart: 0.7777, sourceEnd: 2.1111)
+            ]),
+            ("極小クリップ", [TimelineClip(sourceID: idA, sourceStart: 0, sourceEnd: 0.04)]),
+            ("rate=1.0 明示", [TimelineClip(sourceID: idA, sourceStart: 0,
+                                            sourceEnd: 2, rate: 1.0)])
+        ]
+
+        for (name, clips) in cases {
+            let conditions = try await audioConditions(clips, sources: sources)
+            let diffs = try await scaleDiffsSeconds(clips, sources: sources)
+            print("[S7] noScale \(name) scaled=\(conditions.hasScaledSegments) diffs=\(diffs)")
+            XCTAssertFalse(conditions.hasScaledSegments,
+                           "\(name): 等速なのにスケール扱いされた（パススルー契約が壊れる）")
+        }
+    }
+
+    // MARK: - clampAudioSample の単体契約
+
+    /// 16bit モノラル PCM の `CMSampleBuffer` を合成する。
+    /// リーダー経由では踏めない分岐（範囲外・境界・切り詰め失敗）を単体で固定するために使う。
+    ///
+    /// `withSampleSizes: false` にするとサンプルサイズを持たないバッファになり、
+    /// `CMSampleBufferCopySampleBufferForRange` が
+    /// `kCMSampleBufferError_BufferHasNoSampleSizes`（-12735）で失敗する
+    /// ＝ 切り詰め失敗のフォールバック経路を再現できる。
+    private func makePCMSampleBuffer(numSamples: Int,
+                                     startSeconds: Double,
+                                     sampleRate: Double = 44_100,
+                                     withSampleSizes: Bool = true) throws -> CMSampleBuffer {
+        var asbd = AudioStreamBasicDescription(
+            mSampleRate: sampleRate,
+            mFormatID: kAudioFormatLinearPCM,
+            mFormatFlags: kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked,
+            mBytesPerPacket: 2, mFramesPerPacket: 1, mBytesPerFrame: 2,
+            mChannelsPerFrame: 1, mBitsPerChannel: 16, mReserved: 0)
+        var format: CMAudioFormatDescription?
+        XCTAssertEqual(CMAudioFormatDescriptionCreate(
+            allocator: kCFAllocatorDefault, asbd: &asbd,
+            layoutSize: 0, layout: nil, magicCookieSize: 0, magicCookie: nil,
+            extensions: nil, formatDescriptionOut: &format), noErr)
+
+        let byteCount = numSamples * 2
+        var blockBuffer: CMBlockBuffer?
+        XCTAssertEqual(CMBlockBufferCreateWithMemoryBlock(
+            allocator: kCFAllocatorDefault, memoryBlock: nil, blockLength: byteCount,
+            blockAllocator: kCFAllocatorDefault, customBlockSource: nil,
+            offsetToData: 0, dataLength: byteCount, flags: 0,
+            blockBufferOut: &blockBuffer), noErr)
+        let block = try XCTUnwrap(blockBuffer)
+        XCTAssertEqual(CMBlockBufferFillDataBytes(with: 0, blockBuffer: block,
+                                                  offsetIntoDestination: 0,
+                                                  dataLength: byteCount), noErr)
+
+        let scale = CMTimeScale(sampleRate)
+        var timing = CMSampleTimingInfo(
+            duration: CMTime(value: 1, timescale: scale),
+            presentationTimeStamp: CMTime(seconds: startSeconds, preferredTimescale: scale),
+            decodeTimeStamp: .invalid)
+        let sizeStorage = UnsafeMutablePointer<Int>.allocate(capacity: 1)
+        sizeStorage.initialize(to: 2)
+        defer { sizeStorage.deallocate() }
+        let sizeArray: UnsafePointer<Int>? = withSampleSizes
+            ? UnsafePointer(sizeStorage) : nil
+
+        var sample: CMSampleBuffer?
+        XCTAssertEqual(CMSampleBufferCreateReady(
+            allocator: kCFAllocatorDefault, dataBuffer: block,
+            formatDescription: format, sampleCount: numSamples,
+            sampleTimingEntryCount: 1, sampleTimingArray: &timing,
+            sampleSizeEntryCount: withSampleSizes ? 1 : 0,
+            sampleSizeArray: sizeArray,
+            sampleBufferOut: &sample), noErr)
+        return try XCTUnwrap(sample)
+    }
+
+    /// `clampAudioSample` の分岐契約。実リーダー経由では 1 バッファ 8192 フレーム・
+    /// 余剰 ≈0.116s（< 1 バッファ）なので「バッファ丸ごと範囲外」に到達せず、
+    /// 統合テストでは切り詰め経路しか通らない（フルスイートのログに
+    /// `audio tail clamp` が 1 件も出ないことを実測で確認済み）。
+    /// 全分岐をここで単体固定する。
+    func test_clampAudioSample_branches() throws {
+        // (a) 完全に範囲内: そのまま append（切り詰めない）。
+        let inside = try makePCMSampleBuffer(numSamples: 4410, startSeconds: 0.0)
+        switch VideoMosaicExporter.clampAudioSample(inside, toEndSeconds: 1.0) {
+        case .append(let out):
+            XCTAssertEqual(CMSampleBufferGetNumSamples(out), 4410,
+                           "範囲内のバッファが切り詰められた（音が欠ける）")
+        case .finished(let pts):
+            XCTFail("範囲内のバッファが打ち切られた pts=\(pts)")
+        }
+
+        // (b) 範囲を跨ぐ: 収まるサンプル数だけに切り詰められる。
+        // pts=0.05s / 0.1s ぶん（4410 サンプル）→ limit=0.1s には 2205 サンプルだけ収まる。
+        let straddling = try makePCMSampleBuffer(numSamples: 4410, startSeconds: 0.05)
+        switch VideoMosaicExporter.clampAudioSample(straddling, toEndSeconds: 0.1) {
+        case .append(let out):
+            XCTAssertEqual(CMSampleBufferGetNumSamples(out), 2205,
+                           "範囲跨ぎのバッファが正しく切り詰められていない（末尾に余剰が残る）")
+        case .finished(let pts):
+            XCTFail("範囲跨ぎのバッファが打ち切られた pts=\(pts)")
+        }
+
+        // (c) 完全に範囲外: finished（音声を打ち切ってよい）。
+        let outside = try makePCMSampleBuffer(numSamples: 4410, startSeconds: 1.5)
+        switch VideoMosaicExporter.clampAudioSample(outside, toEndSeconds: 1.0) {
+        case .append(let out):
+            XCTFail("範囲外のバッファを append した samples=\(CMSampleBufferGetNumSamples(out))")
+        case .finished(let pts):
+            XCTAssertEqual(pts, 1.5, accuracy: 0.001, "打ち切り位置の pts が違う")
+        }
+
+        // (d) 境界: 1 サンプルも収まらない（fitting=0）が pts は範囲内。
+        // 下限 1 にクランプして append する（0 サンプルのバッファを writer に渡さない）。
+        let hairline = try makePCMSampleBuffer(numSamples: 4410, startSeconds: 0.1)
+        switch VideoMosaicExporter.clampAudioSample(hairline, toEndSeconds: 0.100005) {
+        case .append(let out):
+            XCTAssertEqual(CMSampleBufferGetNumSamples(out), 1,
+                           "fitting=0 の境界で 1 サンプルにクランプされていない")
+        case .finished(let pts):
+            XCTFail("pts が範囲内なのに打ち切られた pts=\(pts)")
+        }
+
+        // (e) 切り詰め失敗（サンプルサイズを持たないバッファ）: 欠落より余剰を選んで
+        // 元バッファを append する。ただし `[MMEXPORT] audio tail clamp FAILED` を
+        // 出すこと（無言で余剰が復活する経路を残さない）。
+        let unsized = try makePCMSampleBuffer(numSamples: 4410, startSeconds: 0.05,
+                                              withSampleSizes: false)
+        switch VideoMosaicExporter.clampAudioSample(unsized, toEndSeconds: 0.1) {
+        case .append(let out):
+            XCTAssertEqual(CMSampleBufferGetNumSamples(out), 4410,
+                           "切り詰めに失敗したのに元バッファを返していない（音が欠ける）")
+        case .finished(let pts):
+            XCTFail("切り詰め失敗で打ち切ってしまった pts=\(pts)")
+        }
+    }
+
+    /// rate=2 クリップの書き出しで、**音声も**半分の尺になり AAC で載っていること。
+    /// 圧縮パススルーだと `scaleTimeRange`（edit）が反映されず音声だけ等速のまま
+    /// 残る（映像 1s に対し音声 2s）ので、経路選択の実測ガードになる。
+    func test_rateTwoClipWithAudio_audioIsHalvedAndReencoded() async throws {
+        guard MTLCreateSystemDefaultDevice() != nil else {
+            throw XCTSkip("Metal デバイスが無い環境ではスキップ")
+        }
+        let url = try await makeTestVideo(seconds: 2.0, withAudio: true)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let sourceID = UUID()
+        let clips = [TimelineClip(sourceID: sourceID, sourceStart: 0, sourceEnd: 2, rate: 2.0)]
+        let composition = try await TimelineCompositionBuilder()
+            .build(clips: clips, sources: [sourceID: AVURLAsset(url: url)])
+
+        let exporter = try makeExporter()
+        let outURL = try await exporter.export(
+            asset: composition, mapping: TimelineMapping(clips: clips)) { _ in }
+        defer { try? FileManager.default.removeItem(at: outURL) }
+
+        let out = AVURLAsset(url: outURL)
+        let duration = try await out.load(.duration)
+        XCTAssertEqual(CMTimeGetSeconds(duration), 1.0, accuracy: 0.05,
+                       "rate=2 の出力尺が素材長の半分になっていない")
+        let audioTracks = try await out.loadTracks(withMediaType: .audio)
+        XCTAssertEqual(audioTracks.count, 1, "rate=2 の書き出しで音声が消えている")
+        let audio = try XCTUnwrap(audioTracks.first)
+        let range = try await audio.load(.timeRange)
+        XCTAssertEqual(CMTimeGetSeconds(range.duration), 1.0, accuracy: 0.05,
+                       "音声トラックがスケールされていない（パススルーに落ちている可能性）")
+        let formats = try await audio.load(.formatDescriptions)
+        let format = try XCTUnwrap(formats.first)
+        let asbd = try XCTUnwrap(CMAudioFormatDescriptionGetStreamBasicDescription(format)?.pointee)
+        XCTAssertEqual(asbd.mFormatID, kAudioFormatMPEG4AAC, "音声が AAC で書かれていない")
+        let rms = try await audioRMS(url: outURL, window: 0.1...0.9)
+        XCTAssertGreaterThan(rms, 0.1, "rate=2 の書き出しで音が載っていない")
+    }
+
+    /// トリム × rate（S6 からの繰り越し課題）: 音声トラックの尺が映像と揃うこと。
+    /// リーダーは `timeRange` 末尾を跨ぐデコード単位まで返し、`scaleTimeRange` 下では
+    /// その余剰が合成時間で rate 倍に膨らむ（実測で音声だけ約 0.11s 長かった）。
+    /// `clampAudioSample` が末尾を切ることを、締めた許容値（0.05）で固定する。
+    func test_trimWithRate_audioDurationMatchesVideo() async throws {
+        guard MTLCreateSystemDefaultDevice() != nil else {
+            throw XCTSkip("Metal デバイスが無い環境ではスキップ")
+        }
+        // 素材 4s を rate=2 → 合成 2s。その中央 50%（合成 [0.5,1.5)）を書き出す。
+        let url = try await makeTestVideo(seconds: 4.0, withAudio: true)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let sourceID = UUID()
+        let clips = [TimelineClip(sourceID: sourceID, sourceStart: 0, sourceEnd: 4, rate: 2.0)]
+        let composition = try await TimelineCompositionBuilder()
+            .build(clips: clips, sources: [sourceID: AVURLAsset(url: url)])
+
+        let exporter = try makeExporter()
+        let outURL = try await exporter.export(
+            asset: composition,
+            mapping: TimelineMapping(clips: clips),
+            trimRange: 0.25...0.75
+        ) { _ in }
+        defer { try? FileManager.default.removeItem(at: outURL) }
+
+        let out = AVURLAsset(url: outURL)
+        let videoTracks = try await out.loadTracks(withMediaType: .video)
+        let videoRange = try await XCTUnwrap(videoTracks.first).load(.timeRange)
+        let audioTracks = try await out.loadTracks(withMediaType: .audio)
+        XCTAssertEqual(audioTracks.count, 1, "trim × rate で音声トラックが消えている")
+        let audioRange = try await XCTUnwrap(audioTracks.first).load(.timeRange)
+        let videoSec = CMTimeGetSeconds(videoRange.duration)
+        let audioSec = CMTimeGetSeconds(audioRange.duration)
+        let totalSec = CMTimeGetSeconds(try await out.load(.duration))
+        print("[S7] trim×rate video=\(videoSec)s audio=\(audioSec)s total=\(totalSec)s")
+        XCTAssertEqual(videoSec, 1.0, accuracy: 0.05, "trim × rate の映像尺がずれている")
+        XCTAssertEqual(audioSec, 1.0, accuracy: 0.05,
+                       "trim × rate の音声尺がずれている（末尾余剰が残っている）")
+        XCTAssertEqual(audioSec, videoSec, accuracy: 0.05,
+                       "音声だけ映像より長い（末尾余剰）")
+        let rms = try await audioRMS(url: outURL, window: 0.1...0.9)
+        XCTAssertGreaterThan(rms, 0.1, "trim × rate の書き出しで音が載っていない")
+    }
+
+    /// 48kHz 素材 + 44.1kHz 素材の連結（トリム・rate なし）が完走し、
+    /// **両方の区間**に音が載ること。パススルーだと writer 入力の `sourceFormatHint`
+    /// が 1 フォーマットしか表せず、途中でフォーマットが変わった時点で破綻する。
+    func test_mixedSampleRateClips_exportKeepsAudioInBothClips() async throws {
+        guard MTLCreateSystemDefaultDevice() != nil else {
+            throw XCTSkip("Metal デバイスが無い環境ではスキップ")
+        }
+        let url44 = try await makeTestVideo(seconds: 2.0, withAudio: true)
+        defer { try? FileManager.default.removeItem(at: url44) }
+        let url48 = try await makeTestVideo(seconds: 2.0, withAudio: true,
+                                            audioSampleRate: 48000.0)
+        defer { try? FileManager.default.removeItem(at: url48) }
+
+        let aID = UUID(), bID = UUID()
+        let clips = [
+            TimelineClip(sourceID: aID, sourceStart: 0, sourceEnd: 2),
+            TimelineClip(sourceID: bID, sourceStart: 0, sourceEnd: 2)
+        ]
+        let composition = try await TimelineCompositionBuilder().build(
+            clips: clips,
+            sources: [aID: AVURLAsset(url: url44), bID: AVURLAsset(url: url48)])
+
+        let exporter = try makeExporter()
+        let outURL = try await exporter.export(
+            asset: composition, mapping: TimelineMapping(clips: clips)) { _ in }
+        defer { try? FileManager.default.removeItem(at: outURL) }
+
+        let out = AVURLAsset(url: outURL)
+        let totalSec = CMTimeGetSeconds(try await out.load(.duration))
+        XCTAssertEqual(totalSec, 4.0, accuracy: 0.1,
+                       "混在素材の出力尺が合成尺と一致しない")
+        let audioTracks = try await out.loadTracks(withMediaType: .audio)
+        XCTAssertEqual(audioTracks.count, 1, "混在素材の書き出しで音声トラックが消えている")
+        let firstRMS = try await audioRMS(url: outURL, window: 0.1...1.9)
+        let secondRMS = try await audioRMS(url: outURL, window: 2.1...3.9)
+        XCTAssertGreaterThan(firstRMS, 0.1, "44.1kHz クリップ区間の音が無い")
+        XCTAssertGreaterThan(secondRMS, 0.1, "48kHz クリップ区間の音が無い（フォーマット切替で破綻）")
     }
 
     /// Major-1 回帰: 写真クリップを**中間**に挟んだ「動画A + 写真 + 動画B」で、
@@ -692,7 +1133,7 @@ final class MultiClipExportTests: XCTestCase {
 
         let out = AVURLAsset(url: outURL)
         let duration = try await out.load(.duration)
-        XCTAssertEqual(CMTimeGetSeconds(duration), 5.0, accuracy: 0.2,
+        XCTAssertEqual(CMTimeGetSeconds(duration), 5.0, accuracy: 0.1,
                        "rate 併用の出力尺が合成尺と一致しない")
         let headRMS = try await audioRMS(url: outURL, window: 0.1...0.9)
         let photoRMS = try await audioRMS(url: outURL, window: 1.3...2.7)
