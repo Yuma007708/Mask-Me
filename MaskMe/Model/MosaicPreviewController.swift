@@ -41,6 +41,9 @@ final class MosaicPreviewController {
     /// 落ちないよう、asset と組で保持して `makePlayerItem` が毎回付け直す。
     private var videoComposition: AVVideoComposition?
     private var audioMix: AVAudioMix?
+    /// 末尾まで再生し切ったか。AVPlayer は currentTime == duration のまま play() を呼んでも再生を
+    /// 始めない（`actionAtItemEnd` の既定は `.pause`）ため、立っていたら `play()` が先頭へ戻す。
+    private var hasReachedEnd = false
 
     private(set) var duration: Double = 0
     /// DEBUG 診断用: copyPixelBuffer が nil を返した累計（間引きログの分母）。
@@ -145,12 +148,7 @@ final class MosaicPreviewController {
         let item = makePlayerItem(for: asset)
         player.replaceCurrentItem(with: item)
 
-        cachedBackgroundMask = nil
-        framesUntilResegment = 0
-        landmarkSmoother.reset()
-        lastRenderedClipID = nil
-        wasInTransition = false
-        model?.notifyLiveSeek()
+        resetPlaybackContinuityState()
 
         // seek が新しい尺で計算できるよう、差し替え完了までに尺を取り直す。
         let d = try? await item.asset.load(.duration)
@@ -159,7 +157,16 @@ final class MosaicPreviewController {
 
     // MARK: - 再生制御
 
+    /// 末尾で押されたら先頭から再生し直す（一般的な動画編集アプリと同じ挙動）。末尾判定は
+    /// 浮動小数の比較なので 1 フレーム分の許容を入れ、終了通知を取りこぼしても拾えるようにする。
+    /// 先頭シークは完了を待たずに play() してよい（実測: AVPlayer が要求を直列化して rate=1 になる）。
     func play() {
+        let atEnd = duration > 0 && (player?.currentTime().seconds ?? 0) >= duration - 1.0 / 30.0
+        if hasReachedEnd || atEnd {
+            pendingSeekTask?.cancel()  // 未完了のスクラブ要求が後から末尾へ引き戻すのを防ぐ
+            resetPlaybackContinuityState()  // hasReachedEnd もここで下りる
+            player?.seek(to: .zero, toleranceBefore: .zero, toleranceAfter: .zero)
+        }
         player?.play()
         startDisplayLink()
     }
@@ -177,16 +184,7 @@ final class MosaicPreviewController {
         guard let player, duration > 0 else { return }
         let sec = position * duration
         let time = CMTime(seconds: sec, preferredTimescale: 600)
-        // シーク先では古い背景マスクを使わない
-        cachedBackgroundMask = nil
-        framesUntilResegment = 0
-        // シーク先では前位置の EMA 状態も意味を持たない
-        landmarkSmoother.reset()
-        // クリップ追跡もシークで別時系列になる（次フレームで記録し直す）
-        lastRenderedClipID = nil
-        wasInTransition = false
-        // ライブ検出の追跡状態（ROI track / フロー）もシーク先では別時系列になる
-        model?.notifyLiveSeek()
+        resetPlaybackContinuityState()
         await player.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero)
         renderCurrentFrame()
     }
@@ -266,7 +264,21 @@ final class MosaicPreviewController {
 
     @objc private func playerDidFinish() {
         model?.isPlaying = false
+        hasReachedEnd = true
         stopDisplayLink()
+    }
+
+    /// 再生位置が不連続に変わるとき（シーク・composition 差し替え・末尾からの再生し直し）に捨てる
+    /// 状態をまとめて落とす。EMA・背景マスク・クリップ追跡・ライブ追跡（ROI track / フロー）は
+    /// 直前フレームの続きが前提で、「末尾に居る」主張の `hasReachedEnd` も同時に無効になる。
+    private func resetPlaybackContinuityState() {
+        cachedBackgroundMask = nil
+        framesUntilResegment = 0
+        landmarkSmoother.reset()
+        lastRenderedClipID = nil
+        wasInTransition = false
+        hasReachedEnd = false
+        model?.notifyLiveSeek()
     }
 
     // MARK: - レンダリング
@@ -310,8 +322,12 @@ final class MosaicPreviewController {
 
         let bufferWidth = CVPixelBufferGetWidth(pixelBuffer)
 
-        // 720px 幅に縮小してから Metal 処理（GPU→CPU 転送量を削減）
-        let maxWidth = 720
+        // 720px 幅に縮小してから Metal 処理（GPU→CPU 転送量を削減）。
+        // この幅は粗さスライダーの基準幅（`MosaicRenderer.referenceFrameWidth`）と
+        // **同じ値でなければならない**: 背景モザイク・手動矩形のブロックは
+        // 基準幅に対する相対値として解決されるため（`MosaicRenderer.effectiveBlock`）、
+        // ここだけ別の値にするとプレビューと書き出しで粗さが食い違う。
+        let maxWidth = Int(MosaicRenderer.referenceFrameWidth)
         let scale = min(Double(maxWidth) / Double(bufferWidth), 1.0)
 
         let inputTex: MTLTexture?

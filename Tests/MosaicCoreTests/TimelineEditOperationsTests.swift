@@ -189,6 +189,86 @@ final class TimelineEditOperationsTests: XCTestCase {
         XCTAssertEqual(TimelineEditOperations.setRate(clips: clips, clipID: UUID(), rate: 2.0), clips)
     }
 
+    // MARK: - setVolume
+
+    func test_setVolumeUpdatesVolume() {
+        let clips = makeClips()
+        let result = TimelineEditOperations.setVolume(clips: clips, clipID: clips[0].id, volume: 0.25)
+        XCTAssertEqual(result[0].originalAudioVolume, 0.25, accuracy: 1e-6)
+        // 素材範囲・倍率・合成尺と他クリップは保存される。
+        XCTAssertEqual(result[0].id, clips[0].id)
+        XCTAssertEqual(result[0].duration, clips[0].duration, accuracy: 1e-9)
+        XCTAssertEqual(result[0].rate, clips[0].rate, accuracy: 1e-9)
+        XCTAssertEqual(result[1], clips[1])
+    }
+
+    /// 範囲外の音量は 0〜1 にクランプされること。未知の id は変更なし（setRate と同じ契約）。
+    func test_setVolumeClampsAndRejectsUnknownID() {
+        let clips = makeClips()
+        XCTAssertEqual(TimelineEditOperations.setVolume(clips: clips, clipID: clips[0].id,
+                                                        volume: 5)[0].originalAudioVolume, 1.0)
+        XCTAssertEqual(TimelineEditOperations.setVolume(clips: clips, clipID: clips[0].id,
+                                                        volume: -1)[0].originalAudioVolume, 0.0)
+        // 境界ちょうどはそのまま通る。
+        XCTAssertEqual(TimelineEditOperations.setVolume(clips: clips, clipID: clips[0].id,
+                                                        volume: 0)[0].originalAudioVolume, 0.0)
+        XCTAssertEqual(TimelineEditOperations.setVolume(clips: clips, clipID: clips[0].id,
+                                                        volume: 1)[0].originalAudioVolume, 1.0)
+        XCTAssertEqual(TimelineEditOperations.setVolume(clips: clips, clipID: UUID(), volume: 0.5), clips)
+    }
+
+    // MARK: - originalAudioVolume のクランプ（NaN・直接代入・デコード）
+
+    /// NaN は min/max を素通りしてミキサーのパラメータを壊すため、等倍（1.0）に落とすこと。
+    func test_volumeClampRejectsNaNAndInfinity() {
+        XCTAssertEqual(TimelineClip.clampedVolume(.nan), 1.0)
+        XCTAssertEqual(TimelineClip.clampedVolume(.infinity), 1.0)
+        XCTAssertEqual(TimelineClip.clampedVolume(-.infinity), 0.0)
+        let clip = TimelineClip(sourceID: sourceA, sourceStart: 0, sourceEnd: 3,
+                                originalAudioVolume: .nan)
+        XCTAssertEqual(clip.originalAudioVolume, 1.0)
+        let result = TimelineEditOperations.setVolume(clips: [clip], clipID: clip.id, volume: .nan)
+        XCTAssertEqual(result[0].originalAudioVolume, 1.0)
+    }
+
+    /// init は didSet を経由しないため、init 時点でクランプされていること。
+    func test_volumeIsClampedInInit() {
+        XCTAssertEqual(TimelineClip(sourceID: sourceA, sourceStart: 0, sourceEnd: 3,
+                                    originalAudioVolume: 3.0).originalAudioVolume, 1.0)
+        XCTAssertEqual(TimelineClip(sourceID: sourceA, sourceStart: 0, sourceEnd: 3,
+                                    originalAudioVolume: -2.0).originalAudioVolume, 0.0)
+    }
+
+    /// originalAudioVolume は public var のため、直接代入でも didSet でクランプされること。
+    func test_volumeDirectAssignmentIsClamped() {
+        var clip = TimelineClip(sourceID: sourceA, sourceStart: 0, sourceEnd: 3)
+        clip.originalAudioVolume = 2.5
+        XCTAssertEqual(clip.originalAudioVolume, 1.0)
+        clip.originalAudioVolume = -0.5
+        XCTAssertEqual(clip.originalAudioVolume, 0.0)
+        clip.originalAudioVolume = 0.5
+        XCTAssertEqual(clip.originalAudioVolume, 0.5)
+        clip.originalAudioVolume = .nan
+        XCTAssertEqual(clip.originalAudioVolume, 1.0)
+    }
+
+    /// init(from:) も didSet を経由しないため、壊れた下書きの音量がクランプされること。
+    func test_decodeClampsOutOfRangeVolume() throws {
+        let json = """
+        {"id":"\(UUID().uuidString)","sourceID":"\(sourceA.uuidString)",
+         "sourceStart":0,"sourceEnd":1,"originalAudioVolume":42.0,"rate":1.0}
+        """
+        let decoded = try JSONDecoder().decode(TimelineClip.self, from: Data(json.utf8))
+        XCTAssertEqual(decoded.originalAudioVolume, 1.0)
+
+        let negative = """
+        {"id":"\(UUID().uuidString)","sourceID":"\(sourceA.uuidString)",
+         "sourceStart":0,"sourceEnd":1,"originalAudioVolume":-3.0,"rate":1.0}
+        """
+        XCTAssertEqual(try JSONDecoder().decode(TimelineClip.self, from: Data(negative.utf8))
+            .originalAudioVolume, 0.0)
+    }
+
     // MARK: - rate のクランプ（NaN・直接代入）
 
     /// NaN は min/max を素通りして mapping 全体を無効化するため、等速（1.0）に落とすこと。

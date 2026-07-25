@@ -99,4 +99,16 @@ public enum TimelineEditOperations {
         result[index].rate = TimelineClip.clampedRate(rate)
         return result
     }
+
+    /// 指定したクリップの元音声の音量を設定する。
+    ///
+    /// 音量は `TimelineClip.volumeRange`（0〜1）にクランプされる。
+    /// 成功時、素材使用範囲・倍率と他クリップは保存される（合成尺は変わらない）。
+    /// `clipID` が見つからない場合は元の配列を返す（`setRate` と同じ契約）。
+    public static func setVolume(clips: [TimelineClip], clipID: UUID, volume: Float) -> [TimelineClip] {
+        guard let index = clips.firstIndex(where: { $0.id == clipID }) else { return clips }
+        var result = clips
+        result[index].originalAudioVolume = TimelineClip.clampedVolume(volume)
+        return result
+    }
 }

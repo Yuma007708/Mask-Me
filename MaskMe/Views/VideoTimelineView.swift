@@ -24,6 +24,8 @@ import SwiftUI
 /// **進行中のジェスチャ下書きはこの View が持たない**。各トラックの `@GestureState`
 /// （キャンセルで自動的に初期値へ戻る）に閉じ込めてあるため、横スクロールでの中断など
 /// 回収イベントが飛んでこない経路でも取り残しが起きない（`TimelineInteraction` の doc）。
+/// トリム中のリップルだけは兄弟トラック（クリップ帯 → 適用区間）へ渡す必要があるので、
+/// **表示専用の派生値**を `TimelineTrimPreviewRelay` で中継する（下書きの所有者は帯のまま）。
 struct VideoTimelineView: View {
     @ObservedObject var model: MosaicEditorModel
 
@@ -33,8 +35,24 @@ struct VideoTimelineView: View {
     @State private var selectedClipID: UUID?
     @State private var selectedRangeID: UUID?
     @State private var speedSheetClipID: UUID?
+    @State private var volumeSheetClipID: UUID?
     @State private var transitionSheetClipID: UUID?
-    @State private var showPhotoPicker = false
+    @State private var showMediaPicker = false
+    /// スクロールの見え方（トラック内 x 座標系）。`TimelineScrollContainer` が更新し、
+    /// サムネイル要求の可視範囲を決めるのに使う。
+    @State private var viewport = TimelineViewport(scrollOffset: 0, visibleWidth: 0, contentWidth: 0)
+    /// 並べ替えドラッグ ⇔ スクロール容器の受け渡し口（`TimelineAutoScrollState` の doc 参照）。
+    @StateObject private var autoScroll = TimelineAutoScrollState()
+    /// デバウンス中のサムネイル再要求。
+    @State private var thumbnailRefreshTask: Task<Void, Never>?
+    /// この View が画面に載っているか（`setSuspended` の入力その 1）。
+    @State private var isOnScreen = false
+    /// クリップ帯のトリム下書き（表示専用）を適用区間トラックへ渡す中継。
+    ///
+    /// **`@StateObject` にしないこと。** 購読するとドラッグ中 60Hz でこの View の body が
+    /// 再評価され、子のジェスチャが作り直される。`@State` に参照型を入れて**持つだけ**にし、
+    /// 購読は追随が要る `TimelineApplyTrackView` にだけ持たせる（`TimelineTrimPreviewRelay` の doc）。
+    @State private var trimPreviewRelay = TimelineTrimPreviewRelay()
 
     /// 1 回の要求で投入するサムネイル枚数の上限（メモリと生成時間の歯止め）。
     ///
@@ -44,6 +62,9 @@ struct VideoTimelineView: View {
     private static let thumbnailRequestLimit = 120
     /// 「モザイク区間」ボタンで足す区間の既定長（秒）。
     private static let defaultApplyRangeLength = 2.0
+    /// サムネイル再要求のデバウンス（ナノ秒）。スクロール・ピンチ中は毎フレーム
+    /// トリガが飛ぶので、指が止まってからまとめて 1 回だけ走査する。
+    private static let thumbnailRefreshDelay: UInt64 = 180_000_000
 
     // MARK: - 導出値
 
@@ -52,8 +73,11 @@ struct VideoTimelineView: View {
     private var contentWidth: CGFloat { CGFloat(max(geometry.width(forDuration: totalDuration), 1)) }
     private var clipLayouts: [TimelineClipLayout] { TimelineBandLayout.clipLayouts(mapping: model.mapping) }
     private var jointLayouts: [TimelineJointLayout] { TimelineBandLayout.jointLayouts(mapping: model.mapping) }
+    /// 写真クリップのセグメントは端ハンドルを出さない（`photoSourceIDs` を渡すことで
+    /// `isEdgeAdjustable == false` になる。端ドラッグが構造的に no-op なため）。
     private var applySpans: [TimelineApplySpan] {
-        TimelineBandLayout.applySpans(ranges: model.timeline.applyRanges, mapping: model.mapping)
+        TimelineBandLayout.applySpans(ranges: model.timeline.applyRanges, mapping: model.mapping,
+                                      photoSourceIDs: model.timeline.photoSourceIDs)
     }
     /// 選択中クリップ（消えたクリップを指したままにしないよう毎回引き直す）。
     private var selectedClip: TimelineClip? {
@@ -63,44 +87,63 @@ struct VideoTimelineView: View {
 
     var body: some View {
         VStack(spacing: 6) {
-            TimelineToolbarView(items: toolItems)
+            TimelineToolbarView(items: toolItems, pinnedItems: zoomItems)
             tracks
         }
         .padding(.vertical, 6)
         .onAppear {
             bindPreviewBusy()
-            thumbnails.setSuspended(false)
-            refreshThumbnailRequests()
+            isOnScreen = true
+            updateSuspension(phase: scenePhase)
         }
         .onChange(of: model.isPlaying) { playing in
             thumbnails.setPlaying(playing)
-            if !playing { refreshThumbnailRequests() }
+            if !playing { scheduleThumbnailRefresh() }
         }
         .onChange(of: model.timeline) { _ in
             pruneSelection()
-            refreshThumbnailRequests()
+            scheduleThumbnailRefresh()
         }
-        .onChange(of: geometry) { _ in refreshThumbnailRequests() }
         .onChange(of: model.sourceVideoURL) { _ in
             // 素材が入れ替わったらキャッシュは無効（別動画のコマを描かない）。
             thumbnails.reset()
             selectedClipID = nil
             selectedRangeID = nil
-            refreshThumbnailRequests()
+            scheduleThumbnailRefresh()
         }
-        .onChange(of: scenePhase) { phase in
-            // バックグラウンドでは進行中バッチのデコードを止める（`Task` は self が
-            // 消えても完走するので、明示的に打ち切らないと裏で走り続ける）。
-            thumbnails.setSuspended(phase != .active)
-            if phase == .active { refreshThumbnailRequests() }
-        }
+        // 抑止の入力源は 3 つ（画面表示・scenePhase・シート）。**必ず
+        // `updateSuspension` へ集約する**（個別に `setSuspended` を叩くと、
+        // シートを閉じた瞬間に background 中の抑止まで解除されるなど互いを潰し合う）。
+        .onChange(of: scenePhase) { updateSuspension(phase: $0) }
+        .onChange(of: isSheetPresented) { _ in updateSuspension(phase: scenePhase) }
         .onDisappear {
-            thumbnails.setSuspended(true)
+            isOnScreen = false
+            thumbnailRefreshTask?.cancel()
+            updateSuspension(phase: scenePhase)
             model.onPreviewDecodeBusyChanged = nil
         }
-        .sheet(isPresented: showSpeedSheet) { speedSheet }
-        .sheet(isPresented: showTransitionSheet) { transitionSheet }
-        .sheet(isPresented: $showPhotoPicker) { photoPicker }
+        // シート本体と提示条件は `TimelineEditSheetsModifier`（TimelineEditSheets.swift）へ
+        // 寄せてある（このファイルが file_length の閾値に張り付いているため）。
+        .modifier(TimelineEditSheetsModifier(
+            model: model, speedClipID: $speedSheetClipID, volumeClipID: $volumeSheetClipID,
+            transitionClipID: $transitionSheetClipID, showMediaPicker: $showMediaPicker))
+    }
+
+    /// サムネイル生成の抑止を 1 箇所で決める。
+    ///
+    /// SwiftUI の `.sheet` は提示元の `onDisappear` を呼ばないため、シート提示は
+    /// 独立した入力として見る必要がある（`TimelineThumbnailStore.setSuspended` の doc が
+    /// 「シートで隠れるときも止める」を要求している）。解除側では再要求を積み直す。
+    private func updateSuspension(phase: ScenePhase) {
+        let suspended = !isOnScreen || phase != .active || isSheetPresented
+        thumbnails.setSuspended(suspended)
+        if !suspended { scheduleThumbnailRefresh() }
+    }
+
+    /// いずれかのシートが出ているか（抑止の入力その 3）。
+    private var isSheetPresented: Bool {
+        speedSheetClipID != nil || volumeSheetClipID != nil
+            || transitionSheetClipID != nil || showMediaPicker
     }
 
     /// プレビューのデコード占有をサムネイル生成の抑止条件へ繋ぐ。
@@ -115,71 +158,62 @@ struct VideoTimelineView: View {
 
     // MARK: - トラック
 
+    /// 横スクロール容器。ビューポート観測・ピンチズーム・アンカー保持・プレイヘッド追従は
+    /// すべて `TimelineScrollContainer` が持つ（この View は中身を組むだけ）。
     private var tracks: some View {
-        ScrollViewReader { proxy in
-            ScrollView(.horizontal, showsIndicators: false) {
-                ZStack(alignment: .topLeading) {
-                    VStack(alignment: .leading, spacing: TimelineMetrics.trackSpacing) {
-                        TimelineRulerTrackView(geometry: geometry, totalDuration: totalDuration,
-                                               contentWidth: contentWidth, onScrub: scrub,
-                                               onScrubbingChanged: { thumbnails.setScrubbing($0) })
-                        clipBand
-                        TimelineApplyTrackView(
-                            geometry: geometry, spans: applySpans, totalDuration: totalDuration,
-                            selectedRangeID: $selectedRangeID, onCommit: commit)
-                    }
-                    playhead
+        TimelineScrollContainer(
+            geometry: $geometry, viewport: $viewport,
+            contentWidth: contentWidth, totalDuration: totalDuration,
+            playheadTime: playheadTime, isFollowingPlayhead: model.isPlaying,
+            autoScroll: autoScroll,
+            onRefreshNeeded: scheduleThumbnailRefresh
+        ) {
+            VStack(alignment: .leading, spacing: TimelineMetrics.trackSpacing) {
+                TimelineRulerTrackView(geometry: geometry, totalDuration: totalDuration,
+                                       contentWidth: contentWidth, onScrub: scrub,
+                                       onScrubbingChanged: { thumbnails.setScrubbing($0) })
+                // 継ぎ目レーンとクリップ帯は 1 段として積む（`TimelineMetrics.stackHeight` と対応）。
+                VStack(alignment: .leading, spacing: 0) {
+                    TimelineJointLaneView(geometry: geometry, joints: jointLayouts,
+                                          contentWidth: contentWidth,
+                                          onJointTap: { transitionSheetClipID = $0 })
+                    clipBand
                 }
-                .frame(width: contentWidth, height: TimelineMetrics.stackHeight, alignment: .topLeading)
-                .padding(.horizontal, 16)
+                TimelineApplyTrackView(
+                    geometry: geometry, spans: applySpans, totalDuration: totalDuration,
+                    layouts: clipLayouts, playheadTime: playheadTime,
+                    trimPreviewRelay: trimPreviewRelay,
+                    selectedRangeID: rangeSelection, onCommit: commit)
             }
-            .onChange(of: playheadTickIndex) { index in
-                // 再生中だけプレイヘッドを追う（一時停止中に自動スクロールすると
-                // ユーザーのスクロール操作と喧嘩する）。
-                guard model.isPlaying else { return }
-                withAnimation(.linear(duration: 0.15)) {
-                    proxy.scrollTo(TimelineTickID(index: index), anchor: .center)
-                }
-            }
+            TimelinePlayheadView(geometry: geometry, time: playheadTime)
         }
-        .frame(height: TimelineMetrics.stackHeight)
     }
 
     @ViewBuilder
     private var clipBand: some View {
         if clipLayouts.isEmpty {
-            RoundedRectangle(cornerRadius: TimelineMetrics.cornerRadius)
-                .fill(Color.black.opacity(0.4))
-                .frame(width: contentWidth, height: TimelineMetrics.clipHeight)
-                .overlay(
-                    Text(model.isLoading ? "読み込み中…" : "クリップがありません")
-                        .font(.caption2)
-                        .foregroundStyle(.white.opacity(0.6))
-                )
+            TimelineEmptyBandView(contentWidth: contentWidth,
+                                  text: model.isLoading ? "読み込み中…" : "クリップがありません")
         } else {
             TimelineClipBandView(
                 model: model, thumbnails: thumbnails, geometry: geometry,
-                layouts: clipLayouts, joints: jointLayouts,
-                selectedClipID: $selectedClipID,
-                onCommit: commit, onJointTap: { transitionSheetClipID = $0 })
+                layouts: clipLayouts, applySpans: applySpans, playheadTime: playheadTime,
+                totalDuration: totalDuration, autoScroll: autoScroll,
+                trimPreviewRelay: trimPreviewRelay,
+                selectedClipID: clipSelection, onCommit: commit)
         }
     }
 
-    /// プレイヘッドが乗っている目盛りの index。**描く側と同じ実効間隔**を使う
-    /// （違う間隔だと `scrollTo` の対象 id が存在せず追従が黙って止まる）。
-    private var playheadTickIndex: Int {
-        let interval = geometry.effectiveTickInterval(totalDuration: totalDuration)
-        guard interval > 0 else { return 0 }
-        return Int((playheadTime / interval).rounded(.down))
+    /// クリップ選択と区間選択は**相互排他**にする（どちらが編集対象かを一意にするため）。
+    /// `@State` は 2 本のまま残し、子へ渡す `Binding` をここでラップする（子は無改造）。
+    private var clipSelection: Binding<UUID?> {
+        Binding(get: { selectedClipID },
+                set: { selectedClipID = $0; if $0 != nil { selectedRangeID = nil } })
     }
 
-    private var playhead: some View {
-        Rectangle()
-            .fill(Color.white)
-            .frame(width: 2, height: TimelineMetrics.stackHeight)
-            .shadow(color: .black.opacity(0.6), radius: 2)
-            .offset(x: geometry.x(forTime: playheadTime) - 1)
-            .allowsHitTesting(false)
+    private var rangeSelection: Binding<UUID?> {
+        Binding(get: { selectedRangeID },
+                set: { selectedRangeID = $0; if $0 != nil { selectedClipID = nil } })
     }
 
     // MARK: - ツールバー
@@ -198,9 +232,18 @@ struct VideoTimelineView: View {
             TimelineToolItem(title: "速度", systemImage: "speedometer", isEnabled: selectedClip != nil) {
                 speedSheetClipID = selectedClipID
             },
-            TimelineToolItem(title: "写真追加", systemImage: "photo.on.rectangle",
+            TimelineToolItem(title: "音量", systemImage: "speaker.wave.2", isEnabled: canSetVolume) {
+                volumeSheetClipID = selectedClipID
+            },
+            // 長押し並べ替えの代替。画面外のクリップとも入れ替えられる
+            // （ドラッグは同時に見えている範囲＋自動スクロールの届く範囲に限られる）。
+            TimelineToolItem(title: "前へ", systemImage: "arrow.left",
+                             isEnabled: canMoveClip(by: -1)) { moveSelectedClip(by: -1) },
+            TimelineToolItem(title: "後へ", systemImage: "arrow.right",
+                             isEnabled: canMoveClip(by: 1)) { moveSelectedClip(by: 1) },
+            TimelineToolItem(title: "素材追加", systemImage: "photo.on.rectangle",
                              isEnabled: !model.timeline.clips.isEmpty) {
-                showPhotoPicker = true
+                showMediaPicker = true
             },
             TimelineToolItem(title: "モザイク区間", systemImage: "plus.rectangle.on.rectangle",
                              isEnabled: canAddApplyRange, separatorBefore: true) {
@@ -211,9 +254,19 @@ struct VideoTimelineView: View {
                 guard let id = selectedRangeID else { return }
                 selectedRangeID = nil
                 model.removeMosaicApplyRange(id: id)
-            },
+            }
+        ]
+    }
+
+    /// ツールバー右端に固定する項目（横スクロールしない）。
+    ///
+    /// 編集項目と同じ横スクロールに並べると、概算 434pt に対し iPhone 16 の 393pt では
+    /// **初期表示で画面外**に出る。ピンチズームを入れた後もボタンは残す
+    /// （アクセシビリティと、段の再現性 = 同じ倍率へ確実に戻せること）。
+    private var zoomItems: [TimelineToolItem] {
+        [
             TimelineToolItem(title: "縮小", systemImage: "minus.magnifyingglass",
-                             isEnabled: geometry.zoomedOut() != geometry, separatorBefore: true) {
+                             isEnabled: geometry.zoomedOut() != geometry) {
                 geometry = geometry.zoomedOut()
             },
             TimelineToolItem(title: "拡大", systemImage: "plus.magnifyingglass",
@@ -234,65 +287,25 @@ struct VideoTimelineView: View {
 
     private var canRemoveClip: Bool { selectedClip != nil && model.timeline.clips.count > 1 }
 
+    /// 音量の活性判定。**写真クリップは除く**（判定の理由は
+    /// `TimelineVolumeAvailability` の doc 参照。純関数側に置いてテストで固定してある）。
+    private var canSetVolume: Bool {
+        TimelineVolumeAvailability.isEnabled(timeline: model.timeline, clipID: selectedClipID)
+    }
+
     private var canAddApplyRange: Bool {
         !model.timeline.clips.isEmpty && totalDuration > 0 && playheadTime < totalDuration
-    }
-
-    // MARK: - シート
-
-    private var showSpeedSheet: Binding<Bool> {
-        Binding(get: { speedSheetClipID != nil }, set: { if !$0 { speedSheetClipID = nil } })
-    }
-
-    private var showTransitionSheet: Binding<Bool> {
-        Binding(get: { transitionSheetClipID != nil }, set: { if !$0 { transitionSheetClipID = nil } })
-    }
-
-    @ViewBuilder
-    private var speedSheet: some View {
-        if let id = speedSheetClipID, let clip = model.timeline.clips.first(where: { $0.id == id }) {
-            // 上限はクリップ尺から決まる（合成尺が最小尺を割る倍率を選べないようにする。
-            // `TimelineRateScale.maximumRate(forClip:)` の doc 参照）。
-            TimelineSpeedSheet(initialRate: clip.rate,
-                               maximumRate: TimelineRateScale.maximumRate(forClip: clip)) { rate in
-                model.setClipRate(id: id, rate: rate)
-            }
-        }
-    }
-
-    @ViewBuilder
-    private var transitionSheet: some View {
-        if let id = transitionSheetClipID,
-           let maximum = model.timeline.maximumTransitionDuration(afterClipID: id) {
-            TimelineTransitionSheet(
-                current: model.timeline.transitions[id],
-                maximumDuration: maximum,
-                onApply: { kind, duration in
-                    model.setTransition(afterClipID: id, kind: kind, duration: duration)
-                },
-                onRemove: { model.removeTransition(afterClipID: id) })
-        } else {
-            Text("このつなぎ目にはトランジションを付けられません（クリップが短すぎます）")
-                .font(.footnote)
-                .multilineTextAlignment(.center)
-                .padding(24)
-                .presentationDetents([.height(140)])
-        }
-    }
-
-    private var photoPicker: some View {
-        MediaPicker(filter: .images) { picked in
-            showPhotoPicker = false
-            guard case let .image(image) = picked else { return }
-            Task { await model.appendPhotoClip(image: image) }
-        }
-        .ignoresSafeArea()
     }
 
     // MARK: - 操作の確定
 
     /// ジェスチャ確定（`onEnded`）からのモデル編集。**モデルを触るのはここだけ**。
+    ///
+    /// 編集が no-op（クランプで元の値に戻る等）だと `model.timeline` が変わらず
+    /// `onChange(of: model.timeline)` が飛ばないので、ここでも再要求を積む
+    /// （トリム中は帯の幅が動いてサムネイル枠がずれているため、積み直さないと灰色が残る）。
     private func commit(_ committed: TimelineInteraction) {
+        defer { scheduleThumbnailRefresh() }
         switch committed {
         case let .trim(clipID, edge, delta):
             commitTrim(clipID: clipID, edge: edge, delta: delta)
@@ -330,9 +343,10 @@ struct VideoTimelineView: View {
     }
 
     /// 編集後に区間を引き直す（マージで id が変わり得るため id を保持し続けない）。
+    /// 相互排他を効かせるため `rangeSelection` 経由で書く（クリップ選択が残らない）。
     private func reselectApplyRange(near time: Double) {
         let spans = TimelineBandLayout.applySpans(ranges: model.timeline.applyRanges, mapping: model.mapping)
-        selectedRangeID = spans.first { time >= $0.start && time < $0.end }?.rangeID
+        rangeSelection.wrappedValue = spans.first { time >= $0.start && time < $0.end }?.rangeID
     }
 
     private func scrub(toCompositionTime seconds: Double) {
@@ -352,6 +366,10 @@ struct VideoTimelineView: View {
         if let speedSheetClipID, !model.timeline.clips.contains(where: { $0.id == speedSheetClipID }) {
             self.speedSheetClipID = nil
         }
+        // 音量シートも同様（消えたクリップを指したまま空のシートを開きっぱなしにしない）。
+        if let volumeSheetClipID, !model.timeline.clips.contains(where: { $0.id == volumeSheetClipID }) {
+            self.volumeSheetClipID = nil
+        }
         // 継ぎ目シートも同じ扱い（undo でクリップが消えた状態のシートを開いたままにしない）。
         if let transitionSheetClipID,
            !model.timeline.clips.contains(where: { $0.id == transitionSheetClipID }) {
@@ -359,43 +377,102 @@ struct VideoTimelineView: View {
         }
     }
 
-    // MARK: - サムネイル要求
+}
 
-    /// 表示中の帯を埋めるサムネイルをまとめて要求する。
+// MARK: - サムネイル要求
+
+private extension VideoTimelineView {
+    /// サムネイル再要求をデバウンスして積む。**再要求のトリガはすべてここを通す。**
     ///
-    /// **予算（`thumbnailRequestLimit`）は未生成のジョブにだけ使い、プレイヘッドに
-    /// 近い枠を優先する。** キャッシュ済みも数えると先頭のクリップが予算を食い切り、
-    /// 3 本目以降のクリップが何度 refresh しても 1 件も要求されない（実測: pps=160 /
-    /// 20 秒クリップで 120 枠に収まるのは 2 クリップ）。
+    /// 抑止条件（`TimelineThumbnailStore.canGenerate`）は store 側だけが握っており、
+    /// `request` は抑止中でもキューに積むだけで生成を始めない。したがってトリガを増やしても
+    /// HW デコーダの制約（同時 1 バッチ・再生中は生成しない）は壊れない。
+    /// 実コストは `refreshThumbnailRequests` の走査 CPU だけなので、そこをデバウンスと
+    /// 可視範囲限定で抑える。
+    private func scheduleThumbnailRefresh() {
+        thumbnailRefreshTask?.cancel()
+        thumbnailRefreshTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: Self.thumbnailRefreshDelay)
+            guard !Task.isCancelled else { return }
+            refreshThumbnailRequests()
+        }
+    }
+
+    /// **可視範囲 ± 1 画面**の帯を埋めるサムネイルをまとめて要求する。
+    ///
+    /// 全長を走査していた版は、長尺 × 高倍率で毎回数千枠を回したうえに
+    /// 予算（`thumbnailRequestLimit`）を画面外の枠に使ってしまっていた。
+    /// 枠の列挙と優先度（可視中心からの距離）は `TimelineThumbnailPlanner.plan`
+    /// （描画側と同じ `TimelineThumbnailLayout.slots` を通す純関数）に任せる。
+    ///
+    /// **`needsGeneration` で絞ってから `thumbnailRequestLimit` を掛ける順序を保つこと。**
+    /// 逆にするとキャッシュ済みも予算を数え、常に同じ順の先頭 2 クリップが予算を食い切って
+    /// 3 本目以降が何度 refresh しても 1 件も要求されない（実測: pps=160 / 20 秒クリップ）。
     /// 抑止中（再生・プレビューのデコード中）でもキューには積む（store 側が判断する）。
     /// body からは呼ばない（描画の副作用にしない）。
     private func refreshThumbnailRequests() {
-        var candidates: [(distance: Double, request: TimelineThumbnailStore.Request)] = []
-        for layout in clipLayouts {
-            guard let clip = model.timeline.clips.first(where: { $0.id == layout.clipID }),
-                  let url = model.sourceURL(forSourceID: clip.sourceID) else { continue }
-            // 描画側（TimelineClipBandView）と同じ枠配置を使う（別々に計算すると
-            // 要求したキーと描画で引くキーがずれて帯が埋まらない）。
-            let slots = TimelineThumbnailLayout.slots(
-                clip: clip, spanStart: layout.spanStart,
-                band: CompositionInterval(start: layout.bandStart, end: layout.bandEnd),
-                geometry: geometry,
-                preferredSlotWidth: Double(TimelineMetrics.thumbnailSlotWidth),
-                sourceDuration: model.sourceDuration(forClipID: layout.clipID))
-            let slotDuration = geometry.duration(forWidth: slots.slotWidth)
-            for (index, time) in slots.sourceTimes.enumerated() {
-                let sourceTime = model.timeline.clampedSourceTime(time, sourceID: clip.sourceID)
-                guard thumbnails.needsGeneration(sourceID: clip.sourceID, sourceTime: sourceTime)
-                else { continue }
-                let slotCenter = layout.bandStart + (Double(index) + 0.5) * slotDuration
-                candidates.append((abs(slotCenter - playheadTime),
-                                   TimelineThumbnailStore.Request(sourceID: clip.sourceID, url: url,
-                                                                  sourceTime: sourceTime)))
-            }
+        let clips = model.timeline.clips
+        let planned = TimelineThumbnailPlanner.plan(
+            layouts: clipLayouts, clips: clips, geometry: geometry,
+            visibleRange: TimelineScrollMath.visibleTimeRange(viewport: requestViewport,
+                                                              geometry: geometry),
+            marginFactor: 1.0,
+            preferredSlotWidth: Double(TimelineMetrics.thumbnailSlotWidth),
+            sourceDurations: sourceDurations(clips: clips))
+        var jobs: [TimelineThumbnailStore.Request] = []
+        for slot in planned {
+            guard let url = model.sourceURL(forSourceID: slot.sourceID) else { continue }
+            // planner は素材実尺クランプを掛けない（キャッシュキーを揃えるのは呼び出し側）。
+            let sourceTime = model.timeline.clampedSourceTime(slot.sourceTime, sourceID: slot.sourceID)
+            guard thumbnails.needsGeneration(sourceID: slot.sourceID, sourceTime: sourceTime) else { continue }
+            jobs.append(TimelineThumbnailStore.Request(sourceID: slot.sourceID, url: url,
+                                                       sourceTime: sourceTime))
+            if jobs.count >= Self.thumbnailRequestLimit { break }
         }
-        let ordered = candidates.sorted { $0.distance < $1.distance }
-            .prefix(Self.thumbnailRequestLimit)
-            .map(\.request)
-        thumbnails.request(Array(ordered))
+        guard !jobs.isEmpty else { return }
+        thumbnails.request(jobs)
+    }
+
+    /// 要求に使うビューポート。初回レイアウト前（幅 0）は先頭 1 画面ぶんで代用する
+    /// （幅 0 のままだと可視レンジが空になり、1 枚も要求されないまま止まる）。
+    private var requestViewport: TimelineViewport {
+        guard viewport.visibleWidth <= 0 else { return viewport }
+        return TimelineViewport(scrollOffset: 0,
+                                visibleWidth: min(Double(contentWidth), 400),
+                                contentWidth: Double(contentWidth))
+    }
+
+    /// 素材実尺（sourceID → 秒）。外向きトリムのプレビューで枠が現行 `sourceEnd` の
+    /// 1 コマに張り付かないよう planner へ渡す。
+    private func sourceDurations(clips: [TimelineClip]) -> [UUID: Double] {
+        var durations: [UUID: Double] = [:]
+        for clip in clips where durations[clip.sourceID] == nil {
+            guard let seconds = model.sourceDuration(forClipID: clip.id) else { continue }
+            durations[clip.sourceID] = seconds
+        }
+        return durations
+    }
+}
+
+// MARK: - クリップの並べ替え（ボタン操作）
+
+/// 長押しドラッグの代替経路。ドラッグは「同時に見えている範囲 + 自動スクロールが
+/// 届く範囲」でしか届かないうえ、`scrollTo` がドラッグ中の `UIScrollView` に効くかは
+/// 環境依存なので、**確実に動く手段**として 1 つずつ動かすボタンを併置してある。
+private extension VideoTimelineView {
+    func canMoveClip(by offset: Int) -> Bool {
+        guard let index = selectedClipIndex else { return false }
+        let target = index + offset
+        return target >= 0 && target < model.timeline.clips.count
+    }
+
+    func moveSelectedClip(by offset: Int) {
+        guard let id = selectedClipID, let index = selectedClipIndex else { return }
+        model.moveClip(id: id, toIndex: index + offset)
+    }
+
+    var selectedClipIndex: Int? {
+        guard let selectedClipID else { return nil }
+        return model.timeline.clips.firstIndex { $0.id == selectedClipID }
     }
 }

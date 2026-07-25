@@ -16,8 +16,15 @@ public struct TimelineClip: Identifiable, Hashable, Sendable, Codable {
     public var sourceStart: Double
     /// 素材内での使用終了位置（秒）。
     public var sourceEnd: Double
-    /// 元音声の音量（0...1）。フェーズ4で UI から調整可能にする。
-    public var originalAudioVolume: Float
+    /// 元音声の音量の許容範囲（無音〜等倍）。
+    public static let volumeRange: ClosedRange<Float> = 0...1
+
+    /// 元音声の音量（0...1）。
+    /// init・デコード・直接代入のどれでも `volumeRange` にクランプされる。
+    public var originalAudioVolume: Float {
+        // didSet 内の再代入はオブザーバを再帰呼び出ししない（rate と同じ手口）。
+        didSet { originalAudioVolume = Self.clampedVolume(originalAudioVolume) }
+    }
     /// 再生倍率。1.0 が等速、2.0 は倍速（合成尺が半分になる）。
     /// init・直接代入のどちらでも `rateRange` にクランプされる。
     public var rate: Double {
@@ -35,7 +42,8 @@ public struct TimelineClip: Identifiable, Hashable, Sendable, Codable {
         self.sourceID = sourceID
         self.sourceStart = sourceStart
         self.sourceEnd = sourceEnd
-        self.originalAudioVolume = originalAudioVolume
+        // init 中は didSet が走らないため、rate と同様に明示的にクランプする。
+        self.originalAudioVolume = Self.clampedVolume(originalAudioVolume)
         self.rate = Self.clampedRate(rate)
     }
 
@@ -49,6 +57,13 @@ public struct TimelineClip: Identifiable, Hashable, Sendable, Codable {
         rate.isNaN ? 1.0 : min(max(rate, rateRange.lowerBound), rateRange.upperBound)
     }
 
+    /// 元音声の音量を許容範囲（`volumeRange`）にクランプする。
+    /// NaN は min/max を素通りしてミキサーのパラメータを壊すため、等倍（1.0）に落とす
+    /// （`clampedRate` と同じ理由・同じ倒し方）。
+    public static func clampedVolume(_ volume: Float) -> Float {
+        volume.isNaN ? 1 : min(max(volume, volumeRange.lowerBound), volumeRange.upperBound)
+    }
+
     // MARK: - Codable
 
     private enum CodingKeys: String, CodingKey {
@@ -57,13 +72,17 @@ public struct TimelineClip: Identifiable, Hashable, Sendable, Codable {
 
     /// `rate` キーを持たない旧 JSON（rate 導入前に保存された下書き）も
     /// 等速（1.0）としてデコードできるようにする。
+    ///
+    /// **`init(from:)` は didSet を経由しない**ため、`rate`・`originalAudioVolume` の
+    /// どちらも明示的にクランプする（壊れた下書きから範囲外の値が入るのを防ぐ）。
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.id = try container.decode(UUID.self, forKey: .id)
         self.sourceID = try container.decode(UUID.self, forKey: .sourceID)
         self.sourceStart = try container.decode(Double.self, forKey: .sourceStart)
         self.sourceEnd = try container.decode(Double.self, forKey: .sourceEnd)
-        self.originalAudioVolume = try container.decode(Float.self, forKey: .originalAudioVolume)
+        self.originalAudioVolume = Self.clampedVolume(
+            try container.decode(Float.self, forKey: .originalAudioVolume))
         self.rate = Self.clampedRate(try container.decodeIfPresent(Double.self, forKey: .rate) ?? 1.0)
     }
 }

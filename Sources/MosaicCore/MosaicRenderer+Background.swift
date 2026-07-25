@@ -39,7 +39,10 @@ extension MosaicRenderer {
         }
 
         var kernelParams = params
-        kernelParams.block = block
+        // Resolution-independent coarseness: `block` is calibrated against
+        // `MosaicRenderer.referenceFrameWidth`, so the 720px preview and the
+        // full-resolution export show the same block size (see `effectiveBlock`).
+        kernelParams.block = MosaicRenderer.effectiveBlock(block, textureWidth: input.width)
         kernelParams.edgeSoftness = 0.5
         kernelParams.rotation = 0
         kernelParams.centerX = Float(input.width) / 2

@@ -56,7 +56,9 @@ public final class MosaicEditorModel: ObservableObject {
     // 書き込みを `MosaicEditorModel+LiveDetection.swift` に切り出したため、
     // 同一ファイル限定の `private(set)` では書き込めなくなり `internal(set)` に緩めた
     // （詳細は Task B1 の private→internal 変更一覧を参照）。
-    @Published public internal(set) var detectedFaces: [FaceTarget] = []
+    @Published public internal(set) var detectedFaces: [FaceTarget] = [] {
+        didSet { applyPendingFaceSelectionAnchorsIfNeeded() }
+    }
     @Published public var manualRegions: [ManualRegion] = []
     @Published public internal(set) var isScanning = false
 
@@ -64,6 +66,20 @@ public final class MosaicEditorModel: ObservableObject {
     @Published public var playbackPosition: Double = 0
     @Published public private(set) var videoDuration: Double = 0
     @Published public var isPlaying = false
+
+    /// 現在のタイムラインの出力解像度（先頭クリップ基準。クリップ未構築なら nil）。
+    ///
+    /// **UI はここを読むこと。`videoComposition?.renderSize` を直接読んではならない**
+    /// （`videoComposition` は `@Published` ではないので更新が届かず、そもそも
+    /// 無装着構成では nil になる）。値の算出は `VideoCompositionFactory.renderSize(for:)`
+    /// の単一実装で、`TimelineCompositionBuilder.Built.outputSize` を経由して届く。
+    /// 書き込みは `apply(built:generation:)` 一箇所だけ（別ファイルの extension なので
+    /// `private(set)` は使えない。`detectedFaces` と同じく `internal(set)`）。
+    @Published public internal(set) var outputRenderSize: CGSize?
+    /// 出力枠より大きく、縮小されて収まるクリップがあるか（UI の注意表示用）。
+    /// 並べ替えで先頭クリップ＝出力解像度が変わると true / false が入れ替わる。
+    @Published public internal(set) var hasDownscaledClips = false
+
     /// 動画の書き出し対象範囲（0...1 正規化）。
     /// エクスポート時は `AVAssetReaderTrackOutput` からのフレームのうち、
     /// この範囲外の `presentationTime` をスキップして出力尺を短縮する。
@@ -93,12 +109,60 @@ public final class MosaicEditorModel: ObservableObject {
     public var canUndo: Bool { !undoStack.isEmpty }
     public var canRedo: Bool { !redoStack.isEmpty }
 
+    /// 確定編集のカウンタ（自動保存のトリガ）。
+    ///
+    /// `commitEdit()` が実際に履歴を進めたとき、および undo/redo のたびに 1 進む。
+    /// `commitEdit` は確定操作（顔選択トグル・手動矩形の追加削除・効果 ON/OFF・
+    /// 調整バーの ✓・タイムライン編集）でしか呼ばれず、**スライダーのドラッグ中には
+    /// 呼ばれない**ため、変化回数は「タップ数」オーダーに収まる。
+    /// それでも undo 連打で無駄な IO が出るので、購読側（`EditorView`）でデバウンスする。
+    @Published public private(set) var editVersion = 0
+
     // エクスポート・保存
     @Published public var exportProgress: Double?
     /// エクスポートの速度／品質段。既定は標準。UI から変更可能。
     @Published public var exportSpeed: ExportSpeed = .balanced
     @Published public var didSave = false
     @Published public var errorMessage: String?
+    /// キャンセル要求を出してから書き出しが実際に畳まれるまでの状態。
+    ///
+    /// `requestMediaDataWhenReady` のブロックは writer 入力が ready になるまで
+    /// 再呼び出しされないため、中断が効くまでに遅延がある（writer が完全に
+    /// ストールした場合は効かないこともある）。UI はこの間「中止しています…」を
+    /// 出して進捗オーバーレイを保つ。
+    @Published public private(set) var isExportCancelling = false
+    /// 進行中の exporter（キャンセル要求の宛先）。
+    private var activeExporter: VideoMosaicExporter?
+    /// 書き出しセッションのトークン。進捗コールバックは別スレッドから
+    /// `Task { @MainActor }` で飛んでくるため、**完了後に遅延到着した通知が
+    /// `exportProgress` を書き戻して進捗オーバーレイを復活させ得る**。
+    /// 開始時に 1 進め、コールバック側で照合して古いセッションを弾く。
+    private var exportSession = 0
+
+    /// 進行中の書き出しを中断する（実際に畳まれるのは exporter が中断点に達した時点）。
+    public func cancelExport() {
+        guard exportProgress != nil, !isExportCancelling else { return }
+        isExportCancelling = true
+        activeExporter?.cancel()
+    }
+
+    /// 保存・書き出しの失敗をユーザー向け文言へ落とす。
+    ///
+    /// `PhotosSaver.SaveError` は Swift enum で `NSError` の domain/code に
+    /// 載らないため、`ExportFailureReason.classify` に渡す**前**に型で拾う。
+    private func failureMessage(for error: Error) -> String {
+        if let saveError = error as? PhotosSaver.SaveError {
+            switch saveError {
+            case .notAuthorized:
+                return "写真ライブラリへの保存が許可されていません。"
+                    + "設定 > プライバシーとセキュリティ > 写真 から、このアプリに追加を許可してください。"
+            case .failed:
+                return "写真ライブラリへの保存に失敗しました。時間をおいてから、もう一度お試しください。"
+            }
+        }
+        let ns = error as NSError
+        return ExportFailureReason.classify(domain: ns.domain, code: ns.code).message
+    }
 
     public let mode: Mode
 
@@ -185,14 +249,12 @@ public final class MosaicEditorModel: ObservableObject {
     /// **描画ゲートが見る唯一の適用区間**（`timeline` の didSet で追随。S10 レビュー修正）。
     ///
     /// `timeline.applyRanges` から「どのクリップの使用範囲とも交差しない区間（孤児区間）」を
-    /// 除いたもの。孤児区間は帯 UI（`TimelineBandLayout.applySpans`）に現れないため
-    /// 選択も削除もできず、それをゲートに通すと**全区間でモザイクが消えたまま undo 以外に
-    /// 戻せない**（実測: 4 秒素材の区間 source[1,2) に対し左端を 2.5 までトリムしただけで
-    /// 帯 1 本 → 0 本・ゲート ON 比率 0.24988 → 0.0）。区間データそのものは温存する
-    /// （トリムを戻せば復活する）という S9 の決定は変えず、**ゲート側で除外**する。
+    /// 除いたもの。区間データそのものは温存する（トリムを戻せば復活する）という
+    /// S9 の決定は変えず、**ゲート側で除外**する。
     ///
-    /// これにより「見えている帯の本数 ⇔ 有効区間の個数」「帯 0 本 ⇔ ゲート常時 ON」が
-    /// 成立する。絞り込みの実体は `MosaicApplyGate.effectiveRanges(_:mapping:)` の 1 本だけで、
+    /// これにより「見えている帯の本数 ⇔ 有効区間の個数」「帯 0 本 ⇔ ゲート全区間 OFF」
+    /// （不変条件 I1）が成立する。絞り込みの実体は
+    /// `MosaicApplyGate.effectiveRanges(_:mapping:)` の 1 本だけで、
     /// 顔ゲート・合成時刻ゲート・エクスポートの全経路がこの結果を通る。
     ///
     /// **毎フレーム計算しないこと**（O(クリップ数 × 区間数)）。だから didSet でキャッシュしている。
@@ -359,6 +421,8 @@ public final class MosaicEditorModel: ObservableObject {
 
     public func load(image: UIImage) {
         isLoading = true
+        // 別メディアの復元待ち目印を持ち越さない（これから入る顔は別素材のもの）。
+        clearPendingFaceSelectionAnchors()
         let normalized = image.normalizedUp()
         sourceImage = normalized
         let faces = landmarker.allLandmarks(in: normalized)
@@ -380,6 +444,9 @@ public final class MosaicEditorModel: ObservableObject {
 
     public func load(videoURL url: URL) {
         isLoading = true
+        // 別メディアの復元待ち目印を持ち越さない（下書き復元は load の**後**に
+        // `applyRestoredParameters` で予約されるので、ここで消しても取りこぼさない）。
+        clearPendingFaceSelectionAnchors()
         sourceVideoURL = url
         // 新しい動画では全長を選択に戻す。前の動画のトリムが残ると意図しない範囲書き出しになる。
         trimRange = 0...1
@@ -398,43 +465,10 @@ public final class MosaicEditorModel: ObservableObject {
             sourceTexture = makeTexture(from: frame)
             updateBackgroundMask(from: frame)
 
-            // 最初の1フレームを単独検出するのは IMAGE モードの仕事。
-            // VIDEO モードは連続ストリームの時系列追跡用で、最初のフレームを
-            // 単体で処理するのが苦手（init 失敗 → NullFaceLandmarker になるケースも）。
-            let initialScanner = makeFaceLandmarker(forVideo: false, settings: detectionSettings)
-
-            // t=0 の初期フレームに顔が写っていない動画（画面録画の導入カット等）だと
-            // ここで空になり、再生開始でモザイクが消え・追従バッジが「探索中 0%」に落ちる。
-            // 実機で「顔サムネ100%だが探索中0%、シークで初めて検出」と報告される症状の中核。
-            // → 空だった場合は数秒先まで低fpsで探索し、最初に顔が取れたフレームを
-            //   サムネ／検出シード用フレームとして採用する（プレビューは先頭フレームのまま）。
-            // 実機のライブ検出は 480px 幅の縮小フレームで走る（MosaicPreviewController
-            // 参照）。初期スキャンをフル解像度で通してしまうと「初期はシードされるが
-            // 続くライブ検出では拾えない」という条件差が生まれ、ホールドフォールバック
-            // が古い顔位置を体に貼り続ける原因になる。ライブと同じ 480px で判定する。
-            var faces = initialScanner.allLandmarks(in: Self.downscaleForDetection(frame))
-            var seedFrame = frame
-            var seedTime = 0.0
-            // 短尺動画（リール等）は顔が終盤にしか写らないことがある。3s 固定 probe だと
-            // 例えば 4s 動画で顔を逃す → シードなし → 再生開始でモザイクが掛からない。
-            // 動画長に合わせて probe 範囲を可変にする（上限 6s、下限は動画全長）。
-            if faces.isEmpty {
-                // 同期取得（load(videoURL:) は同期）。CMTime.seconds が nan の動画があるので
-                // isFinite/正数チェックで守る。
-                let rawDur = CMTimeGetSeconds(asset.duration)
-                let dur = (rawDur.isFinite && rawDur > 0) ? rawDur : 3.0
-                let probeEnd = min(max(dur - 0.1, 0.25), 6.0)
-                for probeTime in stride(from: 0.25, through: probeEnd, by: 0.25) {
-                    guard let probeFrame = Self.frame(of: asset, at: probeTime) else { continue }
-                    let probeFaces = initialScanner.allLandmarks(in: Self.downscaleForDetection(probeFrame))
-                    if !probeFaces.isEmpty {
-                        faces = probeFaces
-                        seedFrame = probeFrame
-                        seedTime = probeTime
-                        break
-                    }
-                }
-            }
+            let scan = scanSeedFaces(of: asset, firstFrame: frame)
+            let faces = scan.faces
+            let seedFrame = scan.frame
+            let seedTime = scan.time
 
             // 初期スキャン結果を「実際に顔が写っていた時刻」のバケットにシードして、
             // 再生開始・スクラブ前でも MosaicPreviewController がランドマークを引ける
@@ -531,6 +565,57 @@ public final class MosaicEditorModel: ObservableObject {
         resetLiveDetection()
     }
 
+    /// 動画素材の初期スキャン（検出シード用の「顔が写っているフレーム」探し）。
+    ///
+    /// `load(videoURL:)`（最初の素材）と `appendVideoClip(url:)`（追加素材）の
+    /// **共通処理**。検出条件（IMAGE モード・480px 縮小・probe 範囲）が経路ごとに
+    /// ずれると「最初の動画では拾えるが、追加した動画では拾えない」が黙って成立するため
+    /// 二重実装しないこと。
+    ///
+    /// 最初の1フレームを単独検出するのは IMAGE モードの仕事。
+    /// VIDEO モードは連続ストリームの時系列追跡用で、最初のフレームを
+    /// 単体で処理するのが苦手（init 失敗 → NullFaceLandmarker になるケースも）。
+    ///
+    /// t=0 の初期フレームに顔が写っていない動画（画面録画の導入カット等）だと
+    /// ここで空になり、再生開始でモザイクが消え・追従バッジが「探索中 0%」に落ちる。
+    /// 実機で「顔サムネ100%だが探索中0%、シークで初めて検出」と報告される症状の中核。
+    /// → 空だった場合は数秒先まで低fpsで探索し、最初に顔が取れたフレームを
+    ///   サムネ／検出シード用フレームとして採用する（プレビューは先頭フレームのまま）。
+    /// 実機のライブ検出は 480px 幅の縮小フレームで走る（MosaicPreviewController
+    /// 参照）。初期スキャンをフル解像度で通してしまうと「初期はシードされるが
+    /// 続くライブ検出では拾えない」という条件差が生まれ、ホールドフォールバック
+    /// が古い顔位置を体に貼り続ける原因になる。ライブと同じ 480px で判定する。
+    ///
+    /// - Returns: 検出できた顔（空あり）と、それが写っていたフレーム・素材時刻。
+    func scanSeedFaces(of asset: AVAsset, firstFrame frame: UIImage) -> SeedScan {
+        let initialScanner = makeFaceLandmarker(forVideo: false, settings: detectionSettings)
+        let faces = initialScanner.allLandmarks(in: Self.downscaleForDetection(frame))
+        guard faces.isEmpty else { return SeedScan(faces: faces, frame: frame, time: 0) }
+        // 短尺動画（リール等）は顔が終盤にしか写らないことがある。3s 固定 probe だと
+        // 例えば 4s 動画で顔を逃す → シードなし → 再生開始でモザイクが掛からない。
+        // 動画長に合わせて probe 範囲を可変にする（上限 6s、下限は動画全長）。
+        // 同期取得（load(videoURL:) は同期）。CMTime.seconds が nan の動画があるので
+        // isFinite/正数チェックで守る。
+        let rawDur = CMTimeGetSeconds(asset.duration)
+        let dur = (rawDur.isFinite && rawDur > 0) ? rawDur : 3.0
+        let probeEnd = min(max(dur - 0.1, 0.25), 6.0)
+        for probeTime in stride(from: 0.25, through: probeEnd, by: 0.25) {
+            guard let probeFrame = Self.frame(of: asset, at: probeTime) else { continue }
+            let probeFaces = initialScanner.allLandmarks(in: Self.downscaleForDetection(probeFrame))
+            if !probeFaces.isEmpty {
+                return SeedScan(faces: probeFaces, frame: probeFrame, time: probeTime)
+            }
+        }
+        return SeedScan(faces: [], frame: frame, time: 0)
+    }
+
+    /// `scanSeedFaces(of:firstFrame:)` の結果（検出顔・その顔が写っていたフレーム・素材時刻）。
+    struct SeedScan {
+        let faces: [FaceLandmarkSet]
+        let frame: UIImage
+        let time: Double
+    }
+
     /// `load(videoURL:)` の Task 内でタイムラインを初期化する。
     ///
     /// 下書き復元の予約（`queueTimelineRestore`）があれば保存されていた素材表と
@@ -555,9 +640,17 @@ public final class MosaicEditorModel: ObservableObject {
             timeline = restore.timeline
         } else {
             sources = [currentSourceID: asset]
-            timeline = TimelineState(clips: [TimelineClip(sourceID: currentSourceID,
-                                                          sourceStart: 0, sourceEnd: seconds)])
+            // **適用区間の自動生成はここ（新しいクリップが生まれる瞬間）だけ**（不変条件 I5）。
+            // 新仕様では区間 0 本 = 全区間 OFF なので、生成しないと新規プロジェクトが
+            // 「どこにもモザイクが乗らない」状態で始まる。
+            // restore 分岐では**何もしない**: 旧データの変換は `TimelineState.init(from:)` で
+            // 完了済みであり、ここで再生成すると「意図的に全削除した下書き」が復活する。
+            let clip = TimelineClip(sourceID: currentSourceID, sourceStart: 0, sourceEnd: seconds)
+            timeline = TimelineState(clips: [clip],
+                                     applyRanges: MosaicApplyGate.fullCoverRanges(for: [clip]))
         }
+        // 直後の resetHistory() が「生成済みの状態」を履歴の基準にするので、
+        // undo の起点も自動生成後の状態になる（自動生成が undo を汚さない）。
         resetHistory()
     }
 
@@ -843,14 +936,14 @@ public final class MosaicEditorModel: ObservableObject {
             // されない結果になる場合は全選択にフォールバックする（このボタンを押す
             // 意図は常に「顔にモザイクを掛けたい」なので、消える方向に倒さない）。
             let faceSourceID = resolveSourceTime(atComposition: t).sourceID
-            detectedFaces = carryingOverSelection(
+            replaceDetectedFaces(
                 found.map { lm in
                     FaceTarget(id: UUID(), landmarks: lm,
                                thumbnail: generateThumbnail(for: lm, from: frame),
                                isSelected: false,
                                sourceID: faceSourceID)
                 },
-                previousSelected: detectedFaces.filter(\.isSelected)
+                ofSource: faceSourceID
             )
             sourceImage = frame
             sourceTexture = makeTexture(from: frame)
@@ -860,10 +953,37 @@ public final class MosaicEditorModel: ObservableObject {
         }
     }
 
+    /// 再検出結果を **その素材の顔だけ** に反映する（他素材の顔と選択はそのまま残す）。
+    ///
+    /// `detectedFaces` を丸ごと差し替えると、`found` は現在表示中の 1 素材の顔しか
+    /// 含まないため、複数クリップでは**他素材の顔とその選択が消える**＝その区間の
+    /// モザイクが外れる。追加素材の `seedVideoDetection` / `seedPhotoDetection` が
+    /// `detectedFaces += …`（既存を壊さない追記）なのと同じ流儀に揃える。
+    ///
+    /// 選択の引き継ぎ（`carryingOverSelection`）も**素材スコープ**で行う: 比較対象を
+    /// 全素材の選択顔にすると、他素材の選択顔と重心が近いだけで選択が付いたり、
+    /// 逆に他素材が選択済みなのを理由にフェイルクローズ（その素材の全選択）が
+    /// 働かなくなったりする。
+    ///
+    /// 並び順は元の位置を保つ（顔サムネの並びが再検出のたびに入れ替わらない）。
+    func replaceDetectedFaces(_ newFaces: [FaceTarget], ofSource sourceID: UUID?) {
+        let carried = carryingOverSelection(
+            newFaces,
+            previousSelected: detectedFaces.filter { $0.isSelected && $0.sourceID == sourceID }
+        )
+        // 先頭から続く「他素材の顔」の数 = 差し替え後の挿入位置。
+        let insertAt = detectedFaces.prefix { $0.sourceID != sourceID }.count
+        var result = detectedFaces.filter { $0.sourceID != sourceID }
+        result.insert(contentsOf: carried, at: min(insertAt, result.count))
+        detectedFaces = result
+    }
+
     /// redetect 用の選択引き継ぎ。新しい顔候補に旧選択状態を重心マッチ（<0.5）で
     /// 引き継ぎ、誰も選択されない結果になる場合は全選択にフォールバックする。
     /// 「再検出」を押す意図は常に「顔にモザイクを掛けたい」なので、選択が空になって
     /// 以降モザイクが一切掛からなくなる方向には決して倒さない（フェイルクローズ）。
+    ///
+    /// 素材スコープの絞り込みは呼び出し側（`replaceDetectedFaces`）の責務。
     func carryingOverSelection(
         _ newFaces: [FaceTarget],
         previousSelected: [FaceTarget]
@@ -1100,23 +1220,170 @@ public final class MosaicEditorModel: ObservableObject {
         return ids
     }
 
+    /// 下書き保存用: いま選択されている顔の目印（素材ID＋**素材フレーム基準**の
+    /// 正規化重心）。`DraftStore.saveVideoDraft` / `savePhotoDraft` の
+    /// `faceSelections` にそのまま渡す。
+    ///
+    /// 顔 ID は保存しない（`DraftFaceSelection` の doc 参照。検出のたびに
+    /// `UUID()` を振り直すため復元時の顔と一致しない）。
+    var selectedFaceAnchors: [DraftFaceSelection] {
+        detectedFaces.filter(\.isSelected).map {
+            DraftFaceSelection(sourceID: $0.sourceID,
+                               centroid: normalizedCentroid(of: $0.landmarks))
+        }
+    }
+
     /// 下書きから復元したパラメータを適用してプレビューを更新する。
+    ///
+    /// - Parameter faceSelections: 保存されていた顔選択の目印。
+    ///   nil は「情報なし」（新フィールド導入前の下書き）で、顔の選択状態には
+    ///   一切触らない＝初期スキャンの自動選択規則がそのまま残る。
     public func applyRestoredParameters(
         faceMosaicOn: Bool,
         backgroundMosaicOn: Bool,
         faceBlockSize: Float,
         backgroundBlockSize: Float,
-        manualRects: [CGRect]
+        manualRects: [CGRect],
+        faceSelections: [DraftFaceSelection]? = nil
     ) {
         self.faceMosaicOn = faceMosaicOn
         self.backgroundMosaicOn = backgroundMosaicOn
         self.faceBlockSize = faceBlockSize
         self.backgroundBlockSize = backgroundBlockSize
         self.manualRegions = manualRects.map { ManualRegion(id: UUID(), normalizedRect: $0) }
+        // 顔選択は resetHistory より**前**に復元する（復元後の状態が履歴の起点になる。
+        // ここで直さないと、末尾の resetHistory で undo からも取り戻せなくなる）。
+        if let faceSelections {
+            restoredSelectionSourceIDs = knownSourceIDsAtRestore()
+            restoreFaceSelection(from: faceSelections)
+        }
         recomputeBackgroundMask()
         renderPreview()
         previewController?.invalidate()
         resetHistory()
+    }
+
+    // MARK: - 下書きからの顔選択の復元
+
+    /// 保存されていた顔選択の目印を、いま検出されている顔へ再照合して適用する。
+    ///
+    /// 照合は `selecting(_:sourceID:targets:)`（プレビュー描画の顔絞り込み）と
+    /// **同じ作法**——素材スコープ＋素材フレーム基準の重心距離 < 0.5——で行う。
+    ///
+    /// **照合に失敗したときは安全側（過剰適用）へ倒す**。素材ごとに、その素材へ
+    /// 向けられた目印が**全部**顔にマッチしたときだけ「マッチした顔だけを選択」し、
+    /// 1 つでもマッチしなかった目印があれば**その素材の顔を全選択**する
+    /// （保存時に選択されていた顔の行方が説明できない ＝ 顔が露出しうる状態なので、
+    /// 掛けすぎる方向へ倒す。このプロジェクトの原則「モザイクの過剰適用は安全側・
+    /// 不足は事故」）。
+    ///
+    /// 目印が 1 つも無い素材の扱いは、**その素材が復元時点で下書きに含まれていたか**で
+    /// 分かれる（`restoredSelectionSourceIDs`）:
+    /// - 含まれていた素材: 非選択にする（保存時に選択が無かったというユーザーの明示的な意思）。
+    /// - 復元**後**に追加された素材: 一切触らない。保存時に存在しなかった素材に
+    ///   「保存時に非選択だった」という解釈は成立しない。触ると、目印の適用が保留中
+    ///   （冒頭に顔が写らない動画）に素材を追加したとき、`seedVideoDetection` /
+    ///   `seedPhotoDetection` の自動選択が didSet 経由で即座に打ち消され、
+    ///   **追加クリップの区間だけモザイクが乗らない**（顔が露出する）。
+    ///
+    /// 検出がまだ 1 つも無い（初期スキャンが空だった）場合は目印を保持しておき、
+    /// ライブ検出が顔を見つけた時点で適用する（`pendingFaceSelectionAnchors`）。
+    private func restoreFaceSelection(from anchors: [DraftFaceSelection]) {
+        guard !detectedFaces.isEmpty else {
+            // 空の目印（＝保存時も 0 個選択）を保留しない: 保留すると、後から
+            // ライブ検出が拾った顔の自動選択（顔 1 つなら選択）まで打ち消してしまう。
+            pendingFaceSelectionAnchors = anchors.isEmpty ? nil : anchors
+            return
+        }
+        pendingFaceSelectionAnchors = nil
+        var indicesBySource: [UUID?: [Int]] = [:]
+        for (index, face) in detectedFaces.enumerated() {
+            indicesBySource[face.sourceID, default: []].append(index)
+        }
+        for (sourceID, indices) in indicesBySource {
+            // 素材スコープ: sourceID が nil 側（写真モード・素材ID導入前）は素材不問。
+            let scoped = anchors.filter { anchor in
+                guard let anchorSource = anchor.sourceID, let sourceID else { return true }
+                return anchorSource == sourceID
+            }
+            guard !scoped.isEmpty else {
+                // 復元後に追加された素材（目印の対象外）には触らない。
+                if let sourceID, let known = restoredSelectionSourceIDs, !known.contains(sourceID) {
+                    continue
+                }
+                for index in indices { detectedFaces[index].isSelected = false }
+                continue
+            }
+            var matchedIndices = Set<Int>()
+            var matchedAnchors = 0
+            for anchor in scoped {
+                let hits = indices.filter { index in
+                    let center = normalizedCentroid(of: detectedFaces[index].landmarks)
+                    return hypot(center.x - anchor.centroid.x,
+                                 center.y - anchor.centroid.y) < faceMatchThreshold
+                }
+                if !hits.isEmpty {
+                    matchedAnchors += 1
+                    matchedIndices.formUnion(hits)
+                }
+            }
+            let allAnchorsAccountedFor = matchedAnchors == scoped.count
+            for index in indices {
+                detectedFaces[index].isSelected =
+                    allAnchorsAccountedFor ? matchedIndices.contains(index) : true
+            }
+        }
+    }
+
+    /// 初期スキャンが空だったため適用を保留した顔選択の目印。
+    /// ライブ検出が顔を見つけて `detectedFaces` が埋まった時点で適用する。
+    private var pendingFaceSelectionAnchors: [DraftFaceSelection]?
+
+    /// 下書き復元の時点でタイムラインに含まれていた素材ID（`restoreFaceSelection` の
+    /// 「目印が 1 つも無い素材」の判定に使う）。nil は「下書き復元をしていない」。
+    private var restoredSelectionSourceIDs: Set<UUID>?
+
+    /// 復元時点で下書きが参照している素材IDを集める。
+    ///
+    /// `applyRestoredParameters` は `load(videoURL:)` の非同期 Task
+    /// （`installInitialTimeline` が `sources` / `timeline` を埋める）より先に走りうるので、
+    /// **まだ適用されていない予約**（`pendingTimelineRestore`）も含めて union を取る。
+    private func knownSourceIDsAtRestore() -> Set<UUID> {
+        var ids: Set<UUID> = [currentSourceID]
+        ids.formUnion(sources.keys)
+        ids.formUnion(timeline.clips.map(\.sourceID))
+        if let restore = pendingTimelineRestore {
+            ids.formUnion(restore.sourceURLs.keys)
+            ids.formUnion(restore.timeline.clips.map(\.sourceID))
+        }
+        return ids
+    }
+
+    /// 保留中の目印を破棄する（メディアの読み込み直し時）。
+    private func clearPendingFaceSelectionAnchors() {
+        pendingFaceSelectionAnchors = nil
+        restoredSelectionSourceIDs = nil
+    }
+
+    /// `detectedFaces` が（ライブ検出の安全網などで）後から埋まったときに、
+    /// 保留していた下書きの顔選択を適用する。`detectedFaces` の didSet から呼ぶ。
+    private func applyPendingFaceSelectionAnchorsIfNeeded() {
+        guard let anchors = pendingFaceSelectionAnchors, !detectedFaces.isEmpty else { return }
+        // restoreFaceSelection 内の再代入で didSet が再入するため、先に保留を解除する
+        // （解除済みなら上の guard で必ず抜ける）。
+        pendingFaceSelectionAnchors = nil
+        restoreFaceSelection(from: anchors)
+        renderPreview()
+        previewController?.invalidate()
+        // 復元した選択は「ユーザーの編集」ではないので undo 対象にしない。
+        // まだ何も編集されていなければ履歴基準を取り直し、既に編集済みなら
+        // 基準スナップショットの選択集合だけを現在値へ合わせる
+        // （undo で復元済みの選択が外れる＝顔が露出する方向を作らない）。
+        if undoStack.isEmpty && redoStack.isEmpty {
+            resetHistory()
+        } else {
+            lastCommitted?.selectedFaceIDs = Set(detectedFaces.filter(\.isSelected).map(\.id))
+        }
     }
 
     // MARK: - タブ操作・確定（UI から呼ぶ）
@@ -1220,6 +1487,7 @@ public final class MosaicEditorModel: ObservableObject {
         if let last = lastCommitted { undoStack.append(last) }
         redoStack.removeAll()
         lastCommitted = now
+        editVersion &+= 1
     }
 
     public func undo() {
@@ -1227,6 +1495,7 @@ public final class MosaicEditorModel: ObservableObject {
         redoStack.append(lastCommitted ?? snapshot())
         lastCommitted = previous
         apply(previous)
+        editVersion &+= 1
     }
 
     public func redo() {
@@ -1234,6 +1503,7 @@ public final class MosaicEditorModel: ObservableObject {
         if let last = lastCommitted { undoStack.append(last) }
         lastCommitted = next
         apply(next)
+        editVersion &+= 1
     }
 
     // MARK: - 保存・エクスポート
@@ -1245,7 +1515,9 @@ public final class MosaicEditorModel: ObservableObject {
             recents.add(kind: .photo, thumbnail: image)
             didSave = true
         } catch {
-            errorMessage = "保存に失敗しました"
+            // 権限拒否（`PhotosSaver.SaveError.notAuthorized`）を握り潰さず、
+            // 次にすべきこと（設定で許可する）まで出す。
+            errorMessage = failureMessage(for: error)
         }
     }
 
@@ -1273,8 +1545,18 @@ public final class MosaicEditorModel: ObservableObject {
             return
         }
         guard let renderer else { return }
+        // 書き出しは原寸のまま tmp へ書く。書き終わってから容量不足で失敗するより、
+        // 開始前に見積もりと空き容量を比べて弾く（判断は core の純関数）。
+        if let shortage = await storageShortageMessage(for: composition) {
+            errorMessage = shortage
+            return
+        }
         exportProgress = 0
+        isExportCancelling = false
+        exportSession &+= 1
+        let session = exportSession
         let exporter = VideoMosaicExporter(renderer: renderer, landmarker: landmarker)
+        activeExporter = exporter
         let selected = detectedFaces.filter(\.isSelected)
         // 全顔選択（単一顔の自動選択を含む）なら選択フィルタを完全バイパスする
         // （exporter は空配列を「全顔に適用」と解釈する）。追跡マッチングの誤棄却で
@@ -1315,17 +1597,50 @@ public final class MosaicEditorModel: ObservableObject {
                 speed: exportSpeed,
                 trimRange: trimRange
             ) { fraction in
-                Task { @MainActor [weak self] in self?.exportProgress = fraction }
+                // 進捗は別スレッドから飛んでくるため、完了後に遅延到着した通知が
+                // `exportProgress` を書き戻して進捗オーバーレイを復活させ得る。
+                // セッショントークンで照合して古い通知を捨てる。
+                Task { @MainActor [weak self] in
+                    guard let self, self.exportSession == session else { return }
+                    self.exportProgress = fraction
+                }
             }
             try await PhotosSaver.save(videoURL: url)
             if let thumb = previewImage {
                 recents.add(kind: .video, thumbnail: thumb)
             }
             didSave = true
+        } catch is CancellationError {
+            // ユーザー自身の操作による中断なのでエラーとして通知しない。
         } catch {
-            errorMessage = "エクスポートに失敗しました"
+            errorMessage = failureMessage(for: error)
         }
+        // 遅延到着した進捗を弾くため、後始末の前にセッションを進める。
+        exportSession &+= 1
+        activeExporter = nil
+        isExportCancelling = false
         exportProgress = nil
+    }
+
+    /// 空き容量が足りないときのユーザー向け文言（足りていれば nil）。
+    ///
+    /// 出力先は `FileManager.default.temporaryDirectory` なので、空き容量は
+    /// **tmp のあるボリューム**を見る。空き容量が取得できない場合は判定せず通す
+    /// （取得失敗を「容量不足」と断定して書き出しを止めないため）。
+    private func storageShortageMessage(for composition: AVAsset) async -> String? {
+        let tmp = FileManager.default.temporaryDirectory
+        guard let capacity = try? tmp.resourceValues(
+            forKeys: [.volumeAvailableCapacityForImportantUsageKey]
+        ).volumeAvailableCapacityForImportantUsage else { return nil }
+
+        let seconds = CMTimeGetSeconds((try? await composition.load(.duration)) ?? .zero)
+        let videoTrack = (try? await composition.loadTracks(withMediaType: .video))?.first
+        let dataRate = Double((try? await videoTrack?.load(.estimatedDataRate)) ?? 0)
+        let required = ExportStorageCheck.estimatedBytes(
+            durationSeconds: seconds, videoBitsPerSecond: dataRate)
+        guard !ExportStorageCheck.hasEnoughSpace(requiredBytes: required,
+                                                 availableBytes: capacity) else { return nil }
+        return ExportFailureReason.diskFull.message
     }
 
     // MARK: - Private helpers
@@ -1372,6 +1687,11 @@ public final class MosaicEditorModel: ObservableObject {
         return UIImage(cgImage: crop, scale: image.scale, orientation: image.imageOrientation)
     }
 
+    /// 顔の同一性を重心距離で判定する閾値（**素材フレーム基準**の正規化座標）。
+    /// `selecting(_:sourceID:targets:)` / `carryingOverSelection(_:previousSelected:)`
+    /// が使ってきた 0.5（広め）と同じ値。下書き復元の再照合もこれに揃える。
+    let faceMatchThreshold: CGFloat = 0.5
+
     func normalizedCentroid(of landmarks: FaceLandmarkSet) -> CGPoint {
         guard !landmarks.points.isEmpty else { return CGPoint(x: 0.5, y: 0.5) }
         var sx: Float = 0; var sy: Float = 0
@@ -1380,7 +1700,9 @@ public final class MosaicEditorModel: ObservableObject {
         return CGPoint(x: CGFloat(sx / n), y: CGFloat(sy / n))
     }
 
-    private static func firstFrame(of asset: AVAsset) -> UIImage? {
+    /// 素材の先頭フレーム。`appendVideoClip(url:)`（別ファイルの extension）からも
+    /// 使うため internal。
+    static func firstFrame(of asset: AVAsset) -> UIImage? {
         let gen = AVAssetImageGenerator(asset: asset)
         gen.appliesPreferredTrackTransform = true
         guard let cg = try? gen.copyCGImage(at: .zero, actualTime: nil) else { return nil }

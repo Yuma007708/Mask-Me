@@ -13,6 +13,19 @@ import MosaicCore
 /// 物理的に移動できず `MosaicEditorModel.swift`（本体）に残っている
 /// （Swift の extension は格納インスタンスプロパティを持てない）。
 /// ここに移したのは、それらを参照する「振る舞い」（メソッド）だけである。
+/// 合成時刻を解決した結果（クリップ・素材・素材内時刻）。
+///
+/// タプルではなく型にしてあるのは要素が 3 つあるためで、意味は
+/// `MosaicEditorModel.resolveSourceLocation(atComposition:)` の doc を参照。
+struct ResolvedSourceLocation {
+    /// 解決できたクリップの id。**nil = 写像不能**（クリップ未構築・写真モード・
+    /// テスト直注入）で、適用区間ゲートはここでフェイルオープンする。
+    let clipID: UUID?
+    let sourceID: UUID
+    /// 素材内時刻（写真素材は 0 へ clamp 済み）。
+    let time: Double
+}
+
 extension MosaicEditorModel {
     // MARK: - 合成時刻 → 素材時刻の写像
 
@@ -41,18 +54,38 @@ extension MosaicEditorModel {
     /// `shouldDetectPreviewFrame` の既検出判定）をヒットさせる。これにより写真区間では
     /// 2 回目以降の実検出・重複 submit が発生しない。動画素材では恒等（挙動不変）。
     func resolveSourceTime(atComposition time: Double) -> (sourceID: UUID, time: Double) {
+        let resolved = resolveSourceLocation(atComposition: time)
+        return (resolved.sourceID, resolved.time)
+    }
+
+    /// `resolveSourceTime(atComposition:)` の実体。**クリップ id も返す。**
+    ///
+    /// 適用区間ゲート（S11）は `clipID` アンカーなので、素材ID・素材時刻だけでは
+    /// 判定できない。`clipID` が nil = 写像不能（クリップ未構築・写真モード・
+    /// テスト直注入）であり、ゲートはそこでフェイルオープンする。
+    ///
+    /// **クランプ規則をここ以外に書き写さないこと。** 終端フレーム（合成尺ちょうどの
+    /// PTS）で `mapping.sourceLocation(at:)` は nil を返すため、未クランプの clipID を
+    /// ゲートに渡すとプレビューだけがフェイルオープンし、クランプ済みで判定する
+    /// エクスポート（`VideoMosaicExporter.resolveLocation(_:at:)`）と食い違う。
+    /// 既存呼び出し 10 箇所のタプル分解を壊さないため、`resolveSourceTime` は
+    /// この関数の薄いラッパとして残してある。
+    func resolveSourceLocation(atComposition time: Double) -> ResolvedSourceLocation {
         if let location = mapping.sourceLocation(at: time) {
-            return (location.sourceID,
-                    timeline.clampedSourceTime(location.time, sourceID: location.sourceID))
+            return resolved(location)
         }
         if !clips.isEmpty, time.isFinite, mapping.totalDuration > 0 {
             let clamped = min(max(time, 0), mapping.totalDuration.nextDown)
-            if let location = mapping.sourceLocation(at: clamped) {
-                return (location.sourceID,
-                        timeline.clampedSourceTime(location.time, sourceID: location.sourceID))
-            }
+            if let location = mapping.sourceLocation(at: clamped) { return resolved(location) }
         }
-        return (currentSourceID, timeline.clampedSourceTime(time, sourceID: currentSourceID))
+        return ResolvedSourceLocation(clipID: nil, sourceID: currentSourceID,
+                                      time: timeline.clampedSourceTime(time, sourceID: currentSourceID))
+    }
+
+    private func resolved(_ location: TimelineMapping.SourceLocation) -> ResolvedSourceLocation {
+        ResolvedSourceLocation(
+            clipID: location.clipID, sourceID: location.sourceID,
+            time: timeline.clampedSourceTime(location.time, sourceID: location.sourceID))
     }
 
     // MARK: - 検出キャッシュ参照
@@ -140,22 +173,27 @@ extension MosaicEditorModel {
     func displayFaces(at time: Double, matching targets: [FaceTarget]?) -> [FaceLandmarkSet] {
         let locations = mapping.sourceLocations(at: time)
         guard locations.count >= 2, let overlap = mapping.overlap(at: time) else {
-            let clipID = mapping.sourceLocation(at: time)?.clipID
-            // 重なり外なので素材位置は高々 1 つ。`resolveSourceTime` は写像範囲外
+            // 重なり外なので素材位置は高々 1 つ。`resolveSourceLocation` は写像範囲外
             // （locations が空）でも lookupFaces(at:) と同じクランプ付き解決へ落ちるため、
-            // 素材ID・素材時刻をここで一度だけ解決し、ゲートと lookup の両方に使い回す
-            // （両者で別々に解決すると境界フレームで食い違う）。
-            let resolved = resolveSourceTime(atComposition: time)
-            guard isMosaicActive(sourceID: resolved.sourceID, sourceTime: resolved.time) else { return [] }
+            // クリップID・素材ID・素材時刻をここで一度だけ解決し、ゲート・lookup・
+            // レイアウト写像の 3 つに使い回す（別々に解決すると境界フレームで食い違う）。
+            // **未クランプの `mapping.sourceLocation(at:)?.clipID` を使わないこと**:
+            // 終端フレームだけプレビューがフェイルオープンし、クランプ済みで判定する
+            // エクスポートと食い違う。
+            let resolved = resolveSourceLocation(atComposition: time)
+            guard isMosaicActive(clipID: resolved.clipID, sourceID: resolved.sourceID,
+                                 sourceTime: resolved.time) else { return [] }
             let faces = selecting(lookupFaces(sourceID: resolved.sourceID, sourceTime: resolved.time),
                                   sourceID: resolved.sourceID, targets: targets)
-            return renderLayout.remap(faces, clipID: clipID)
+            return renderLayout.remap(faces, clipID: resolved.clipID)
         }
         return locations.flatMap { entry -> [FaceLandmarkSet] in
             guard let side = entry.side, let progress = entry.progress else { return [] }
             let sourceTime = timeline.clampedSourceTime(entry.location.time,
                                                         sourceID: entry.location.sourceID)
-            guard isMosaicActive(sourceID: entry.location.sourceID, sourceTime: sourceTime) else { return [] }
+            guard isMosaicActive(clipID: entry.location.clipID,
+                                 sourceID: entry.location.sourceID,
+                                 sourceTime: sourceTime) else { return [] }
             let faces = selecting(lookupFaces(sourceID: entry.location.sourceID, sourceTime: sourceTime),
                                   sourceID: entry.location.sourceID, targets: targets)
             let placed = renderLayout.remap(faces, clipID: entry.location.clipID)

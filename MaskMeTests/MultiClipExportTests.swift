@@ -1,6 +1,7 @@
 import XCTest
 import AVFoundation
 import MosaicCore
+import UIKit
 @testable import MaskMe
 
 #if canImport(Metal)
@@ -852,7 +853,60 @@ final class MultiClipExportTests: XCTestCase {
         XCTAssertGreaterThan(overlapRMS, 0.01, "重なり区間の音が完全に消えている（フェードが急すぎる）")
     }
 
-    /// `AudioExportPipeline.decide` の純ロジック契約（真理値表を全 32 通り固定）:
+    /// **トラック B 側クリップの音声全損の回帰ガード（S8 の穴）**。
+    ///
+    /// `test_transitionCrossfadesAudio` は素材の後半 2s を無音にしているため、
+    /// 「後続クリップ（= 音声トラック B）の音が丸ごと落ちる」バグを**構造的に検出できない**
+    /// （落ちても後半は無音のままで期待どおりに見える）。ここでは**両クリップとも有音**の
+    /// 素材を使い、重なりを抜けた後続クリップ区間に音が載っていることを RMS で固定する。
+    ///
+    /// 症状: 重なり（トランジション）があると builder が音声も A/B 2 トラックへ交互配置する
+    /// （`TimelineCompositionBuilder`）のに、exporter が合成結果の音声トラックを 1 本しか
+    /// 読まないと、奇数インデックスのクリップ（B 側）の音声が出力に一切入らない。
+    /// プレビュー（`AVPlayerItem` に composition 丸ごと）では両トラックが鳴るため、
+    /// 書き出すまで気づけない食い違いになる。
+    func test_transitionKeepsAudioOfFollowingClip() async throws {
+        guard MTLCreateSystemDefaultDevice() != nil else {
+            throw XCTSkip("Metal デバイスが無い環境ではスキップ")
+        }
+        // 全区間有音（振幅一定）。どちらのクリップが落ちても RMS で分かる。
+        let url = try await makeTestVideo(seconds: 4.0, withAudio: true)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let sourceID = UUID()
+        let first = TimelineClip(sourceID: sourceID, sourceStart: 0, sourceEnd: 2)
+        let second = TimelineClip(sourceID: sourceID, sourceStart: 2, sourceEnd: 4)
+        let transitions = [first.id: TransitionSpec(kind: .crossfade, duration: 0.5)]
+        let built = try await TimelineCompositionBuilder().build(
+            clips: [first, second], transitions: transitions,
+            sources: [sourceID: AVURLAsset(url: url)])
+        XCTAssertNotNil(built.audioMix, "音声付きトランジションなのに audioMix が無い")
+
+        let exporter = try makeExporter()
+        let outURL = try await exporter.export(
+            asset: built.composition,
+            mapping: TimelineMapping(clips: [first, second], transitions: transitions),
+            videoComposition: built.videoComposition,
+            audioMix: built.audioMix,
+            renderLayout: built.layout) { _ in }
+        defer { try? FileManager.default.removeItem(at: outURL) }
+
+        // 合成尺は 2 + 2 - 0.5 = 3.5s。重なりは [1.5, 2.0)。
+        // 先行クリップ本体 [0.3,1.2) と、後続クリップの重なりを抜けた本体 [2.3,3.4)。
+        let headRMS = try await audioRMS(url: outURL, window: 0.3...1.2)
+        let tailRMS = try await audioRMS(url: outURL, window: 2.3...3.4)
+        print("[S8AUDIO-B] head=\(headRMS) tail=\(tailRMS)")
+        XCTAssertGreaterThan(headRMS, 0.1, "先行クリップ（音声トラック A）の音が載っていない")
+        XCTAssertGreaterThan(tailRMS, 0.1,
+                             "後続クリップ（音声トラック B）の音が出力に入っていない"
+                             + "（exporter が音声トラックを 1 本しか読んでいない）")
+        // 2 トラックをミックスしても出力尺は合成尺のまま（音声側が伸びない）。
+        let duration = try await AVURLAsset(url: outURL).load(.duration)
+        XCTAssertEqual(CMTimeGetSeconds(duration), 3.5, accuracy: 0.2,
+                       "2 トラックのミックスで出力尺がずれている")
+    }
+
+    /// `AudioExportPipeline.decide` の純ロジック契約（真理値表を全 64 通り固定）:
     /// パススルー（bit 同一の無変換コピー）は**立っている条件が 0 個のときだけ**で、
     /// 1 個以上あれば再エンコード。
     ///
@@ -860,12 +914,13 @@ final class MultiClipExportTests: XCTestCase {
     /// 「OR に足し忘れ」を検出できない。ここでは期待値を**立っているビットの個数**
     /// （`bits == 0` か否か）だけから決め、条件の列挙に依存させない。
     func test_audioPipelineDecision_passthroughOnlyWhenNoTransform() {
-        for bits in 0..<32 {
+        for bits in 0..<64 {
             let trimming = bits & 1 != 0
             let hasAudioMix = bits & 16 != 0
             let conditions = AudioTrackConditions(hasEmptySegments: bits & 2 != 0,
                                                   hasScaledSegments: bits & 4 != 0,
-                                                  hasMixedFormats: bits & 8 != 0)
+                                                  hasMixedFormats: bits & 8 != 0,
+                                                  hasMultipleTracks: bits & 32 != 0)
             let expected: AudioExportPipeline = bits == 0 ? .passthrough : .reencode
             XCTAssertEqual(
                 AudioExportPipeline.decide(isTrimming: trimming, hasAudioMix: hasAudioMix,
@@ -885,7 +940,8 @@ final class MultiClipExportTests: XCTestCase {
         let fields: [(String, WritableKeyPath<AudioTrackConditions, Bool>)] = [
             ("hasEmptySegments", \.hasEmptySegments),
             ("hasScaledSegments", \.hasScaledSegments),
-            ("hasMixedFormats", \.hasMixedFormats)
+            ("hasMixedFormats", \.hasMixedFormats),
+            ("hasMultipleTracks", \.hasMultipleTracks)
         ]
         XCTAssertEqual(Mirror(reflecting: AudioTrackConditions()).children.count, fields.count,
                        "AudioTrackConditions の条件が増減した。decide の OR とこのテストの "
@@ -933,10 +989,8 @@ final class MultiClipExportTests: XCTestCase {
             let composition = try await TimelineCompositionBuilder()
                 .build(clips: clips, sources: sources).composition
             let tracks = try await composition.loadTracks(withMediaType: .audio)
-            let track = try XCTUnwrap(tracks.first)
-            let segments = try await track.load(.segments)
-            let formats = try await track.load(.formatDescriptions)
-            return AudioTrackConditions.from(segments: segments, formatDescriptions: formats)
+            XCTAssertFalse(tracks.isEmpty, "合成に音声トラックが無い")
+            return AudioTrackConditions.from(tracks: await AudioTrackData.load(from: tracks))
         }
 
         // 無変換（等速・単一素材）: すべて偽 = パススルー相当。
@@ -970,21 +1024,29 @@ final class MultiClipExportTests: XCTestCase {
 
     // MARK: - M-1: スケール判定の許容差（微小 rate を取りこぼさない）
 
-    /// 合成結果の音声トラックを取り出す（スケール判定系のテストで共有）。
-    private func audioTrack(_ clips: [TimelineClip],
-                            sources: [UUID: AVAsset]) async throws -> AVAssetTrack {
+    /// 合成結果の音声トラックを全部取り出す（スケール判定系のテストで共有）。
+    private func audioTracks(_ clips: [TimelineClip],
+                             sources: [UUID: AVAsset]) async throws -> [AVAssetTrack] {
         let composition = try await TimelineCompositionBuilder().build(clips: clips,
                                                                       sources: sources).composition
         let tracks = try await composition.loadTracks(withMediaType: .audio)
+        XCTAssertFalse(tracks.isEmpty, "合成に音声トラックが無い")
+        return tracks
+    }
+
+    /// 先頭の音声トラック（1 本しか見ないセグメント検査用）。
+    private func audioTrack(_ clips: [TimelineClip],
+                            sources: [UUID: AVAsset]) async throws -> AVAssetTrack {
+        let tracks = try await audioTracks(clips, sources: sources)
         return try XCTUnwrap(tracks.first, "合成に音声トラックが無い")
     }
 
+    /// `AudioTrackConditions.from(tracks:)` の契約どおり**全トラック**を渡す
+    /// （1 本だけ渡すと A/B 交互配置で B 側の判定材料を取りこぼす）。
     private func audioConditions(_ clips: [TimelineClip],
                                  sources: [UUID: AVAsset]) async throws -> AudioTrackConditions {
-        let track = try await audioTrack(clips, sources: sources)
-        let segments = try await track.load(.segments)
-        let formats = try await track.load(.formatDescriptions)
-        return AudioTrackConditions.from(segments: segments, formatDescriptions: formats)
+        let tracks = try await audioTracks(clips, sources: sources)
+        return AudioTrackConditions.from(tracks: await AudioTrackData.load(from: tracks))
     }
 
     /// 各セグメントの source − target 秒（スケール判定が見ている実量）。
@@ -1511,13 +1573,19 @@ final class MultiClipExportTests: XCTestCase {
         let composition = try await TimelineCompositionBuilder().build(clips: clips, sources: sources).composition
         let mapping = TimelineMapping(clips: clips)
 
+        // S11: `applyRanges: []` は「適用なし（全区間 OFF）」なので、そのままだと
+        // 全ケースが「ゲートで止まっただけ」の空振りになる。clamp の効果を見るため
+        // 全ケースでクリップ全体を覆う区間を渡す。
+        let allCovered = MosaicApplyGate.fullCoverRanges(for: clips)
+
         // 1) seed あり + clamp あり: 実検出ゼロ
         let (exporter, counter) = try makeCountingExporter()
         let outURL = try await exporter.export(
             asset: composition,
             detectionCaches: [photoID: [0.0: [fakeFace(cx: 0.5, cy: 0.5)]]],
             mapping: mapping,
-            photoSourceIDs: [photoID]
+            photoSourceIDs: [photoID],
+            applyRanges: allCovered
         ) { _ in }
         defer { try? FileManager.default.removeItem(at: outURL) }
         XCTAssertEqual(counter.count, 0,
@@ -1529,7 +1597,8 @@ final class MultiClipExportTests: XCTestCase {
             asset: composition,
             detectionCaches: [photoID: [0.0: []]],
             mapping: mapping,
-            photoSourceIDs: [photoID]
+            photoSourceIDs: [photoID],
+            applyRanges: allCovered
         ) { _ in }
         defer { try? FileManager.default.removeItem(at: emptySeedURL) }
         XCTAssertEqual(emptySeedCounter.count, 0,
@@ -1539,7 +1608,8 @@ final class MultiClipExportTests: XCTestCase {
         let (controlExporter, controlCounter) = try makeCountingExporter()
         let controlURL = try await controlExporter.export(
             asset: composition,
-            mapping: mapping
+            mapping: mapping,
+            applyRanges: allCovered
         ) { _ in }
         defer { try? FileManager.default.removeItem(at: controlURL) }
         XCTAssertGreaterThan(controlCounter.count, 0,
@@ -1583,9 +1653,14 @@ final class MultiClipExportTests: XCTestCase {
             .build(clips: clips, sources: [sourceID: AVURLAsset(url: url)]).composition
         let mapping = TimelineMapping(clips: clips)
 
-        // 1) 区間なし（既存挙動）: 全編で検出が走る。
+        // 1) 全区間を覆う区間（新規プロジェクトの既定状態）: 全編で検出が走る。
+        //
+        // ⚠️ S11 で `applyRanges: []` の意味が「全区間適用」→「適用なし（全区間 OFF）」へ
+        // 反転したため、ベースラインは `fullCoverRanges(for:)` を明示的に渡す。
         let (base, baseCounter) = try makeCountingExporter()
-        let baseURL = try await base.export(asset: composition, mapping: mapping) { _ in }
+        let baseURL = try await base.export(
+            asset: composition, mapping: mapping,
+            applyRanges: MosaicApplyGate.fullCoverRanges(for: clips)) { _ in }
         defer { try? FileManager.default.removeItem(at: baseURL) }
         XCTAssertGreaterThan(baseCounter.count, 0)
         let basePTS = try await videoPresentationTimes(of: baseURL)
@@ -1594,14 +1669,14 @@ final class MultiClipExportTests: XCTestCase {
         // 2) どのフレームも区間外: 実検出ゼロ。
         //
         // 区間はクリップ使用範囲 [0,2) と**交差させる**こと。交差しない区間（例 [5,6)）は
-        // 孤児区間として `MosaicApplyGate.effectiveRanges` に落とされ、「区間指定なし」＝
-        // 全区間 ON に戻る（帯 UI に出ない区間でモザイクが全消えする事故を防ぐ仕様。
-        // `MosaicEditorModel.effectiveApplyRanges` の doc 参照）。
+        // 孤児区間として `MosaicApplyGate.effectiveRanges` に落とされるので、
+        // 「帯に 1 本出ているのに全フレーム区間外」という状況を作れない。
         // 代わりに、30fps のフレーム時刻（k/30 秒）の**隙間**に収まる極小区間を使う。
         let (off, offCounter) = try makeCountingExporter()
         let offURL = try await off.export(
             asset: composition, mapping: mapping,
-            applyRanges: [MosaicApplyRange(sourceID: sourceID, sourceStart: 1.001, sourceEnd: 1.002)]
+            applyRanges: [MosaicApplyRange(clipID: clips[0].id, sourceID: sourceID,
+                                           sourceStart: 1.001, sourceEnd: 1.002)]
         ) { _ in }
         defer { try? FileManager.default.removeItem(at: offURL) }
         XCTAssertEqual(offCounter.count, 0, "区間外のフレームで実検出が走っている（ゲート未配線）")
@@ -1615,7 +1690,8 @@ final class MultiClipExportTests: XCTestCase {
         let (partial, partialCounter) = try makeCountingExporter()
         let partialURL = try await partial.export(
             asset: composition, mapping: mapping,
-            applyRanges: [MosaicApplyRange(sourceID: sourceID, sourceStart: 0.5, sourceEnd: 1.0)]
+            applyRanges: [MosaicApplyRange(clipID: clips[0].id, sourceID: sourceID,
+                                           sourceStart: 0.5, sourceEnd: 1.0)]
         ) { _ in }
         defer { try? FileManager.default.removeItem(at: partialURL) }
         XCTAssertGreaterThan(partialCounter.count, 0, "区間内でも検出が走っていない")
@@ -1812,9 +1888,13 @@ final class MultiClipExportTests: XCTestCase {
                 faceEnabled: faceEnabled) { _ in }
         }
 
-        let bothURL = try await export(applyRanges: [], faceEnabled: true)
+        // 対照（両方にモザイク）は「全クリップを覆う区間」で作る。S11 で `[]` の意味が
+        // 「全区間適用」→「適用なし」へ反転したため、空配列ではベースラインにならない。
+        let bothURL = try await export(
+            applyRanges: MosaicApplyGate.fullCoverRanges(for: [clipA, clipB]), faceEnabled: true)
         let gatedURL = try await export(
-            applyRanges: [MosaicApplyRange(sourceID: sourceA, sourceStart: 0, sourceEnd: clipSeconds)],
+            applyRanges: [MosaicApplyRange(clipID: clipA.id, sourceID: sourceA,
+                                           sourceStart: 0, sourceEnd: clipSeconds)],
             faceEnabled: true)
         defer {
             for url in [bothURL, gatedURL] { try? FileManager.default.removeItem(at: url) }
@@ -1855,6 +1935,275 @@ final class MultiClipExportTests: XCTestCase {
             XCTAssertGreaterThan(luminanceStdDev(gated[index].right), rawMin,
                                  "重なり外の区間外フレームにモザイクが乗っている pts=\(gated[index].pts)")
         }
+    }
+
+    // MARK: - 書き出しのキャンセル
+
+    /// `temporaryDirectory` にある書き出し中間ファイル（`mosaic-*.mp4`）の一覧。
+    private func mosaicTempFiles() -> Set<String> {
+        let tmp = FileManager.default.temporaryDirectory
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: tmp.path)) ?? []
+        return Set(names.filter { $0.hasPrefix("mosaic-") })
+    }
+
+    /// 書き出し中に `cancel()` を呼ぶと `CancellationError` が throw され、
+    /// 打ち切られた部分ファイル（`mosaic-*.mp4`）が tmp に残らないこと。
+    ///
+    /// 中断フラグと `cancelReading()` は**両方**必要:
+    /// フラグだけでは `copyNextSampleBuffer()` がブロックしたまま戻らず、
+    /// `cancelReading()` だけでは `group.notify` が `.cancelled` を `.failed` と
+    /// 区別できずに部分ファイルが「成功」として返る（＝ Photos に保存される）。
+    func test_cancelDuringExport_throwsCancellationErrorAndLeavesNoPartialFile() async throws {
+        guard MTLCreateSystemDefaultDevice() != nil else {
+            throw XCTSkip("Metal デバイスが無い環境ではスキップ")
+        }
+        // 4.0s より長くしないこと: `appendSineAudio` は映像より先に音声を全部
+        // 積むため、writer のバッファ上限を超えると `isReadyForMoreMediaData` が
+        // 戻らなくなり**素材生成の時点でハングする**（6.0s で実測）。
+        let url = try await makeTestVideo(seconds: 4.0, withAudio: true)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        // 同じ素材を 3 本並べて合成尺 12s（= 360 フレーム）にする。素材そのものを
+        // 長くすると上記のハングに当たるので、クリップ数で書き出し時間を稼ぐ。
+        // 中断までの実測レイテンシ（≈0.12s）に対して書き出し全体（≈1s）が十分長くないと
+        // 「キャンセルより先に完走してしまう」競合でテストが不安定になる。
+        let sourceID = UUID()
+        let clips = (0..<3).map { _ in
+            TimelineClip(sourceID: sourceID, sourceStart: 0, sourceEnd: 4)
+        }
+        let composition = try await TimelineCompositionBuilder()
+            .build(clips: clips, sources: [sourceID: AVURLAsset(url: url)]).composition
+
+        let before = mosaicTempFiles()
+        let exporter = try makeExporter()
+        // 最初の進捗通知（＝ 1 フレーム目を書いた時点）でキャンセルする。
+        let started = expectation(description: "書き出しが始まった")
+        started.assertForOverFulfill = false
+
+        let task = Task { () -> URL in
+            try await exporter.export(asset: composition, mapping: TimelineMapping(clips: clips)) { _ in
+                started.fulfill()
+            }
+        }
+        await fulfillment(of: [started], timeout: 60)
+        let cancelledAt = CFAbsoluteTimeGetCurrent()
+        exporter.cancel()
+
+        do {
+            let outURL = try await task.value
+            try? FileManager.default.removeItem(at: outURL)
+            XCTFail("キャンセルしたのに書き出しが成功として返った: \(outURL.lastPathComponent)")
+        } catch is CancellationError {
+            print(String(format: "[TEST] cancel latency = %.3fs",
+                         CFAbsoluteTimeGetCurrent() - cancelledAt))
+        } catch {
+            XCTFail("CancellationError 以外が throw された: \(error)")
+        }
+
+        let leftovers = mosaicTempFiles().subtracting(before)
+        XCTAssertTrue(leftovers.isEmpty,
+                      "中断された部分ファイルが tmp に残っている: \(leftovers.sorted())")
+    }
+
+    /// 同一インスタンスを再利用しても、前回のキャンセル要求が次の書き出しに
+    /// 持ち越されないこと（`export` 冒頭で中断状態をリセットしている）。
+    func test_exporterReuseAfterCancel_completesNextExport() async throws {
+        guard MTLCreateSystemDefaultDevice() != nil else {
+            throw XCTSkip("Metal デバイスが無い環境ではスキップ")
+        }
+        let url = try await makeTestVideo(seconds: 2.0, withAudio: false)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let sourceID = UUID()
+        let clips = [TimelineClip(sourceID: sourceID, sourceStart: 0, sourceEnd: 2)]
+        let composition = try await TimelineCompositionBuilder()
+            .build(clips: clips, sources: [sourceID: AVURLAsset(url: url)]).composition
+
+        let exporter = try makeExporter()
+        // 書き出し前に cancel を撃っておく（フラグが残っていれば次も落ちる）。
+        exporter.cancel()
+        let outURL = try await exporter.export(
+            asset: composition, mapping: TimelineMapping(clips: clips)) { _ in }
+        defer { try? FileManager.default.removeItem(at: outURL) }
+
+        let duration = try await AVURLAsset(url: outURL).load(.duration)
+        XCTAssertEqual(CMTimeGetSeconds(duration), 2.0, accuracy: 0.2,
+                       "再利用した exporter の書き出しが完走していない")
+    }
+}
+
+/// S10b: 出力解像度の可視化（`Built.outputSize` / `hasDownscaledClips`）の回帰ガード。
+///
+/// 出力解像度は**先頭クリップ基準**で決まるため、並べ替えという日常操作で
+/// 無言のうちに変わる。とくに写真クリップは長辺 1920px 上限
+/// （`PhotoClipEncoder.maxLongSidePixels`）なので、写真を先頭にすると
+/// 高解像度の動画があっても 1920 枠へ落ちる。UI がそれを出せるように、
+/// 「builder が出す値」と「モデルの `@Published` が並べ替えに追随すること」を実測で固定する。
+@MainActor
+final class OutputResolutionTests: XCTestCase {
+    private func makeModel() -> MosaicEditorModel {
+        MosaicEditorModel(mode: .video, recents: RecentItemsStore())
+    }
+
+    /// 指定解像度の単色動画（音声なし・30fps）。
+    private func makeSizedVideo(width: Int, height: Int, seconds: Double) async throws -> URL {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(UUID().uuidString).mp4")
+        let writer = try AVAssetWriter(outputURL: url, fileType: .mp4)
+        let input = AVAssetWriterInput(mediaType: .video, outputSettings: [
+            AVVideoCodecKey: AVVideoCodecType.h264,
+            AVVideoWidthKey: width,
+            AVVideoHeightKey: height
+        ])
+        input.expectsMediaDataInRealTime = false
+        let adaptor = AVAssetWriterInputPixelBufferAdaptor(
+            assetWriterInput: input,
+            sourcePixelBufferAttributes: [
+                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+                kCVPixelBufferWidthKey as String: width,
+                kCVPixelBufferHeightKey as String: height
+            ])
+        writer.add(input)
+        writer.startWriting()
+        writer.startSession(atSourceTime: .zero)
+        for i in 0..<Int(seconds * 30) {
+            while !input.isReadyForMoreMediaData {
+                try await Task.sleep(nanoseconds: 1_000_000)
+            }
+            var pb: CVPixelBuffer?
+            CVPixelBufferCreate(kCFAllocatorDefault, width, height,
+                                kCVPixelFormatType_32BGRA, nil, &pb)
+            guard let buffer = pb else { continue }
+            CVPixelBufferLockBaseAddress(buffer, [])
+            memset(CVPixelBufferGetBaseAddress(buffer), 0x40,
+                   CVPixelBufferGetBytesPerRow(buffer) * height)
+            CVPixelBufferUnlockBaseAddress(buffer, [])
+            adaptor.append(buffer, withPresentationTime: CMTime(value: CMTimeValue(i), timescale: 30))
+        }
+        input.markAsFinished()
+        await writer.finishWriting()
+        return url
+    }
+
+    private func solidImage(width: CGFloat, height: CGFloat) -> UIImage {
+        let format = UIGraphicsImageRendererFormat.default()
+        format.scale = 1
+        return UIGraphicsImageRenderer(size: CGSize(width: width, height: height),
+                                       format: format).image { ctx in
+            UIColor.darkGray.setFill()
+            ctx.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        }
+    }
+
+    private func waitUntilLoaded(_ model: MosaicEditorModel,
+                                 timeout: TimeInterval = 30) async throws {
+        let deadline = Date().addingTimeInterval(timeout)
+        while model.isLoading {
+            if Date() > deadline {
+                XCTFail("動画の読み込みが \(timeout)s 以内に完了しない")
+                return
+            }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+    }
+
+    /// builder が返す出力解像度は先頭クリップ基準で、並べ替えると入れ替わること。
+    /// 縮小されるクリップ（出力枠より大きいクリップ）の id も同時に入れ替わる。
+    func test_builtOutputSize_followsFirstClipOnReorder() async throws {
+        let small = try await makeSizedVideo(width: 320, height: 240, seconds: 0.5)
+        let large = try await makeSizedVideo(width: 640, height: 480, seconds: 0.5)
+        defer {
+            try? FileManager.default.removeItem(at: small)
+            try? FileManager.default.removeItem(at: large)
+        }
+        let smallID = UUID(), largeID = UUID()
+        let sources: [UUID: AVAsset] = [smallID: AVURLAsset(url: small),
+                                        largeID: AVURLAsset(url: large)]
+        let smallClip = TimelineClip(sourceID: smallID, sourceStart: 0, sourceEnd: 0.5)
+        let largeClip = TimelineClip(sourceID: largeID, sourceStart: 0, sourceEnd: 0.5)
+
+        let largeFirst = try await TimelineCompositionBuilder()
+            .build(clips: [largeClip, smallClip], sources: sources)
+        XCTAssertEqual(largeFirst.outputSize, CGSize(width: 640, height: 480),
+                       "先頭 640x480 のとき出力解像度が先頭基準になっていない")
+        XCTAssertTrue(largeFirst.downscaledClipIDs.isEmpty,
+                      "出力枠より小さいクリップ（拡大される側）が縮小扱いになっている")
+
+        let smallFirst = try await TimelineCompositionBuilder()
+            .build(clips: [smallClip, largeClip], sources: sources)
+        XCTAssertEqual(smallFirst.outputSize, CGSize(width: 320, height: 240),
+                       "並べ替えで先頭が 320x240 になっても出力解像度が変わっていない")
+        XCTAssertEqual(smallFirst.downscaledClipIDs, [largeClip.id],
+                       "出力枠より大きいクリップが縮小対象として報告されていない")
+    }
+
+    /// モデルの `@Published`（UI が読む唯一の経路）が並べ替えに追随すること:
+    /// 640x480 + 320x240 のタイムラインで、先頭を入れ替えると
+    /// `outputRenderSize` と `hasDownscaledClips` が同時に反転する。
+    func test_moveClip_updatesOutputRenderSizeAndDownscaleFlag() async throws {
+        let large = try await makeSizedVideo(width: 640, height: 480, seconds: 0.5)
+        let small = try await makeSizedVideo(width: 320, height: 240, seconds: 0.5)
+        defer {
+            try? FileManager.default.removeItem(at: large)
+            try? FileManager.default.removeItem(at: small)
+        }
+        let model = makeModel()
+        model.load(videoURL: large)
+        try await waitUntilLoaded(model)
+        await model.awaitPendingTimelineRebuild()
+
+        await model.appendVideoClip(url: small)
+        await model.awaitPendingTimelineRebuild()
+        XCTAssertEqual(model.clips.count, 2, "2 本目のクリップが追加されていない")
+        XCTAssertEqual(model.outputRenderSize, CGSize(width: 640, height: 480),
+                       "先頭（640x480）基準の出力解像度が publish されていない")
+        XCTAssertFalse(model.hasDownscaledClips,
+                       "縮小されるクリップが無いのに注意フラグが立っている")
+
+        // 320x240 のクリップを先頭へ動かす（＝出力解像度が落ちる並べ替え）。
+        let secondClipID = try XCTUnwrap(model.clips.last?.id)
+        model.moveClip(id: secondClipID, toIndex: 0)
+        await model.awaitPendingTimelineRebuild()
+
+        XCTAssertEqual(model.outputRenderSize, CGSize(width: 320, height: 240),
+                       "並べ替えで先頭が変わったのに outputRenderSize が更新されていない")
+        XCTAssertTrue(model.hasDownscaledClips,
+                      "640x480 のクリップが 320x240 枠へ縮小されるのに注意フラグが立たない")
+    }
+
+    /// 写真クリップを先頭にすると出力解像度が写真の枠（長辺 1920px 上限）まで落ち、
+    /// 高解像度の動画クリップが縮小対象になること（無言の画質低下の回帰ガード）。
+    func test_photoClipFirst_dropsOutputResolutionToPhotoFrame() async throws {
+        // 長辺 1920px を超える動画（写真クリップの上限より大きい素材）。
+        let video = try await makeSizedVideo(width: 2560, height: 1440, seconds: 0.4)
+        defer { try? FileManager.default.removeItem(at: video) }
+        let model = makeModel()
+        model.load(videoURL: video)
+        try await waitUntilLoaded(model)
+        await model.awaitPendingTimelineRebuild()
+        XCTAssertEqual(model.outputRenderSize, CGSize(width: 2560, height: 1440),
+                       "単一クリップの出力解像度が素材解像度になっていない")
+
+        await model.appendPhotoClip(image: solidImage(width: 2560, height: 1440), seconds: 1.0)
+        await model.awaitPendingTimelineRebuild()
+        XCTAssertNil(model.errorMessage, "写真クリップの追加に失敗した")
+        XCTAssertEqual(model.clips.count, 2)
+        // 写真は末尾なので出力解像度は動画のまま。写真側が縮小される（拡大なので false）。
+        XCTAssertEqual(model.outputRenderSize, CGSize(width: 2560, height: 1440),
+                       "写真を末尾に足しただけで出力解像度が変わった")
+        XCTAssertFalse(model.hasDownscaledClips,
+                       "出力枠より小さい写真クリップが縮小扱いになっている")
+
+        // 写真を先頭へ並べ替える＝出力が写真の枠（長辺 1920px）へ落ちる。
+        let photoClipID = try XCTUnwrap(model.clips.last?.id)
+        model.moveClip(id: photoClipID, toIndex: 0)
+        await model.awaitPendingTimelineRebuild()
+
+        let size = try XCTUnwrap(model.outputRenderSize)
+        XCTAssertEqual(size, CGSize(width: 1920, height: 1080),
+                       "写真クリップを先頭にしたのに出力解像度が写真の枠へ落ちていない")
+        XCTAssertTrue(model.hasDownscaledClips,
+                      "2560x1440 の動画が 1920x1080 枠へ縮小されるのに注意フラグが立たない")
     }
 }
 

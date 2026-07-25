@@ -69,8 +69,11 @@ final class CameraMosaicPipeline {
     private var lastLoggedFrameSize = CGSize.zero
     #endif
 
-    /// プレビュー描画の最大幅（MosaicPreviewController と同じ 720px）。
-    private static let previewMaxWidth = 720.0
+    /// プレビュー描画の最大幅。粗さスライダーの基準幅
+    /// （`MosaicRenderer.referenceFrameWidth`）に合わせる。`MosaicPreviewController`
+    /// の縮小幅と同じ由来で、素の定数を書くと片方だけ変えたときに
+    /// プレビューとカメラで粗さが食い違う。
+    private static let previewMaxWidth = Double(MosaicRenderer.referenceFrameWidth)
     /// 非録画時、検出全滅がこの秒数続いたらモザイクを消す。録画中は消さない
     /// （焼き込みは不可逆のため、最後の位置に置きつづける安全側挙動）。
     private static let lostGraceSeconds = 0.5

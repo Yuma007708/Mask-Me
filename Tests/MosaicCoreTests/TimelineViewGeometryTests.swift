@@ -267,9 +267,10 @@ final class TimelineBandLayoutTests: XCTestCase {
                                             mapping: mapping, existing: [])
         let spans = TimelineBandLayout.applySpans(ranges: ranges, mapping: mapping)
 
-        // 同一素材の連続区間なので 1 本にマージされ、両クリップへ 2 セグメントとして写る。
-        XCTAssertEqual(ranges.count, 1)
+        // S11: clipID アンカーなのでクリップごとに 1 本ずつ（＝1 区間 1 セグメント。不変条件 I2）。
+        XCTAssertEqual(ranges.count, 2)
         XCTAssertEqual(spans.count, 2)
+        XCTAssertEqual(Set(spans.map(\.rangeID)).count, 2, "1 区間が複数セグメントに写っている")
         XCTAssertEqual(spans[0].start, 2, accuracy: 1e-9)
         XCTAssertEqual(spans[0].end, 5, accuracy: 1e-9)
         XCTAssertEqual(spans[1].start, 5, accuracy: 1e-9)
@@ -283,24 +284,52 @@ final class TimelineBandLayoutTests: XCTestCase {
         let source = UUID()
         let scaled = clip(source: source, start: 0, end: 8, rate: 2)
         let mapping = TimelineMapping(clips: [scaled])
-        let ranges = [MosaicApplyRange(sourceID: source, sourceStart: 2, sourceEnd: 6)]
+        let ranges = [MosaicApplyRange(clipID: scaled.id, sourceID: source, sourceStart: 2, sourceEnd: 6)]
         let spans = TimelineBandLayout.applySpans(ranges: ranges, mapping: mapping)
 
         XCTAssertEqual(spans.count, 1)
         XCTAssertEqual(spans[0].start, 1, accuracy: 1e-12)
         XCTAssertEqual(spans[0].end, 3, accuracy: 1e-12)
+        XCTAssertTrue(spans[0].isEdgeAdjustable, "動画クリップは端ドラッグ可")
     }
 
-    /// 別素材・使用範囲外の区間は表示に現れない。
+    /// 別素材・別クリップ・使用範囲外の区間は表示に現れない。
     func test_applySpans_skipsNonOverlappingRanges() {
         let used = UUID()
-        let mapping = TimelineMapping(clips: [clip(source: used, start: 2, end: 4)])
+        let target = clip(source: used, start: 2, end: 4)
+        let mapping = TimelineMapping(clips: [target])
         let ranges = [
-            MosaicApplyRange(sourceID: UUID(), sourceStart: 2, sourceEnd: 4),   // 別素材
-            MosaicApplyRange(sourceID: used, sourceStart: 5, sourceEnd: 6),     // 使用範囲外
-            MosaicApplyRange(sourceID: used, sourceStart: .nan, sourceEnd: 3)   // 壊れた区間
+            // 別素材
+            MosaicApplyRange(clipID: target.id, sourceID: UUID(), sourceStart: 2, sourceEnd: 4),
+            // 別クリップ（S11: clipID アンカー）
+            MosaicApplyRange(clipID: UUID(), sourceID: used, sourceStart: 2, sourceEnd: 4),
+            // 使用範囲外
+            MosaicApplyRange(clipID: target.id, sourceID: used, sourceStart: 5, sourceEnd: 6),
+            // 壊れた区間
+            MosaicApplyRange(clipID: target.id, sourceID: used, sourceStart: .nan, sourceEnd: 3)
         ]
         XCTAssertTrue(TimelineBandLayout.applySpans(ranges: ranges, mapping: mapping).isEmpty)
+    }
+
+    /// 写真素材のセグメントは端ドラッグ不可としてマークされること（UI がハンドルを出さない）。
+    ///
+    /// 写真の素材時刻は常に 0 へ丸められ、区間が必ずクリップ全体になるため
+    /// `MosaicApplyGate.ranges(replacingRangeID:clipID:...)` が必ず `existing` を返す
+    /// （＝端ドラッグが構造的に no-op）。
+    func test_applySpans_marksPhotoSpansAsNotEdgeAdjustable() {
+        let photoSource = UUID()
+        let photo = clip(source: photoSource, start: 0, end: 3)
+        let video = clip(source: UUID(), start: 0, end: 3)
+        let mapping = TimelineMapping(clips: [photo, video])
+        let ranges = MosaicApplyGate.fullCoverRanges(for: [photo, video])
+        let spans = TimelineBandLayout.applySpans(ranges: ranges, mapping: mapping,
+                                                  photoSourceIDs: [photoSource])
+        XCTAssertEqual(spans.count, 2)
+        XCTAssertFalse(spans[0].isEdgeAdjustable, "写真クリップにハンドルが出てしまう")
+        XCTAssertTrue(spans[1].isEdgeAdjustable)
+        // 既定引数（渡し忘れ）では従来どおり全部 true。
+        XCTAssertTrue(TimelineBandLayout.applySpans(ranges: ranges, mapping: mapping)
+            .allSatisfy(\.isEdgeAdjustable))
     }
 
     // MARK: - トリム量の換算

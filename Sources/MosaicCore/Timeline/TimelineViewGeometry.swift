@@ -170,24 +170,35 @@ public struct TimelineJointLayout: Equatable, Sendable, Identifiable {
     }
 }
 
-/// モザイク適用区間 1 本を 1 クリップへ写した合成時刻の区間。
+/// モザイク適用区間 1 本を、それが属するクリップへ写した合成時刻の区間。
 ///
-/// 適用区間は素材時刻アンカーなので、同じ素材を使うクリップが複数あれば
-/// 1 本の `MosaicApplyRange` が複数のセグメントとして現れる。
+/// **1 本の `MosaicApplyRange` は最大 1 つのセグメントにしか写らない（不変条件 I2）。**
+/// 区間は `clipID` アンカー（S11）であり、`clipID` は一意だからである。
+/// 旧仕様（素材アンカーのみ）では同じ素材を使うクリップの数だけセグメントが現れた。
 public struct TimelineApplySpan: Equatable, Sendable, Identifiable {
     public let rangeID: UUID
     public let clipID: UUID
     public let start: Double
     public let end: Double
+    /// 端ドラッグ（区間の伸縮）を受け付けるか。
+    ///
+    /// 写真クリップでは false。写真の素材時刻は `TimelineState.clampedSourceTime` が
+    /// 常に 0 へ丸めるため適用区間は必ずクリップ全体 [0, sourceEnd) になり、
+    /// `MosaicApplyGate.ranges(replacingRangeID:clipID:...)` の許容誤差判定が常に一致して
+    /// **必ず no-op になる**（指を離すと帯が元へ戻るだけで、エラーも無効化表示も出ない）。
+    /// UI 側でハンドル自体を出さないことで、この構造的な no-op を明示する。
+    public let isEdgeAdjustable: Bool
 
     public var id: String { "\(rangeID.uuidString)/\(clipID.uuidString)" }
     public var duration: Double { max(0, end - start) }
 
-    public init(rangeID: UUID, clipID: UUID, start: Double, end: Double) {
+    public init(rangeID: UUID, clipID: UUID, start: Double, end: Double,
+                isEdgeAdjustable: Bool = true) {
         self.rangeID = rangeID
         self.clipID = clipID
         self.start = start
         self.end = end
+        self.isEdgeAdjustable = isEdgeAdjustable
     }
 }
 
@@ -251,23 +262,29 @@ public enum TimelineBandLayout {
     /// クリップの使用範囲と交差しない区間は結果に現れない。
     /// 結果はクリップのタイムライン順で並ぶ。
     ///
-    /// **交差判定は `MosaicApplyGate.effectiveRanges(_:mapping:)` と同じ式**であり、
-    /// 「帯が n 本 ⇔ 有効区間が n 個」「帯 0 本 ⇔ ゲートが全区間 ON」が成り立つ
-    /// （見えている帯とモザイクの挙動を一致させる不変条件。片方だけ式を変えないこと）。
+    /// **交差判定は `MosaicApplyGate.clippedInterval(clip:range:)` を呼ぶ**
+    /// （`effectiveRanges` と bit 同一。不変条件 I3）。これにより
+    /// 「帯が n 本 ⇔ 有効区間が n 個」「帯 0 本 ⇔ ゲートが全区間 OFF」（I1）が成り立つ。
+    /// 式をここへ書き写さないこと。
+    ///
+    /// - Parameter photoSourceIDs: 写真素材の素材ID集合。該当クリップのセグメントは
+    ///   `isEdgeAdjustable == false`（端ドラッグが構造的に no-op になるため。
+    ///   `TimelineApplySpan.isEdgeAdjustable` の doc 参照）。
+    ///   **既定値は必須**（`VideoTimelineView` の既存呼び出しを壊さないため）。
     public static func applySpans(ranges: [MosaicApplyRange],
-                                  mapping: TimelineMapping) -> [TimelineApplySpan] {
+                                  mapping: TimelineMapping,
+                                  photoSourceIDs: Set<UUID> = []) -> [TimelineApplySpan] {
         var result: [TimelineApplySpan] = []
         for span in mapping.clipSpans {
             let clip = span.clip
-            for range in ranges where range.sourceID == clip.sourceID {
-                let sourceStart = max(range.sourceStart, clip.sourceStart)
-                let sourceEnd = min(range.sourceEnd, clip.sourceEnd)
-                guard sourceStart.isFinite, sourceEnd.isFinite, sourceStart < sourceEnd else { continue }
+            for range in ranges {
+                guard let clipped = MosaicApplyGate.clippedInterval(clip: clip, range: range) else { continue }
                 result.append(TimelineApplySpan(
                     rangeID: range.id,
                     clipID: clip.id,
-                    start: span.start + (sourceStart - clip.sourceStart) / clip.rate,
-                    end: span.start + (sourceEnd - clip.sourceStart) / clip.rate))
+                    start: span.start + (clipped.start - clip.sourceStart) / clip.rate,
+                    end: span.start + (clipped.end - clip.sourceStart) / clip.rate,
+                    isEdgeAdjustable: !photoSourceIDs.contains(clip.sourceID)))
             }
         }
         return result
@@ -362,14 +379,25 @@ public enum TimelineThumbnailLayout {
     /// 枠を広げて数を抑える（コマは粗くなるが描画は詰まらない）。
     public static let maximumSlotsPerClip = 60
 
+    /// 素材時刻は `bandOffset = band.start - spanStart` を基準に `clip.sourceStart` から測る。
+    ///
+    /// **トリム中のプレビューでは「下書きを適用したクリップ」と `spanStart: band.start` を
+    /// 渡すこと**（`TimelineClipBandView.previewClip`）。`clip` を未編集のまま渡すと
+    /// `.start` 側の外向きトリムで帯に出るコマと確定後に入る映像が食い違う:
+    /// `.start` のプレビューは `band.start` を動かさず右端だけ伸ばすので `bandOffset` は
+    /// 常に 0 のままで、帯には現行 `sourceStart` から**先**のコマが並ぶのに、実際に
+    /// 足されるのは `sourceStart` より**前**の素材になる。下書き適用済みクリップを渡せば
+    /// `.start` / `.end` のどちらでもコマと実際の映像が一致する。
+    ///
     /// - Parameters:
-    ///   - spanStart: クリップの合成区間の開始時刻（`TimelineClipLayout.spanStart`）。
+    ///   - spanStart: 素材時刻の原点にする合成時刻。通常は `TimelineClipLayout.spanStart`、
+    ///     プレビューでは `band.start`（＝ `bandOffset` を 0 にする）。
     ///   - band: 実際に描く帯の合成時刻区間（トリム中のプレビューでは差し替わる）。
-    ///   - sourceDuration: 素材の実尺（分かる場合）。**外向きトリムのプレビュー**では
+    ///   - sourceDuration: 素材の実尺（分かる場合）。`.end` 側の外向きトリムでは
     ///     `band` が現行の合成区間を超えて伸びるため、素材時刻の上限を `clip.sourceEnd`
     ///     に固定すると伸ばした領域の全枠が現行 `sourceEnd` の 1 コマに張り付く
     ///     （実測: 6 枠中 4 枠が同一コマ）。この値を渡すと素材実尺まで先のコマを引ける。
-    ///     nil のときは従来どおり `clip.sourceEnd` が上限。
+    ///     nil のときは `clip.sourceEnd` が上限。
     public static func slots(clip: TimelineClip,
                              spanStart: Double,
                              band: CompositionInterval,

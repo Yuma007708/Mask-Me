@@ -22,6 +22,10 @@ struct MaskMeApp: App {
             .onAppear {
                 // 強制終了なら写真下書きは破棄、通常の復帰なら保持（動画は常に保持）。
                 draftStore.reconcile(photoSessionActive: photoEditingActive)
+                // tmp の中間ファイル（picked-*/photoclip-*/mosaic-*）を age ベースで掃除する。
+                // ディレクトリ列挙と削除は同期 IO なので、起動パスを塞がないよう
+                // バックグラウンドへ逃がす（結果は UI に影響しない）。
+                Task.detached(priority: .background) { TempMediaJanitor.sweep() }
             }
         }
     }

@@ -11,6 +11,32 @@ struct DraftSource: Codable, Equatable, Hashable {
     let fileName: String
 }
 
+/// 下書きに保存する「モザイクを掛ける対象として選択されていた顔」1 件の目印。
+///
+/// **顔 ID は保存しない**: `FaceTarget.id` は検出のたびに `UUID()` を振り直すため、
+/// 保存しても復元時の顔とは決して一致しない（下書きを再開すると顔の選択が
+/// 全部外れる不具合の原因）。そこで、`selecting(_:sourceID:targets:)` が
+/// プレビュー描画で顔を突き合わせているのと**同じ作法**——素材スコープ＋
+/// 正規化重心の近さ——で再照合できる情報だけを保存する。
+///
+/// - `centroid` は**素材フレーム基準**の正規化重心（`normalizedCentroid(of:)`）。
+///   合成フレーム基準へ写した後の値を混ぜてはならない（レターボックスで座標系が
+///   ずれる。`displayFaces(at:matching:)` の doc 参照）。
+/// （`public`: `MosaicEditorModel.applyRestoredParameters` の引数に現れるため。
+/// アプリターゲット内でのみ使う型で、外部へ公開する意図は無い。）
+public struct DraftFaceSelection: Codable, Equatable, Hashable {
+    /// 顔が属する素材ID（`FaceTarget.sourceID`）。写真下書き・素材ID導入前の顔は
+    /// nil で、復元時は素材不問で照合される。
+    public let sourceID: UUID?
+    /// 選択されていた顔の正規化重心（素材フレーム基準）。
+    public let centroid: CGPoint
+
+    public init(sourceID: UUID?, centroid: CGPoint) {
+        self.sourceID = sourceID
+        self.centroid = centroid
+    }
+}
+
 /// A persisted "work in progress" edit. Video drafts are durable (survive a
 /// force-quit) so the user can resume from the Home list; the photo draft is
 /// retained only across a normal background/return and is discarded on a
@@ -33,6 +59,13 @@ struct EditingDraft: Codable, Identifiable, Equatable {
     let backgroundBlockSize: Float
     /// Manual mosaic rectangles, in normalized [0,1] coordinates.
     let manualRects: [CGRect]
+    /// 選択されていた顔の目印（素材ID＋正規化重心）。
+    ///
+    /// **nil と `[]` は意味が違う**:
+    /// - nil = この下書きには顔選択の情報が無い（新フィールド導入前に保存された
+    ///   下書き）。復元時は従来どおり初期スキャンの自動選択規則に落ちる。
+    /// - `[]` = 保存時点でどの顔も選択されていなかった（情報としては有効）。
+    let faceSelections: [DraftFaceSelection]?
     let thumbnailFileName: String?
     let updatedAt: Date
 
@@ -47,6 +80,7 @@ struct EditingDraft: Codable, Identifiable, Equatable {
         faceBlockSize: Float,
         backgroundBlockSize: Float,
         manualRects: [CGRect],
+        faceSelections: [DraftFaceSelection]? = nil,
         thumbnailFileName: String?,
         updatedAt: Date = Date()
     ) {
@@ -60,6 +94,7 @@ struct EditingDraft: Codable, Identifiable, Equatable {
         self.faceBlockSize = faceBlockSize
         self.backgroundBlockSize = backgroundBlockSize
         self.manualRects = manualRects
+        self.faceSelections = faceSelections
         self.thumbnailFileName = thumbnailFileName
         self.updatedAt = updatedAt
     }
@@ -73,7 +108,7 @@ struct EditingDraft: Codable, Identifiable, Equatable {
     private enum CodingKeys: String, CodingKey {
         case id, kind, sourceFileName, manualRects, thumbnailFileName, updatedAt
         case faceMosaicOn, backgroundMosaicOn, faceBlockSize, backgroundBlockSize
-        case sources, timeline
+        case sources, timeline, faceSelections
     }
 
     // 旧スキーマ（後方互換デコード専用）。
@@ -100,6 +135,12 @@ struct EditingDraft: Codable, Identifiable, Equatable {
         sources = try c.decodeIfPresent([DraftSource].self, forKey: .sources)
             ?? [DraftSource(id: UUID(), fileName: sourceFileName)]
         timeline = try c.decodeIfPresent(TimelineState.self, forKey: .timeline) ?? TimelineState()
+
+        // 顔選択（新フィールド）。キー無しの旧下書きは nil のまま＝「情報なし」で、
+        // 復元時は従来と同じ挙動（初期スキャンの自動選択規則）に落ちる。
+        // `?? []` にしてはならない: 「情報なし」と「0 個選択」が区別できなくなり、
+        // 旧下書きの単独の顔まで選択が外れる。
+        faceSelections = try c.decodeIfPresent([DraftFaceSelection].self, forKey: .faceSelections)
 
         // 旧フィールド（存在すれば）。
         let legacy = try? decoder.container(keyedBy: LegacyKeys.self)
@@ -156,6 +197,15 @@ final class DraftStore: ObservableObject {
                    uniquingKeysWith: { first, _ in first })
     }
 
+    /// 下書きID に保存されている顔選択の目印（動画・写真どちらの下書きでも引ける）。
+    /// nil は「情報なし」（新フィールド導入前の下書き・該当する下書きが無い）で、
+    /// 復元側は顔の選択状態に触れない（`EditingDraft.faceSelections` の doc 参照）。
+    func faceSelections(forDraftID id: UUID) -> [DraftFaceSelection]? {
+        if let draft = videoDrafts.first(where: { $0.id == id }) { return draft.faceSelections }
+        if let photo = photoDraft, photo.id == id { return photo.faceSelections }
+        return nil
+    }
+
     func thumbnail(for draft: EditingDraft) -> UIImage? {
         guard let name = draft.thumbnailFileName else { return nil }
         let url = directory.appendingPathComponent(name)
@@ -190,6 +240,7 @@ final class DraftStore: ObservableObject {
         faceBlockSize: Float,
         backgroundBlockSize: Float,
         manualRects: [CGRect],
+        faceSelections: [DraftFaceSelection]? = nil,
         thumbnail: UIImage?
     ) -> EditingDraft? {
         var draftSources: [DraftSource] = []
@@ -210,6 +261,7 @@ final class DraftStore: ObservableObject {
             faceBlockSize: faceBlockSize,
             backgroundBlockSize: backgroundBlockSize,
             manualRects: manualRects,
+            faceSelections: faceSelections,
             thumbnailFileName: thumbName
         )
         if let index = videoDrafts.firstIndex(where: { $0.id == draft.id }) {
@@ -232,7 +284,8 @@ final class DraftStore: ObservableObject {
         backgroundMosaicOn: Bool,
         faceBlockSize: Float,
         backgroundBlockSize: Float,
-        manualRects: [CGRect]
+        manualRects: [CGRect],
+        faceSelections: [DraftFaceSelection]? = nil
     ) {
         let id = existing ?? photoDraft?.id ?? UUID()
         let fileName = "photo-\(id.uuidString).jpg"
@@ -248,6 +301,7 @@ final class DraftStore: ObservableObject {
             faceBlockSize: faceBlockSize,
             backgroundBlockSize: backgroundBlockSize,
             manualRects: manualRects,
+            faceSelections: faceSelections,
             thumbnailFileName: nil
         )
         savePhotoIndex()
@@ -389,5 +443,46 @@ final class DraftStore: ObservableObject {
     private func createDirectoryIfNeeded() {
         guard !fileManager.fileExists(atPath: directory.path) else { return }
         try? fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+    }
+}
+
+/// tmp に溜まる中間ファイル（`picked-*` / `photoclip-*` / `mosaic-*`）の掃除。
+///
+/// `DraftStore` と同じ「ファイルの寿命を管理する」責務なのでここに同居させている。
+/// 判定は `MosaicCore.TempFileSweeper.shouldDelete` が単一情報源で、ここは列挙と削除だけ。
+///
+/// ⚠️ **age ベース（既定 24 時間）でしか消さない。即時削除はできない。**
+/// - `picked-*` / `photoclip-*` は編集セッション中ずっと `sources[sourceID]` の
+///   `AVURLAsset` の実体であり、AVFoundation は遅延読みするのでセッション中に消せない。
+/// - 下書き保存時に `DraftStore.registerSource` が tmp → `Documents/Drafts` へコピーするため、
+///   「コピーが済んだか」は下書き保存の成否に依存し、editor 離脱時点では確定できない。
+/// - undo で復活し得るクリップの素材も保持が要る。
+///
+/// ⚠️ 掃除対象は `FileManager.default.temporaryDirectory` **だけ**。
+/// `Documents/Drafts`（`source-*` / `thumb-*` / 索引 JSON = 下書きの実体）へ向けてはならない。
+enum TempMediaJanitor {
+    /// 期限切れの中間ファイルを削除し、削除した件数を返す。
+    ///
+    /// 起動パスを同期 IO で塞がないよう、呼び出し側はバックグラウンドで実行すること
+    /// （`MaskMeApp` の `.onAppear`）。
+    @discardableResult
+    static func sweep(directory: URL = FileManager.default.temporaryDirectory,
+                      now: Date = Date(),
+                      maxAge: TimeInterval = TempFileSweeper.defaultMaxAge,
+                      fileManager: FileManager = .default) -> Int {
+        let keys: [URLResourceKey] = [.contentModificationDateKey]
+        guard let entries = try? fileManager.contentsOfDirectory(
+            at: directory, includingPropertiesForKeys: keys, options: [.skipsHiddenFiles])
+        else { return 0 }
+        var removed = 0
+        for url in entries {
+            // 更新日時が読めないものは「判断がつかない」ので残す（Sweeper と同じ倒し方）。
+            guard let modified = (try? url.resourceValues(forKeys: Set(keys)))?.contentModificationDate,
+                  TempFileSweeper.shouldDelete(name: url.lastPathComponent,
+                                               modifiedAt: modified, now: now, maxAge: maxAge)
+            else { continue }
+            if (try? fileManager.removeItem(at: url)) != nil { removed += 1 }
+        }
+        return removed
     }
 }

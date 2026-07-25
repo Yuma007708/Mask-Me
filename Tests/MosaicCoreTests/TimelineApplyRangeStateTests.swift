@@ -18,10 +18,12 @@ final class TimelineApplyRangeStateTests: XCTestCase {
         ])
         let added = state.addingApplyRange(fromCompositionTime: 3, to: 5)
 
-        XCTAssertEqual(added.applyRanges.count, 2, "クリップ境界を跨ぐので素材ごとに分解される")
+        XCTAssertEqual(added.applyRanges.count, 2, "クリップ境界を跨ぐのでクリップごとに分解される")
+        XCTAssertEqual(added.applyRanges[0].clipID, state.clips[0].id)
         XCTAssertEqual(added.applyRanges[0].sourceID, sourceA)
         XCTAssertEqual(added.applyRanges[0].sourceStart, 3, accuracy: 1e-9)
         XCTAssertEqual(added.applyRanges[0].sourceEnd, 4, accuracy: 1e-9)
+        XCTAssertEqual(added.applyRanges[1].clipID, state.clips[1].id)
         XCTAssertEqual(added.applyRanges[1].sourceID, sourceB)
         XCTAssertEqual(added.applyRanges[1].sourceStart, 10, accuracy: 1e-9)
         XCTAssertEqual(added.applyRanges[1].sourceEnd, 11, accuracy: 1e-9)
@@ -72,7 +74,8 @@ final class TimelineApplyRangeStateTests: XCTestCase {
         let clipA = TimelineClip(sourceID: sourceA, sourceStart: 0, sourceEnd: 2)
         let clipB = TimelineClip(sourceID: sourceA, sourceStart: 3, sourceEnd: 5)
         var state = TimelineState(clips: [clipA, clipB])
-        state.applyRanges = [MosaicApplyRange(sourceID: sourceA, sourceStart: 1, sourceEnd: 4)]
+        state.applyRanges = [MosaicApplyRange(clipID: clipB.id, sourceID: sourceA,
+                                              sourceStart: 1, sourceEnd: 4)]
         let id = state.applyRanges[0].id
 
         // B のセグメント（合成 [2,3) = 素材 [3,4)）を素材 [3.5,4) 相当へ縮める。
@@ -83,10 +86,12 @@ final class TimelineApplyRangeStateTests: XCTestCase {
         let sorted = replaced.applyRanges.sorted { $0.sourceStart < $1.sourceStart }
         XCTAssertEqual(sorted[0].sourceStart, 1.0, accuracy: 1e-9)
         XCTAssertEqual(sorted[0].sourceEnd, 3.0, accuracy: 1e-9,
-                       "クリップ A ぶん [1,2) と使用範囲外 [2,3) が繋がって残る")
+                       "クリップ B の使用範囲外 [1,3) が繋がって残る")
         XCTAssertEqual(sorted[1].sourceStart, 3.5, accuracy: 1e-9)
         XCTAssertEqual(sorted[1].sourceEnd, 4.0, accuracy: 1e-9)
-        XCTAssertTrue(MosaicApplyGate.isActive(ranges: replaced.applyRanges,
+        // 温存された断片は clipID ごと残る（トリムを戻せば復活する）。
+        XCTAssertTrue(sorted.allSatisfy { $0.clipID == clipB.id })
+        XCTAssertTrue(MosaicApplyGate.isActive(ranges: replaced.applyRanges, clipID: clipB.id,
                                                sourceID: sourceA, sourceTime: 2.5),
                       "クリップ使用範囲外の素材時刻の適用が消えている")
         XCTAssertTrue(replaced.validate())
@@ -99,15 +104,17 @@ final class TimelineApplyRangeStateTests: XCTestCase {
         let back = TimelineClip(sourceID: sourceA, sourceStart: 3, sourceEnd: 10)
         let state = TimelineState(clips: [front, back])
             .addingApplyRange(fromCompositionTime: 2, to: 4)
+        XCTAssertEqual(state.applyRanges.count, 2, "S11: clipID が違うのでマージされない")
         let id = state.applyRanges[0].id
-        XCTAssertEqual(state.applyRanges.count, 1, "同一素材の連続区間は 1 本にマージされる")
 
         // 前半セグメント [2,3) を [2.5,3) に縮める（後半セグメントは渡さない）。
         let replaced = state.replacingApplyRange(
             id: id, clipID: front.id, compositionInterval: CompositionInterval(start: 2.5, end: 3))
-        XCTAssertEqual(replaced.applyRanges.count, 1)
+        XCTAssertEqual(replaced.applyRanges.count, 2)
         XCTAssertEqual(replaced.applyRanges[0].sourceStart, 2.5, accuracy: 1e-9)
-        XCTAssertEqual(replaced.applyRanges[0].sourceEnd, 4.0, accuracy: 1e-9,
+        XCTAssertEqual(replaced.applyRanges[0].sourceEnd, 3.0, accuracy: 1e-9)
+        XCTAssertEqual(replaced.applyRanges[1].clipID, back.id)
+        XCTAssertEqual(replaced.applyRanges[1].sourceEnd, 4.0, accuracy: 1e-9,
                        "後半セグメントぶんの適用が残る")
     }
 
@@ -118,16 +125,16 @@ final class TimelineApplyRangeStateTests: XCTestCase {
         let clipB = TimelineClip(sourceID: sourceB, sourceStart: 0, sourceEnd: 4)
         var state = TimelineState(clips: [clipA, clipB])
         state.applyRanges = [
-            MosaicApplyRange(sourceID: sourceA, sourceStart: 1, sourceEnd: 2),
-            MosaicApplyRange(sourceID: sourceB, sourceStart: 1, sourceEnd: 2)
+            MosaicApplyRange(clipID: clipA.id, sourceID: sourceA, sourceStart: 1, sourceEnd: 2),
+            MosaicApplyRange(clipID: clipB.id, sourceID: sourceB, sourceStart: 1, sourceEnd: 2)
         ]
-        let orderBefore = state.applyRanges.map(\.sourceID)
+        let orderBefore = state.applyRanges.map(\.clipID)
         let id = state.applyRanges[0].id
 
         let same = state.replacingApplyRange(
             id: id, clipID: clipA.id, compositionInterval: CompositionInterval(start: 1, end: 2))
         XCTAssertEqual(same, state, "動かしていないのに状態が変わっている（undo 履歴が汚れる）")
-        XCTAssertEqual(same.applyRanges.map(\.sourceID), orderBefore, "並び順まで変わっている")
+        XCTAssertEqual(same.applyRanges.map(\.clipID), orderBefore, "並び順まで変わっている")
     }
 
     /// 写真素材の適用区間はクリップ全体（素材 [0, sourceEnd)）を覆うこと。
@@ -144,9 +151,14 @@ final class TimelineApplyRangeStateTests: XCTestCase {
         XCTAssertEqual(added.applyRanges[0].sourceStart, 0, accuracy: 1e-12)
         XCTAssertEqual(added.applyRanges[0].sourceEnd, 3, accuracy: 1e-12)
         let clamped = added.clampedSourceTime(1.5, sourceID: sourceA)
-        XCTAssertTrue(MosaicApplyGate.isActive(ranges: added.applyRanges,
+        XCTAssertTrue(MosaicApplyGate.isActive(ranges: added.applyRanges, clipID: photo.id,
                                                sourceID: sourceA, sourceTime: clamped),
                       "写真素材で適用区間がヒットしない")
+        // 端ドラッグは構造的に no-op なので UI はハンドルを出さない（`isEdgeAdjustable`）。
+        let spans = TimelineBandLayout.applySpans(ranges: added.applyRanges, mapping: added.mapping,
+                                                  photoSourceIDs: added.photoSourceIDs)
+        XCTAssertEqual(spans.count, 1)
+        XCTAssertFalse(spans[0].isEdgeAdjustable)
 
         // 端ドラッグでもクリップ全体のまま（= 変化しないので self）。
         XCTAssertEqual(added.replacingApplyRange(id: added.applyRanges[0].id, clipID: photo.id,

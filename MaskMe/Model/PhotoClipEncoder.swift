@@ -9,11 +9,14 @@ import UIKit
 /// 仕様:
 /// - 15fps・音声トラックなし
 /// - 尺は指定秒数（**上限 60s** でクランプ。下限は 1 フレーム分）
+/// - 長 GOP（`AVVideoMaxKeyFrameIntervalKey` = 全フレーム。静止画なのでサイズが尺に比例しない）
 /// - 長辺 1920px 上限（超える場合のみ縮小。アスペクト維持・偶数ピクセルへ丸め）
 /// - **EXIF 向きの正規化をエンコードより先に行う**（`UIImage.draw` が orientation を
 ///   適用した .up のピクセルを書き出す。正規化前の cgImage を直接書くと横向き撮影の
 ///   写真が寝たままエンコードされる — S6 の最重要レビュー項目）
-struct PhotoClipEncoder {
+/// `public` なのは `MosaicEditorModel.appendPhotoClip(image:seconds:)`（public）の
+/// 既定引数から `defaultClipSeconds` を参照するため（内部型は既定引数に書けない）。
+public struct PhotoClipEncoder {
     enum EncodeError: Error {
         case invalidImage
         case writerSetupFailed
@@ -33,6 +36,29 @@ struct PhotoClipEncoder {
     static let frameRate: Double = 15
     static let maxDuration: Double = 60
     static let maxLongSidePixels: CGFloat = 1920
+
+    /// 写真クリップ追加時にタイムラインへ載せる既定の尺（秒）。
+    public static let defaultClipSeconds: Double = 3
+
+    /// 写真クリップの**素材としての尺**（秒）。追加時のクリップは
+    /// `defaultClipSeconds` しか使わないが、素材はこの尺まで用意しておく。
+    ///
+    /// トリムは `sourceEnd` を素材尺までしか伸ばせないため、素材が既定尺ちょうどだと
+    /// 「3 秒より長くできない」制約になる。後から長い mp4 へ差し替える方式は採れない
+    /// （`DraftStore.registerSource` は同一素材IDのコピーが既にあればスキップするので、
+    /// 下書きに古い短い実体が残った壊れた状態が黙って作られる）。そこで
+    /// **最初から headroom 付きでエンコードし、`sourceEnd` だけ既定尺にする**。
+    ///
+    /// 値は実測で決めた（1080x1920・高ディテールの worst case。長 GOP 有効）:
+    /// 3s = 0.21s / 1.15MB、10s = 0.58s / 3.3MB、**15s = 0.85s / 3.4MB**、
+    /// 20s = 1.13s / 4.9MB、30s = 1.75〜2.6s / 6.6MB。
+    /// 長 GOP でもサイズは尺に対して**完全な横ばいにはならない**（同一フレームでも
+    /// P フレームに一定のビットが乗る）ため、capacity は素直にコストとして効く。
+    /// 複数選択の追加は 1 枚ずつ直列 await なので、10 枚なら所要はこの 10 倍になる。
+    /// Simulator（iPhone 17 Pro Max）実測では 3s = 0.24s / 0.83MB、15s = 2.2s / 1.7MB。
+    /// 30s は 1 枚で 4 秒以上・10 枚で 40 秒超になりユーザーを待たせすぎるので 15s を採った
+    /// （既定尺の 5 倍まで伸ばせる。静止画クリップの実用上の上限として十分）。
+    static let clipCapacitySeconds: Double = 15
 
     /// 写真を静止 mp4 へエンコードして一時ファイル URL を返す。
     ///
@@ -55,10 +81,21 @@ struct PhotoClipEncoder {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("photoclip-\(UUID().uuidString).mp4")
         let writer = try AVAssetWriter(outputURL: url, fileType: .mp4)
+        // GOP を全フレーム＝ I フレームを最小限にする。全フレームが同一画像なので
+        // 以降は P フレームだけになり、実測で**サイズが約 40% 減る**
+        // （1080x1920 の高ディテール画像・30s で 11.1MB → 6.6MB）。
+        // なおこのキーは上限のヒントであり、エンコーダは IDR を追加してよい
+        // （Simulator の実測は 4s / 64 サンプル中 5 枚。それでもサイズは尺に比例しない）。
+        // ランダムシークが必要な素材では長 GOP はシークコストになるが、写真素材は
+        // サムネも検出も素材時刻 0 に固定される（`TimelineState.clampedSourceTime` が
+        // 写真素材を 0 へ clamp する）ため t=0 以外へシークされることがない。
         let input = AVAssetWriterInput(mediaType: .video, outputSettings: [
             AVVideoCodecKey: AVVideoCodecType.h264,
             AVVideoWidthKey: width,
-            AVVideoHeightKey: height
+            AVVideoHeightKey: height,
+            AVVideoCompressionPropertiesKey: [
+                AVVideoMaxKeyFrameIntervalKey: frameCount
+            ]
         ])
         input.expectsMediaDataInRealTime = false
         guard writer.canAdd(input) else { throw EncodeError.writerSetupFailed }

@@ -20,10 +20,19 @@ struct VideoControlsView: View {
 
                 Spacer()
 
-                // クリップ構成の要約（マルチクリップのときだけ）
-                Text(clipSummary)
-                    .font(.caption2.monospacedDigit())
-                    .foregroundStyle(.yellow)
+                // クリップ構成の要約（マルチクリップのときだけ）＋ 出力解像度
+                HStack(spacing: 8) {
+                    Text(clipSummary)
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.yellow)
+
+                    if let outputSizeText {
+                        Text(outputSizeText)
+                            .font(.caption2.monospacedDigit())
+                            .foregroundStyle(model.hasDownscaledClips ? Color.orange : Color.secondary)
+                            .accessibilityLabel(outputSizeAccessibilityLabel)
+                    }
+                }
 
                 Spacer()
 
@@ -59,11 +68,53 @@ struct VideoControlsView: View {
                 }
 
                 Spacer()
+
+                undoRedoButtons
             }
             .padding(.horizontal, 16)
             .padding(.bottom, 8)
         }
         .background(.black.opacity(0.35))
+    }
+
+    /// タイムライン編集用の Undo / Redo。
+    ///
+    /// **`EditorView.adjustmentBar` の undo/redo とは別に置いている。**
+    /// あちらは `model.activeTab != nil`（＝効果タブを開いている間）だけ現れるので、
+    /// タブを閉じているのが既定のタイムライン画面からは押せない。さらにタブを開く操作
+    /// 自体が `commitEdit()` を通るため、undo を押すためにタブを開くと
+    /// 「直前の編集」がタブ操作そのものにすり替わる（背景 ON の取り消しになる）。
+    /// 動画コントロールの中に常設することで、その経路を通らずに戻せるようにする。
+    ///
+    /// 写真モードの UI 契約が `adjustmentBar` に依存しているため、あちらは触っていない
+    /// （動画コントロールは動画プレビューでしか出ないので二重表示にはならない）。
+    private var undoRedoButtons: some View {
+        HStack(spacing: 12) {
+            Button { model.undo() } label: {
+                undoRedoLabel("arrow.uturn.backward", enabled: model.canUndo)
+            }
+            .buttonStyle(.plain)
+            .disabled(!model.canUndo)
+            .accessibilityLabel("取り消す")
+
+            Button { model.redo() } label: {
+                undoRedoLabel("arrow.uturn.forward", enabled: model.canRedo)
+            }
+            .buttonStyle(.plain)
+            .disabled(!model.canRedo)
+            .accessibilityLabel("やり直す")
+        }
+    }
+
+    /// 無効時は半透明にして「押せない」ことを見た目で示す（`.disabled` だけだと
+    /// `.plain` スタイルの Image は色が変わらず、押せるように見えてしまう）。
+    private func undoRedoLabel(_ systemName: String, enabled: Bool) -> some View {
+        Image(systemName: systemName)
+            .font(.system(size: 16, weight: .medium))
+            .foregroundStyle(.white)
+            .frame(width: 36, height: 36)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
+            .opacity(enabled ? 1 : 0.35)
     }
 
     private func timeString(from seconds: Double) -> String {
@@ -90,5 +141,29 @@ struct VideoControlsView: View {
         return transitionCount > 0
             ? "\(clipCount) クリップ / つなぎ \(transitionCount)"
             : "\(clipCount) クリップ"
+    }
+
+    /// 出力解像度の表示（例: "1080×1920"）。縮小されるクリップがあるときは注意記号を付ける。
+    ///
+    /// **常時表示にしている**（「変わったときだけ警告」にしない）。出力解像度は先頭クリップが
+    /// 決めるため並べ替えのたびに変わり得るが、並べ替えは日常操作なので都度の警告は
+    /// 無視されるようになる。さらに「変化時だけ」だと、後から画面を見たユーザーが
+    /// 現在の出力解像度を知る手段が無くなる。仕様は
+    /// `VideoCompositionFactory.renderSize(for:)` の doc 参照。
+    ///
+    /// 値は `model.outputRenderSize`（`@Published`）から取る。`model.videoComposition` は
+    /// `@Published` ではないうえ無変換構成では nil なので、直接読んではならない。
+    private var outputSizeText: String? {
+        guard let size = model.outputRenderSize else { return nil }
+        let text = "\(Int(size.width))×\(Int(size.height))"
+        // 出力枠より大きいクリップは縮小されて収まる（レターボックス）。
+        // 配色（.orange）と併せた受動的な注意表示。
+        return model.hasDownscaledClips ? text + " ⚠︎" : text
+    }
+
+    private var outputSizeAccessibilityLabel: String {
+        guard let size = model.outputRenderSize else { return "" }
+        let base = "出力解像度 \(Int(size.width)) × \(Int(size.height))"
+        return model.hasDownscaledClips ? base + "、縮小されるクリップがあります" : base
     }
 }

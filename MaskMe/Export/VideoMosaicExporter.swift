@@ -54,6 +54,20 @@ struct AudioTrackConditions: Equatable {
     var hasScaledSegments = false
     /// 音声トラックのフォーマット記述が複数種類ある（48k/44.1k 混在など）。
     var hasMixedFormats = false
+    /// 合成結果に音声トラックが 2 本以上ある（トランジションの A/B 交互配置）。
+    ///
+    /// パススルー経路は `AVAssetReaderTrackOutput` 1 本 = **トラックを 1 本しか読めない**
+    /// ため、2 本ある構成でパススルーへ落ちると B 側（奇数インデックスのクリップ）の
+    /// 音声が出力に一切入らない。デコード読み（`AVAssetReaderAudioMixOutput`）は
+    /// 複数トラックをまとめてミックスできるので、複数本あるときは必ず再エンコードへ倒す。
+    ///
+    /// **現行の `TimelineCompositionBuilder` 経路では、この条件が判定を左右することは無い**:
+    /// 2 トラックになるのは重なりがあるとき（`usesTwoTracks = !overlaps.isEmpty`）だけで、
+    /// そのとき `AudioMixFactory.make` は必ず非 nil を返すため `hasAudioMix` で
+    /// すでに `.reencode` が確定している。この条件が効くのは、公開 API
+    /// `export(asset:…)` へ builder 以外が組んだ合成物（audioMix 無しで音声 2 本）が
+    /// 渡された場合の防御。
+    var hasMultipleTracks = false
 }
 
 /// 音声書き出しの経路。分岐判定をこの決定関数 1 箇所に閉じ込める。
@@ -90,13 +104,20 @@ enum AudioExportPipeline: Equatable {
     ///
     /// 判定材料はすべて composition の音声トラックの実データ
     /// （`AVAssetTrack.segments` / `.formatDescriptions`）から求める
-    /// （`AudioTrackConditions.from(segments:formatDescriptions:)`）。
+    /// （`AudioTrackConditions.from(tracks:)`。**全トラック分**を渡すこと）。
     ///
     /// - `hasAudioMix`: `AVAudioMix` が付いている（S8）。トランジションの音声
     ///   クロスフェード、または `TimelineClip.originalAudioVolume` の音量調整がある構成。
     ///   パススルーは元パケットをそのままコピーするため**音量・フェードが一切反映されない**
     ///   （映像だけクロスフェードして音は途中でぶつ切り、になる）。デコード読み
     ///   （`AVAssetReaderAudioMixOutput.audioMix`）なら反映される。
+    ///
+    /// - `hasMultipleTracks`: 合成結果の音声トラックが 2 本以上（S8 のトランジションで
+    ///   A/B へ交互配置された構成）。パススルー読みは 1 トラック分しか出力に載せられず、
+    ///   B 側のクリップの音声が丸ごと落ちる（プレビューの AVPlayer は composition 全体を
+    ///   鳴らすので書き出しだけ食い違う）。ただし `TimelineCompositionBuilder` が組んだ
+    ///   合成物では、2 トラック = 重なりあり = audioMix ありなので `hasAudioMix` で
+    ///   すでに再エンコードが確定している（この条件は builder 以外の合成物に対する防御）。
     ///
     /// 入口はこの 1 つだけにしてある（条件を個別 Bool で受ける素の入口は置かない）。
     /// 呼び出し側が条件の導出（`AudioTrackConditions.from`）をバイパスできると、
@@ -110,18 +131,53 @@ enum AudioExportPipeline: Equatable {
             || conditions.hasEmptySegments
             || conditions.hasScaledSegments
             || conditions.hasMixedFormats
+            || conditions.hasMultipleTracks
         return needsReencode ? .reencode : .passthrough
     }
 }
 
+/// 音声トラック 1 本ぶんの判定材料（合成結果から読んだ実データ）。
+///
+/// `AudioTrackConditions.from(tracks:)` の入力を「トラックの配列」に固定するための型。
+/// セグメント列とフォーマット記述を平坦化した配列＋本数、という渡し方にすると
+/// 「1 本ぶんのデータに本数 2 を添えて渡す」ような不整合が型で防げないため。
+struct AudioTrackData {
+    let segments: [AVAssetTrackSegment]
+    let formatDescriptions: [CMFormatDescription]
+
+    /// 合成結果の音声トラック列から判定材料を読み出す（並びはトラック列のまま）。
+    static func load(from tracks: [AVAssetTrack]) async -> [AudioTrackData] {
+        var result: [AudioTrackData] = []
+        for track in tracks {
+            result.append(AudioTrackData(
+                segments: (try? await track.load(.segments)) ?? [],
+                formatDescriptions: (try? await track.load(.formatDescriptions)) ?? []))
+        }
+        return result
+    }
+}
+
 extension AudioTrackConditions {
-    /// 合成結果の音声トラックのセグメント列とフォーマット記述から判定材料を求める。
-    static func from(segments: [AVAssetTrackSegment],
-                     formatDescriptions: [CMFormatDescription]) -> AudioTrackConditions {
-        AudioTrackConditions(
+    /// 合成結果の音声トラック**全部**の実データから判定材料を求める。
+    ///
+    /// トラック 1 本だけを見て決めると、A/B 交互配置（S8）では B 側の empty edit・
+    /// スケール編集・別フォーマットを取りこぼし、「2 本ある」こと自体
+    /// （`hasMultipleTracks`）も見落とす。
+    ///
+    /// なお現行の `TimelineCompositionBuilder` 経路では、これらの取りこぼしが
+    /// `.passthrough` への転落を招くことは無い（2 トラック構成は必ず audioMix 付き
+    /// ＝ `hasAudioMix` で再エンコード確定）。B 側の音声が実際に消えるのを止めているのは
+    /// 再エンコード読みへ**全トラックを渡している**こと
+    /// （`AVAssetReaderAudioMixOutput(audioTracks:)`）である。全部を渡すのは、
+    /// builder 以外が組んだ合成物が公開 API `export(asset:…)` に来た場合の防御。
+    static func from(tracks: [AudioTrackData]) -> AudioTrackConditions {
+        let segments = tracks.flatMap(\.segments)
+        let formats = tracks.flatMap(\.formatDescriptions)
+        return AudioTrackConditions(
             hasEmptySegments: segments.contains { $0.isEmpty },
             hasScaledSegments: segments.contains { isScaled($0) },
-            hasMixedFormats: hasMixedFormats(formatDescriptions))
+            hasMixedFormats: hasMixedFormats(formats),
+            hasMultipleTracks: tracks.count > 1)
     }
 
     /// スケール判定の許容差 = 1/1200 秒。**絶対値であってクリップ長に比例させない。**
@@ -192,8 +248,8 @@ import Metal
 // swiftlint:disable file_length type_body_length
 
 /// 動画をフレームごとに処理してモザイクを適用し、新しい .mp4 ファイルを生成する。
-/// 音声は**無変換構成**（トリム無し・empty edit 無し・rate≠1 無し・単一フォーマット）
-/// なら元トラックをそのまま（再エンコードせず）保持し、それ以外は
+/// 音声は**無変換構成**（トリム無し・empty edit 無し・rate≠1 無し・単一フォーマット・
+/// 単一トラック・audioMix 無し）なら元トラックをそのまま（再エンコードせず）保持し、それ以外は
 /// AAC 再エンコードする（判定は `AudioExportPipeline.decide` の 1 箇所）。
 public final class VideoMosaicExporter: @unchecked Sendable {
     public enum ExportError: Error {
@@ -208,6 +264,57 @@ public final class VideoMosaicExporter: @unchecked Sendable {
     private let landmarker: FaceLandmarking
     private let ciContext: CIContext
     private var textureCache: CVMetalTextureCache?
+
+    // MARK: - 中断（ユーザー操作によるキャンセル）
+    //
+    // `cancel()` は UI（メインアクター）から、フラグの読み出しは映像／音声の
+    // pump キュー（別スレッド）から起きるためロックで守る。
+    //
+    // **`AVAssetReader.status` で中断を判定してはいけない。** `startAudioPump` は
+    // 末尾クランプという**正常系**でも `cancelReading()` を呼ぶため、
+    // reader の状態は「ユーザーが止めた」ことの証拠にならない。必ずこの自前フラグを見る。
+    private let cancelLock = NSLock()
+    private var cancelRequested = false
+    /// 進行中の reader（映像主リーダー＋音声専用リーダー）。`cancel()` から
+    /// `cancelReading()` を呼んでブロック中の `copyNextSampleBuffer()` を戻す。
+    private var activeReaders: [AVAssetReader] = []
+
+    /// 進行中の書き出しを中断する（`export` は `CancellationError` を throw する）。
+    ///
+    /// フラグと `cancelReading()` の**両方**が要る:
+    /// - フラグだけでは `copyNextSampleBuffer()` がブロックしたまま戻らない。
+    /// - `cancelReading()` だけでは `group.notify` が `.cancelled` を `.failed` と
+    ///   区別できず、打ち切られた**部分ファイルが「成功」として返る**。
+    public func cancel() {
+        cancelLock.lock()
+        cancelRequested = true
+        let readers = activeReaders
+        cancelLock.unlock()
+        readers.forEach { $0.cancelReading() }
+    }
+
+    /// 中断要求が出ているか（pump の中断点から読む）。
+    private var isCancelRequested: Bool {
+        cancelLock.lock()
+        defer { cancelLock.unlock() }
+        return cancelRequested
+    }
+
+    /// 中断状態を初期化する（同一インスタンスの再利用に備える。
+    /// `landmarkSmoother.reset()` と同じ思想で export の冒頭に 1 回だけ呼ぶ）。
+    private func resetCancelState() {
+        cancelLock.lock()
+        cancelRequested = false
+        activeReaders = []
+        cancelLock.unlock()
+    }
+
+    /// 中断対象のリーダーを登録する（`startReading()` 成功直後に呼ぶ）。
+    private func registerActiveReader(_ reader: AVAssetReader) {
+        cancelLock.lock()
+        activeReaders.append(reader)
+        cancelLock.unlock()
+    }
     /// 描画直前のランドマーク EMA（フレーム間の微小ちらつき吸収）。検出キャッシュには
     /// 適用しない（計測系と描画系の分離）。export ごとに reset して使う。
     private let landmarkSmoother = LandmarkSmoother()
@@ -238,9 +345,9 @@ public final class VideoMosaicExporter: @unchecked Sendable {
     /// `MosaicApplyGate.effectiveRanges(_:mapping:)` を通してから設定する
     /// （孤児区間を残すと全区間 OFF になる。プロパティ doc は同関数を参照）。
     ///
-    /// 空なら全区間適用（範囲指定なしの既存挙動と bit 同一）。非空なら、区間外の
-    /// フレームは顔・手動矩形・背景モザイクのすべてを止めて**入力フレームをそのまま**
-    /// 書き出す（フレームを落とさない・pts を変えないので出力尺は区間の有無で不変）。
+    /// **空なら適用なし（全区間 OFF）**。S11 で意味が反転した（旧: 空 = 全区間適用）。
+    /// 区間外のフレームは顔・手動矩形・背景モザイクのすべてを止めて**入力フレームを
+    /// そのまま**書き出す（フレームを落とさない・pts を変えないので出力尺は不変）。
     /// 判定は `MosaicApplyGate` の純関数だけを通し、プレビュー経路
     /// （`MosaicEditorModel.isMosaicActive(atComposition:)`）と同じ規則を共有する。
     private var applyRanges: [MosaicApplyRange] = []
@@ -320,7 +427,12 @@ public final class VideoMosaicExporter: @unchecked Sendable {
         detectionCaches: [UUID: [Double: [FaceLandmarkSet]]] = [:],
         mapping: TimelineMapping = TimelineMapping(clips: []),
         photoSourceIDs: Set<UUID> = [],
-        /// モザイク適用区間（素材時刻アンカー。既定の空は「全区間適用」＝従来挙動）。
+        /// モザイク適用区間（`clipID` + 素材時刻アンカー）。
+        /// ⚠️ **既定の空は「適用なし（全区間 OFF）」**（S11 で意味が反転した）。
+        /// クリップが 1 本も無い写像（`mapping` が空 = 素の AVAsset 書き出し）では
+        /// ゲートが写像不能でフェイルオープンするため、従来どおり全フレームに適用される。
+        /// 「全区間に適用」を明示したい呼び出しは
+        /// `MosaicApplyGate.fullCoverRanges(for: clips)` を渡すこと。
         /// `MosaicEditorModel` は `timeline.applyRanges` を渡す。
         applyRanges: [MosaicApplyRange] = [],
         videoComposition: AVVideoComposition? = nil,
@@ -345,6 +457,9 @@ public final class VideoMosaicExporter: @unchecked Sendable {
         trimRange: ClosedRange<Double> = 0...1,
         progress: @Sendable @escaping (Double) -> Void
     ) async throws -> URL {
+        // 同一インスタンスを再利用したとき、前回の中断要求が残っていると
+        // 今回の書き出しが即座に打ち切られる。冒頭で必ず捨てる。
+        resetCancelState()
         self.photoSourceIDs = photoSourceIDs
         // 孤児区間（どのクリップの使用範囲とも交差しない適用区間）をここで 1 回だけ落とす。
         // O(クリップ数 × 区間数) を全フレームで回さないためのキャッシュであり、
@@ -356,7 +471,10 @@ public final class VideoMosaicExporter: @unchecked Sendable {
         guard let videoTrack = videoTracks.first else {
             throw ExportError.noVideoTrack
         }
-        let audioTrack = (try? await asset.loadTracks(withMediaType: .audio))?.first
+        // 音声トラックは**全部**扱う。トランジションのある構成（S8）では builder が
+        // 音声も A/B 2 トラックへ交互配置するため、1 本しか読まないと B 側
+        // （奇数インデックスのクリップ）の音声が出力に一切入らない。
+        let audioTracks = (try? await asset.loadTracks(withMediaType: .audio)) ?? []
 
         let duration = try await asset.load(.duration)
         // 映像合成を装着するときは、出力サイズ = renderSize・向きは identity。
@@ -376,12 +494,10 @@ public final class VideoMosaicExporter: @unchecked Sendable {
         // 経路判定（`AudioExportPipeline.decide`）と writer 設定の両方に使う。
         var audioFormat: CMFormatDescription?
         var audioConditions = AudioTrackConditions()
-        if let audioTrack {
-            let formats = (try? await audioTrack.load(.formatDescriptions)) ?? []
-            let segments = (try? await audioTrack.load(.segments)) ?? []
-            audioFormat = formats.first
-            audioConditions = AudioTrackConditions.from(segments: segments,
-                                                        formatDescriptions: formats)
+        if !audioTracks.isEmpty {
+            let trackData = await AudioTrackData.load(from: audioTracks)
+            audioFormat = trackData.flatMap(\.formatDescriptions).first
+            audioConditions = AudioTrackConditions.from(tracks: trackData)
         }
 
         // --- Reader: 映像（BGRA）＋ 音声（パススルー） ---
@@ -412,9 +528,11 @@ public final class VideoMosaicExporter: @unchecked Sendable {
             isTrimming: isTrimming, hasAudioMix: audioMix != nil, conditions: audioConditions)
         var audioOutput: AVAssetReaderOutput?
         var separateAudioReader: AVAssetReader?
-        if let audioTrack {
+        if let audioTrack = audioTracks.first {
             switch audioPipeline {
             case .passthrough:
+                // 複数トラックは `hasMultipleTracks` が必ず `.reencode` へ倒すので、
+                // ここに来るのは 1 本だけの構成（= `audioTracks.first` で全部）。
                 let out = AVAssetReaderTrackOutput(track: audioTrack, outputSettings: nil)
                 out.alwaysCopiesSampleData = false
                 if reader.canAdd(out) {
@@ -426,8 +544,11 @@ public final class VideoMosaicExporter: @unchecked Sendable {
                 // 揃える（`reencodeDecodeSettings(matching:)` 参照）。>2ch のダウンミックスも
                 // 48k/44.1k 混在素材のレート統一もここで済ませ、writer 側は
                 // 単一フォーマットの PCM だけを受け取る。
+                // 全トラックを渡してミックスさせる（A/B 交互配置では 2 本）。
+                // 重なり区間は audioMix の音量ランプでクロスフェードされ、
+                // それ以外の区間は片方だけが鳴っている（他方は empty range）。
                 let out = AVAssetReaderAudioMixOutput(
-                    audioTracks: [audioTrack],
+                    audioTracks: audioTracks,
                     audioSettings: Self.reencodeDecodeSettings(matching: audioFormat))
                 // rate≠1（scaleTimeRange 済み）のとき音程を保ったまま時間スケールを
                 // 適用する。`.spectral` は 1/32〜32 倍まで対応し、
@@ -509,11 +630,19 @@ public final class VideoMosaicExporter: @unchecked Sendable {
         }
 
         guard reader.startReading() else { throw reader.error ?? ExportError.readerSetupFailed }
+        registerActiveReader(reader)
         if let separateAudioReader {
             guard separateAudioReader.startReading() else {
                 reader.cancelReading()
                 throw separateAudioReader.error ?? ExportError.readerSetupFailed
             }
+            registerActiveReader(separateAudioReader)
+        }
+        // 準備中に押されたキャンセルをここで拾う（pump に入る前なので
+        // writer は開始せず、作成済みの空ファイルだけ片付ければよい）。
+        if isCancelRequested {
+            try? FileManager.default.removeItem(at: outputURL)
+            throw CancellationError()
         }
         guard writer.startWriting() else { throw writer.error ?? ExportError.writerSetupFailed }
         writer.startSession(atSourceTime: .zero)
@@ -609,6 +738,14 @@ public final class VideoMosaicExporter: @unchecked Sendable {
             group.enter()
             videoInput.requestMediaDataWhenReady(on: videoQueue) { [self] in
                 while videoInput.isReadyForMoreMediaData {
+                    // 中断点①: 次のサンプルを読む**前**に見る。ここで抜けても
+                    // markAsFinished → group.notify → cancelWriting の順は保たれる
+                    // （cancelWriting 後に markAsFinished を呼ぶと例外で落ちる）。
+                    if isCancelRequested {
+                        videoInput.markAsFinished()
+                        group.leave()
+                        return
+                    }
                     let decodeStart = CFAbsoluteTimeGetCurrent()
                     let nextSample = videoOutput.copyNextSampleBuffer()
                     perfDecodeSec += CFAbsoluteTimeGetCurrent() - decodeStart
@@ -661,23 +798,64 @@ public final class VideoMosaicExporter: @unchecked Sendable {
 
             group.notify(queue: DispatchQueue.global(qos: .userInitiated)) {
                 self.logPerfSummary(totalSeconds: totalSeconds)
-                if reader.status == .failed || audioReader?.status == .failed {
-                    continuation.resume(throwing:
-                        reader.error ?? audioReader?.error ?? ExportError.readerSetupFailed)
-                    return
-                }
-                writer.finishWriting {
-                    if writer.status == .completed {
-                        progress(1.0)
-                        continuation.resume(returning: outputURL)
-                    } else {
-                        continuation.resume(
-                            throwing: writer.error ?? ExportError.writerSetupFailed
-                        )
-                    }
-                }
+                self.finish(
+                    writer: writer,
+                    readerError: Self.readerFailure(reader: reader, audioReader: audioReader),
+                    outputURL: outputURL, progress: progress, continuation: continuation)
             }
         }
+    }
+
+    /// 読み書きが両方終わったあとの決着（`pump` の `group.notify` から 1 回だけ呼ぶ）。
+    ///
+    /// 判定順を守ること:
+    /// 1. **自前の中断フラグ**（`AVAssetReader.status` は `.cancelled` を `.failed` と
+    ///    区別せず、`startAudioPump` は正常系でも `cancelReading()` を呼ぶため
+    ///    状態からは中断を判定できない）
+    /// 2. reader の失敗
+    /// 3. writer の完了／失敗
+    ///
+    /// 失敗・中断のどの経路でも、途中まで書いた `mosaic-*.mp4` を tmp に残さない。
+    private func finish(
+        writer: AVAssetWriter,
+        /// 読み出し側の失敗（無ければ nil）。`readerFailure(reader:audioReader:)` で求める。
+        readerError: Error?,
+        outputURL: URL,
+        progress: @Sendable @escaping (Double) -> Void,
+        continuation: CheckedContinuation<URL, Error>
+    ) {
+        // 両入力とも markAsFinished 済みなのでここで cancelWriting しても安全
+        // （逆順に呼ぶと markAsFinished が例外で落ちる）。
+        if isCancelRequested {
+            writer.cancelWriting()
+            try? FileManager.default.removeItem(at: outputURL)
+            continuation.resume(throwing: CancellationError())
+            return
+        }
+        if let readerError {
+            try? FileManager.default.removeItem(at: outputURL)
+            continuation.resume(throwing: readerError)
+            return
+        }
+        writer.finishWriting {
+            if writer.status == .completed {
+                progress(1.0)
+                continuation.resume(returning: outputURL)
+            } else {
+                try? FileManager.default.removeItem(at: outputURL)
+                continuation.resume(throwing: writer.error ?? ExportError.writerSetupFailed)
+            }
+        }
+    }
+
+    /// 読み出し側が失敗していればその原因（していなければ nil）。
+    ///
+    /// **`.cancelled` は失敗として扱わない**（`startAudioPump` は末尾クランプという
+    /// 正常系でも `cancelReading()` を呼ぶ。中断の判定は自前フラグの仕事）。
+    private static func readerFailure(reader: AVAssetReader,
+                                      audioReader: AVAssetReader?) -> Error? {
+        guard reader.status == .failed || audioReader?.status == .failed else { return nil }
+        return reader.error ?? audioReader?.error ?? ExportError.readerSetupFailed
     }
 
     // 引数が多いのは読み書きの相手（リーダー/出力/入力）と時間軸の補正値を
@@ -705,8 +883,14 @@ public final class VideoMosaicExporter: @unchecked Sendable {
         onFinish: @escaping () -> Void
     ) {
         let audioQueue = DispatchQueue(label: "mask-me.export.audio")
-        input.requestMediaDataWhenReady(on: audioQueue) {
+        input.requestMediaDataWhenReady(on: audioQueue) { [self] in
             while input.isReadyForMoreMediaData {
+                // 中断点②: 映像側と同じく、読み出しの前に自前フラグで見る。
+                if isCancelRequested {
+                    input.markAsFinished()
+                    onFinish()
+                    return
+                }
                 guard sourceReader.status == .reading,
                       let sample = output.copyNextSampleBuffer() else {
                     input.markAsFinished()
@@ -1109,6 +1293,7 @@ public final class VideoMosaicExporter: @unchecked Sendable {
             // 写真素材の素材時刻は 0 へ clamp（`resolveLocation` と同じ規則）。
             let sourceTime = photoSourceIDs.contains(entry.location.sourceID) ? 0 : entry.location.time
             guard MosaicApplyGate.isActive(ranges: applyRanges,
+                                           clipID: entry.location.clipID,
                                            sourceID: entry.location.sourceID,
                                            sourceTime: sourceTime) else { return [] }
             let cached = lookupCache(sourceCache, at: sourceTime)

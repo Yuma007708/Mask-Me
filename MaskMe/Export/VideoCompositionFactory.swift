@@ -143,9 +143,14 @@ enum VideoCompositionFactory {
     /// 膨らみ、「最小に合わせる」と主素材の画質が落ちる。ユーザーが最初に置いたクリップを
     /// 主素材と見なすのが最も予測しやすいため、先頭基準に倒した。
     ///
-    /// **既知の未対応（S9 以降）**: S6 までは `mixedVideoFormats` エラーで混在自体を
-    /// 拒否していたが、S8 でそのガードを外したので、解像度が変わったことはユーザーに
-    /// 何も通知されない。出力解像度の明示・警告 UI は S9 の担当。
+    /// **ユーザーへの提示（S10b で実装済み）**: S6 までは `mixedVideoFormats` エラーで
+    /// 混在自体を拒否していたが、S8 でそのガードを外したため無通知になっていた。現在は
+    /// この関数の結果が `TimelineCompositionBuilder.Built.outputSize` →
+    /// `MosaicEditorModel.outputRenderSize`（`@Published`）を経由して
+    /// `VideoControlsView` の情報行に**常時表示**される。縮小されるクリップがあるとき
+    /// （`Built.downscaledClipIDs` / `MosaicEditorModel.hasDownscaledClips`。判定は
+    /// `TimelineOutputSummary.downscaledIndices`）は注意色になる。
+    /// **表示側で renderSize を再計算しないこと**（この関数が単一実装）。
     static func renderSize(for format: TimelineCompositionBuilder.VideoFormat) -> CGSize {
         let display = displaySize(of: format)
         func even(_ value: CGFloat) -> CGFloat {

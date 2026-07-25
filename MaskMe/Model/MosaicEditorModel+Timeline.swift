@@ -83,6 +83,16 @@ extension MosaicEditorModel {
         applyTimelineEdit { $0.settingRate(clipID: id, rate: rate) }
     }
 
+    /// 指定クリップの元音声の音量（0〜1 にクランプ）を設定する。
+    ///
+    /// 音量は合成尺を変えないので composition の再構築は本来不要だが、
+    /// ここでも `applyTimelineEdit` を通す（同ファイル冒頭 doc の規約。世代と
+    /// composition の整合が唯一の不変条件なので、再構築を省くと世代だけ進んで
+    /// `exportVideo` が恒久的に止まる）。
+    public func setClipVolume(id: UUID, volume: Float) {
+        applyTimelineEdit { $0.settingVolume(clipID: id, volume: volume) }
+    }
+
     /// 素材IDに対応するローカルファイル URL（サムネイル生成用）。
     ///
     /// load / 下書き復元 / 写真クリップ追加の経路の asset は常に `AVURLAsset` である。
@@ -163,7 +173,7 @@ extension MosaicEditorModel {
     //
     // 判定に渡す区間は必ず `effectiveApplyRanges`（孤児区間を除いた有効区間）である。
     // 生の `timeline.applyRanges` をゲートへ渡してはならない（`effectiveApplyRanges` の
-    // doc 参照。帯 UI と挙動が食い違い、復帰不能な全区間 OFF になる）。
+    // doc 参照。帯 UI とゲートの一致＝不変条件 I1 の担保がここにある）。
 
     /// **素材時刻**がモザイク適用区間内かを返す（顔ランドマークの素材別ゲート）。
     ///
@@ -173,8 +183,13 @@ extension MosaicEditorModel {
     ///
     /// 渡す `sourceTime` は必ず「その素材ブランチが lookup に使ったのと同じ素材時刻」。
     /// 合成時刻を渡してはならない（rate ≠ 1 のクリップで区間の位置がずれる）。
-    func isMosaicActive(sourceID: UUID, sourceTime: Double) -> Bool {
-        MosaicApplyGate.isActive(ranges: effectiveApplyRanges,
+    ///
+    /// 渡す `clipID` は**クランプ済みの解決結果**
+    /// （`resolveSourceLocation(atComposition:)` / `sourceLocations(at:)` の clipID）。
+    /// nil は写像不能を意味し、ゲートはフェイルオープンする（判定順序は
+    /// `MosaicApplyGate.isActive(ranges:clipID:sourceID:sourceTime:)` の doc 参照）。
+    func isMosaicActive(clipID: UUID?, sourceID: UUID, sourceTime: Double) -> Bool {
+        MosaicApplyGate.isActive(ranges: effectiveApplyRanges, clipID: clipID,
                                  sourceID: sourceID, sourceTime: sourceTime)
     }
 
@@ -215,10 +230,18 @@ extension MosaicEditorModel {
     /// 以後の lookup・ライブ検出は `resolveSourceTime` の clamp（写真素材 → 素材時刻 0）
     /// でこの seed にヒットし、写真区間で 2 回目以降の実検出・重複 submit は走らない。
     ///
-    /// - Parameter seconds: クリップの尺（秒）。**固定 3 秒**（S9 の UI に尺の選択肢は無い。
-    ///   追加後にクリップ端のトリムで伸縮できるため、追加時の選択 UI は設けていない）。
-    ///   上限 60s へのクランプはエンコーダ側が保証する。
-    public func appendPhotoClip(image: UIImage, seconds: Double = 3.0) async {
+    /// **素材は既定尺より長く（`PhotoClipEncoder.clipCapacitySeconds`）エンコードし、
+    /// クリップの `sourceEnd` だけを既定尺にする。** トリムは `sourceEnd` を素材尺までしか
+    /// 伸ばせないので、素材を既定尺ちょうどで作ると「追加後に 3 秒より長くできない」
+    /// 制約になるため。長 GOP により素材尺を伸ばしてもファイルサイズはほぼ増えない
+    /// （`PhotoClipEncoder.clipCapacitySeconds` の doc 参照）。
+    ///
+    /// - Parameter seconds: 追加直後のクリップの尺（秒）。既定は
+    ///   `PhotoClipEncoder.defaultClipSeconds`（UI に尺の選択肢は無く、追加後に
+    ///   クリップ端のトリムで capacity まで伸ばせる）。素材尺を超える指定は
+    ///   素材尺へクランプされる。
+    public func appendPhotoClip(image: UIImage,
+                                seconds: Double = PhotoClipEncoder.defaultClipSeconds) async {
         // クリップ未構築（動画ロード完了前・写真モード）では追加先のタイムラインが無い。
         // 書き出しと同じく、ユーザーが結果を待つ操作なので黙って no-op にしない。
         guard mode == .video, !timeline.clips.isEmpty else {
@@ -226,14 +249,19 @@ extension MosaicEditorModel {
             return
         }
         do {
-            let encoded = try await PhotoClipEncoder().encode(image: image, seconds: seconds)
+            let encoded = try await PhotoClipEncoder()
+                .encode(image: image, seconds: PhotoClipEncoder.clipCapacitySeconds)
             // load / 復元経路と同じく AVURLAsset として登録する（draftSources が
             // URL を取り出して下書きへコピーできる形）。
             let photoAsset = AVAsset(url: encoded.url)
             let sourceID = UUID()
             sources[sourceID] = photoAsset
             seedPhotoDetection(encoded.normalizedImage, sourceID: sourceID)
-            let clip = TimelineClip(sourceID: sourceID, sourceStart: 0, sourceEnd: encoded.duration)
+            // 壊れた指定（NaN・0 以下）は既定尺に落とす。min(NaN, _) は NaN を返すので
+            // そのまま渡すと `appending` が使用範囲の検査で弾き、無言の no-op になる。
+            let requested = seconds.isFinite && seconds > 0 ? seconds : PhotoClipEncoder.defaultClipSeconds
+            let clip = TimelineClip(sourceID: sourceID, sourceStart: 0,
+                                    sourceEnd: min(requested, encoded.duration))
             applyTimelineEdit {
                 $0.appending(clip: clip, source: TimelineSource(id: sourceID, kind: .photo))
             }
@@ -258,6 +286,76 @@ extension MosaicEditorModel {
         detectedFaces += faces.map { lm in
             FaceTarget(id: UUID(), landmarks: lm,
                        thumbnail: generateThumbnail(for: lm, from: normalizedImage),
+                       isSelected: true, sourceID: sourceID)
+        }
+    }
+
+    // MARK: - 動画クリップ（S10a）
+
+    /// 動画をタイムライン末尾へクリップとして追加する（複数素材の結合の入口）。
+    ///
+    /// `appendPhotoClip(image:seconds:)` と対になる公開 API で、骨格は同じ:
+    /// `sources` 登録 → 検出シード → `TimelineState.appending`（kind = .video）→
+    /// 世代トークン付き rebuild → `commitEdit`。下書き保存（`draftSources`）と
+    /// undo/redo（EditSnapshot の timeline）は既存機構がそのまま追随する。
+    ///
+    /// **解像度・向きの混在は S8 で正式解禁済み**なので、追加前に元素材と照合しない。
+    /// 混在するタイムラインは `AVVideoComposition` が renderSize へアスペクトフィットで
+    /// 揃えて合成し、顔座標も同じ配置計算（`TimelineRenderLayout`）で写される。
+    public func appendVideoClip(url: URL) async {
+        // クリップ未構築（動画ロード完了前・写真モード）では追加先のタイムラインが無い。
+        // 書き出しと同じく、ユーザーが結果を待つ操作なので黙って no-op にしない。
+        guard mode == .video, !timeline.clips.isEmpty else {
+            errorMessage = "動画の読み込みが完了してから動画を追加してください"
+            return
+        }
+        // load / 復元経路と同じく AVURLAsset として登録する（draftSources が
+        // URL を取り出して下書きへコピーできる形）。
+        let asset = AVAsset(url: url)
+        let rawSeconds = (try? await asset.load(.duration))?.seconds ?? .nan
+        guard rawSeconds.isFinite, rawSeconds > 0 else {
+            errorMessage = "動画の追加に失敗しました"
+            return
+        }
+        let sourceID = UUID()
+        sources[sourceID] = asset
+        seedVideoDetection(asset: asset, sourceID: sourceID)
+        let clip = TimelineClip(sourceID: sourceID, sourceStart: 0, sourceEnd: rawSeconds)
+        applyTimelineEdit {
+            $0.appending(clip: clip, source: TimelineSource(id: sourceID, kind: .video))
+        }
+    }
+
+    /// 追加した動画クリップの検出シード（`load(videoURL:)` の初期スキャンと同じ流儀）。
+    ///
+    /// 検出条件（IMAGE モード・480px 縮小・顔が写るまでの probe）は `scanSeedFaces`
+    /// を共有するので load 経路と一致する。結果は**素材基準キー**で `detectionCache`
+    /// （`cacheStore`）へ入れる。オプティカルフロー由来ではない実検出なので
+    /// `liveFlowCache` とは混ぜない。
+    ///
+    /// `detectedFaces` は**置き換えず追記**する（追加であって読み込みではない。
+    /// 置き換えると既存クリップの顔選択が丸ごと消え、そちらのモザイクが外れる）。
+    ///
+    /// **自動選択は「検出した顔すべて」**（`seedPhotoDetection` と同じ）。
+    /// `load` 側は「顔が 1 つのときだけ自動選択」だが、あれは編集セッションの開始時
+    /// ＝ユーザーの意図がまだ無く、サムネで選ばせる余地がある状況の規則である。
+    /// 追加素材は事情が違う: 顔の照合は素材スコープ
+    /// （`selecting(_:sourceID:targets:)` は当該素材に属する選択顔だけを見る）なので、
+    /// 新素材の顔が 1 つも選択されていないと**その追加クリップの区間だけモザイクが
+    /// 乗らない**。写真追加が即選択している理由がそのまま当てはまるため、同じ扱いにする
+    /// （掛けたくない顔はサムネのタップで外せる。逆は「気づかず素顔が残る」になる）。
+    private func seedVideoDetection(asset: AVAsset, sourceID: UUID) {
+        guard let firstFrame = MosaicEditorModel.firstFrame(of: asset) else { return }
+        let scan = scanSeedFaces(of: asset, firstFrame: firstFrame)
+        guard !scan.faces.isEmpty else { return }
+        // 実際に顔が写っていた素材時刻のバケットへ入れる（load と同じ理由。
+        // seedTime>0 の結果を t=0 に入れると、顔がまだ無い冒頭フレームの体や背景に
+        // モザイクが乗る）。空結果を記録しないのも load と同じ
+        // （t=0 に顔が無い事実はライブ検出が空エントリとして記録する）。
+        cacheStore.store(scan.faces, sourceID: sourceID, time: scan.time)
+        detectedFaces += scan.faces.map { lm in
+            FaceTarget(id: UUID(), landmarks: lm,
+                       thumbnail: generateThumbnail(for: lm, from: scan.frame),
                        isSelected: true, sourceID: sourceID)
         }
     }
@@ -310,17 +408,22 @@ extension MosaicEditorModel {
 
     // MARK: - Composition 再構築（世代トークン付き）
 
-    /// build 結果一式（composition / videoComposition / audioMix / layout）を
-    /// **必ず組で**適用する唯一の入口。
+    /// build 結果一式（composition / videoComposition / audioMix / layout /
+    /// 出力解像度の要約）を**必ず組で**適用する唯一の入口。
     ///
-    /// 4 つは同じクリップ列から同時に作られており、片方だけ差し替えると
-    /// 「旧尺の composition に新しい instruction」「向きだけ二重適用」といった
-    /// 不整合が黙って成立する。世代トークンの記録もここに揃える。
+    /// これらは同じクリップ列から同時に作られており、片方だけ差し替えると
+    /// 「旧尺の composition に新しい instruction」「向きだけ二重適用」
+    /// 「実出力と食い違う解像度表示」といった不整合が黙って成立する。
+    /// 世代トークンの記録もここに揃える。
     func apply(built: TimelineCompositionBuilder.Built, generation: Int) {
         composition = built.composition
         videoComposition = built.videoComposition
         audioMix = built.audioMix
         renderLayout = built.layout
+        // クリップが 1 本も無い build では `.zero` が来る（表示するサイズが無い ＝ nil）。
+        let size = built.outputSize
+        outputRenderSize = size.width > 0 && size.height > 0 ? size : nil
+        hasDownscaledClips = !built.downscaledClipIDs.isEmpty
         compositionGeneration = generation  // mapping との整合性照合（exportVideo）に使う
     }
 

@@ -8,8 +8,18 @@ import Combine
 /// Parameters handed to `mosaicKernel`. The memory layout mirrors the
 /// `MosaicParams` struct in `MosaicShader.metal` exactly — keep them in sync.
 public struct MosaicParams: Equatable {
-    /// Uniform mosaic block size (in pixels) applied to every masked region.
+    /// Uniform mosaic block size applied to every masked region.
     /// Strength is driven by the single coarseness slider in the editor.
+    ///
+    /// This is a **nominal** size calibrated against
+    /// `MosaicRenderer.referenceFrameWidth` (720px), not a raw pixel count:
+    /// the contour path (partial-mesh faces, manual rects) and the background path
+    /// scale it by the texture width via `MosaicRenderer.effectiveBlock(_:textureWidth:)`
+    /// before it reaches the shader, so the same slider value looks the same in the
+    /// 720px preview and in a full-resolution export. The face-mesh path
+    /// (`FaceMeshMosaicRenderer`) is resolution independent for the same reason:
+    /// it maps the value onto a fixed 256px canvas. Only the value the shader
+    /// finally receives is in pixels of the texture being drawn.
     public var block: Float
     public var edgeSoftness: Float
     /// Face roll in radians; the block grid rotates by this so the mosaic
@@ -200,6 +210,10 @@ public final class MosaicRenderer: NSObject {
         var kernelParams = params
         kernelParams.width = UInt32(width)
         kernelParams.height = UInt32(height)
+        // Resolution-independent coarseness (see `effectiveBlock`): the same
+        // slider value must look the same in the 720px preview and in the
+        // full-resolution export.
+        kernelParams.block = Self.effectiveBlock(params.block, textureWidth: width)
         // Anchor and rotate the block grid to the face so blocks follow a tilt.
         let size = CGSize(width: width, height: height)
         kernelParams.rotation = landmarks.rollAngle(in: size)
@@ -317,6 +331,10 @@ public final class MosaicRenderer: NSObject {
         var kernelParams = params
         kernelParams.width = UInt32(input.width)
         kernelParams.height = UInt32(input.height)
+        // 解像度非依存の粗さ（`effectiveBlock`）。手動矩形もこの経路を通るため、
+        // ここを素の px 値のままにするとプレビュー（720px）と書き出し（原寸）で
+        // ブロックの細かさが食い違う。
+        kernelParams.block = Self.effectiveBlock(params.block, textureWidth: input.width)
         kernelParams.rotation = 0
         kernelParams.centerX = Float(input.width) / 2
         kernelParams.centerY = Float(input.height) / 2

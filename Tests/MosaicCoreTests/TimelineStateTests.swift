@@ -213,11 +213,13 @@ final class TimelineStateTests: XCTestCase {
         XCTAssertFalse(zeroDuration.validate(), "duration = 0")
 
         var badRange = state
-        badRange.applyRanges = [MosaicApplyRange(sourceID: sourceA, sourceStart: 2, sourceEnd: 2)]
+        badRange.applyRanges = [MosaicApplyRange(clipID: state.clips[0].id, sourceID: sourceA,
+                                                sourceStart: 2, sourceEnd: 2)]
         XCTAssertFalse(badRange.validate(), "sourceStart >= sourceEnd の applyRange")
 
         var goodRange = state
-        goodRange.applyRanges = [MosaicApplyRange(sourceID: sourceA, sourceStart: 1, sourceEnd: 2)]
+        goodRange.applyRanges = [MosaicApplyRange(clipID: state.clips[0].id, sourceID: sourceA,
+                                                 sourceStart: 1, sourceEnd: 2)]
         XCTAssertTrue(goodRange.validate())
     }
 
@@ -235,11 +237,13 @@ final class TimelineStateTests: XCTestCase {
         XCTAssertFalse(infiniteTransition.validate(), "無限大 duration のトランジション")
 
         var nanRange = state
-        nanRange.applyRanges = [MosaicApplyRange(sourceID: sourceA, sourceStart: .nan, sourceEnd: .nan)]
+        nanRange.applyRanges = [MosaicApplyRange(clipID: state.clips[0].id, sourceID: sourceA,
+                                                sourceStart: .nan, sourceEnd: .nan)]
         XCTAssertFalse(nanRange.validate(), "NaN の applyRange")
 
         var infiniteRange = state
-        infiniteRange.applyRanges = [MosaicApplyRange(sourceID: sourceA, sourceStart: 0, sourceEnd: .infinity)]
+        infiniteRange.applyRanges = [MosaicApplyRange(clipID: state.clips[0].id, sourceID: sourceA,
+                                                     sourceStart: 0, sourceEnd: .infinity)]
         XCTAssertFalse(infiniteRange.validate(), "無限大 sourceEnd の applyRange")
     }
 
@@ -248,7 +252,8 @@ final class TimelineStateTests: XCTestCase {
     /// transitions・applyRanges 込みのエンコード→デコード round-trip が一致すること。
     func test_codableRoundTrip() throws {
         var state = makeState()
-        state.applyRanges = [MosaicApplyRange(sourceID: sourceA, sourceStart: 0.5, sourceEnd: 2.5)]
+        state.applyRanges = [MosaicApplyRange(clipID: state.clips[0].id, sourceID: sourceA,
+                                             sourceStart: 0.5, sourceEnd: 2.5)]
         let data = try JSONEncoder().encode(state)
         let decoded = try JSONDecoder().decode(TimelineState.self, from: data)
         XCTAssertEqual(decoded, state)
@@ -336,7 +341,8 @@ final class TimelineStateTests: XCTestCase {
     /// applyRanges / sources は トランジション編集で失われないこと。
     func test_transitionEditsPreserveApplyRangesAndSources() {
         var state = makeState()
-        state.applyRanges = [MosaicApplyRange(sourceID: sourceA, sourceStart: 0, sourceEnd: 1)]
+        state.applyRanges = [MosaicApplyRange(clipID: state.clips[0].id, sourceID: sourceA,
+                                             sourceStart: 0, sourceEnd: 1)]
         state.sources = [sourceA: TimelineSource(id: sourceA, kind: .photo)]
 
         let changed = state.settingTransition(afterClipID: state.clips[0].id, kind: .slideRight, duration: 0.5)

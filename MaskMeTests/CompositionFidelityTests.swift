@@ -219,10 +219,11 @@ final class CompositionFidelityTests: XCTestCase {
 
         let composition = try await buildComposition(from: AVURLAsset(url: url), seconds: 1.0)
         let audioTracks = try await composition.loadTracks(withMediaType: .audio)
-        let audio = try XCTUnwrap(audioTracks.first, "合成に音声トラックが無い")
-        let segments = try await audio.load(.segments)
-        let formats = try await audio.load(.formatDescriptions)
-        let conditions = AudioTrackConditions.from(segments: segments, formatDescriptions: formats)
+        XCTAssertFalse(audioTracks.isEmpty, "合成に音声トラックが無い")
+        // 判定材料は**全トラック分**から組む（1 本しか見ないと A/B 交互配置の
+        // B 側を取りこぼす）。無変換タイムラインではそもそも 1 本しか無い。
+        let conditions = AudioTrackConditions.from(
+            tracks: await AudioTrackData.load(from: audioTracks))
         print("[FIDELITY] noTransform conditions=\(conditions)")
         XCTAssertEqual(conditions, AudioTrackConditions(),
                        "無変換タイムラインなのに変換条件が立っている")

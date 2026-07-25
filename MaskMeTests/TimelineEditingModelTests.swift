@@ -553,12 +553,13 @@ final class TimelineEditingModelTests: XCTestCase {
         /// queueTimelineRestore → load(videoURL:) →（必要なら）applyRestoredParameters。
         /// 再開後は**再生もシークもせず 2 秒放置**して初期プレビューを観測する。
         func restore(url: URL, clip: (UUID) -> TimelineClip,
-                     applyRanges: (UUID) -> [MosaicApplyRange],
+                     applyRanges: (TimelineClip) -> [MosaicApplyRange],
                      restoreParameters: Bool) async throws -> MosaicEditorModel {
             let model = makeModel()
             let sourceID = UUID()
-            var saved = TimelineState(clips: [clip(sourceID)])
-            saved.applyRanges = applyRanges(sourceID)
+            let restored = clip(sourceID)
+            var saved = TimelineState(clips: [restored])
+            saved.applyRanges = applyRanges(restored)
             model.queueTimelineRestore(timeline: saved, sourceURLs: [sourceID: url],
                                        primarySourceID: sourceID)
             model.load(videoURL: url)
@@ -580,8 +581,10 @@ final class TimelineEditingModelTests: XCTestCase {
             TimelineClip(sourceID: source, sourceStart: 0, sourceEnd: 2)
         }
 
-        // 対照: 適用区間なし → 中央の手動矩形にモザイクが乗る（＝計測系が効いている）。
-        let ungated = try await restore(url: checker, clip: wholeClip, applyRanges: { _ in [] },
+        // 対照: クリップ全体を覆う区間 → 中央の手動矩形にモザイクが乗る（＝計測系が効いている）。
+        // S11 で「区間 0 本 = 全区間 OFF」になったので、対照は全体区間で作る。
+        let ungated = try await restore(url: checker, clip: wholeClip,
+                                        applyRanges: { MosaicApplyGate.fullCoverRanges(for: [$0]) },
                                         restoreParameters: true)
         let ungatedStats = try centerPatchStats(of: try XCTUnwrap(
             ungated.previewImage, "初期プレビューが描かれていない"))
@@ -589,7 +592,8 @@ final class TimelineEditingModelTests: XCTestCase {
         // 本題: 再生位置 0 は復元した適用区間 [1,2) の外 → 素の映像でなければならない。
         let gated = try await restore(
             url: checker, clip: wholeClip,
-            applyRanges: { [MosaicApplyRange(sourceID: $0, sourceStart: 1, sourceEnd: 2)] },
+            applyRanges: { [MosaicApplyRange(clipID: $0.id, sourceID: $0.sourceID,
+                                             sourceStart: 1, sourceEnd: 2)] },
             restoreParameters: true)
         XCTAssertEqual(gated.playbackPosition, 0, accuracy: 0.05, "再生位置が 0 から動いている")
         XCTAssertFalse(gated.isMosaicActive(atComposition: 0), "前提が崩れている（区間内になっている）")
@@ -616,7 +620,7 @@ final class TimelineEditingModelTests: XCTestCase {
         let trimmed = try await restore(
             url: split,
             clip: { TimelineClip(sourceID: $0, sourceStart: 1, sourceEnd: 2) },
-            applyRanges: { _ in [] }, restoreParameters: false)
+            applyRanges: { MosaicApplyGate.fullCoverRanges(for: [$0]) }, restoreParameters: false)
         let trimmedStats = try centerPatchStats(of: try XCTUnwrap(
             trimmed.previewImage, "初期プレビューが描かれていない"))
         XCTAssertEqual(trimmedStats.mean, 127.5, accuracy: 20.0,
@@ -863,14 +867,27 @@ final class TimelineEditingModelTests: XCTestCase {
         return model
     }
 
-    /// 適用区間が空なら全フレームで顔が返り（既存挙動）、区間を付けると
-    /// **境界フレーム**で ON/OFF が切り替わること。半開区間 [start, end) の
-    /// `end` ちょうどは区間外。
+    /// テスト用に適用区間だけを差し替える（`timeline` の didSet 経由で
+    /// `effectiveApplyRanges` も追随する）。
+    private func setApplyRanges(_ model: MosaicEditorModel, _ ranges: [MosaicApplyRange]) {
+        var state = model.timeline
+        state.applyRanges = ranges
+        model.setTimelineForTesting(state)
+    }
+
+    /// クリップ全体を覆う区間（新規プロジェクトの既定）では全フレームで顔が返り、
+    /// 部分区間にすると**境界フレーム**で ON/OFF が切り替わること。
+    /// 半開区間 [start, end) の `end` ちょうどは区間外。
     func test_applyRangeGate_facesSwitchAtBoundaryFrames() {
         let model = makeDenseFaceModel()
+        setApplyRanges(model, MosaicApplyGate.fullCoverRanges(for: model.clips))
 
-        XCTAssertFalse(model.displayFaces(at: 1.9).isEmpty, "区間指定なしで顔が返っていない")
+        XCTAssertFalse(model.displayFaces(at: 1.9).isEmpty, "全体区間で顔が返っていない")
         XCTAssertFalse(model.displayFaces(at: 8.0).isEmpty)
+
+        // S11: 区間 0 本 = 全区間 OFF。
+        setApplyRanges(model, [])
+        XCTAssertTrue(model.displayFaces(at: 1.9).isEmpty, "区間 0 本で顔が返っている（全区間 OFF のはず）")
 
         model.addMosaicApplyRange(fromCompositionTime: 2, to: 4)
 
@@ -962,12 +979,12 @@ final class TimelineEditingModelTests: XCTestCase {
         model.cacheStore.store([faceA], sourceID: sourceA, time: 3.0)
         model.cacheStore.store([faceB], sourceID: sourceB, time: 1.0)
         XCTAssertEqual(model.mapping.sourceLocations(at: 3.0).count, 2, "重なり区間の前提が崩れている")
-        XCTAssertEqual(model.displayFaces(at: 3.0).count, 2, "区間指定なしでは両素材の顔が union される")
+        setApplyRanges(model, MosaicApplyGate.fullCoverRanges(for: model.clips))
+        XCTAssertEqual(model.displayFaces(at: 3.0).count, 2, "全体区間では両素材の顔が union される")
 
-        // B の素材だけを適用区間にする。
-        var gated = model.timeline
-        gated.applyRanges = [MosaicApplyRange(sourceID: sourceB, sourceStart: 0, sourceEnd: 6)]
-        model.setTimelineForTesting(gated)
+        // B のクリップだけを適用区間にする。
+        setApplyRanges(model, [MosaicApplyRange(clipID: clipB.id, sourceID: sourceB,
+                                                sourceStart: 0, sourceEnd: 6)])
 
         let faces = model.displayFaces(at: 3.0)
         XCTAssertEqual(faces.count, 1, "重なり区間で素材別にゲートできていない")
@@ -990,13 +1007,19 @@ final class TimelineEditingModelTests: XCTestCase {
         let transitions = [clipA.id: TransitionSpec(kind: .crossfade, duration: 2)]
         model.setTimelineForTesting(TimelineState(clips: [clipA, clipB], transitions: transitions))
 
+        // 全クリップを覆う区間 → 全時刻 ON。
+        setApplyRanges(model, MosaicApplyGate.fullCoverRanges(for: model.clips))
         for t in stride(from: 0.0, to: 8.0, by: 0.5) {
-            XCTAssertTrue(model.isMosaicActive(atComposition: t), "区間なしで OFF になっている t=\(t)")
+            XCTAssertTrue(model.isMosaicActive(atComposition: t), "全体区間で OFF になっている t=\(t)")
+        }
+        // S11: 区間 0 本 → 全時刻 OFF（旧仕様から反転）。
+        setApplyRanges(model, [])
+        for t in stride(from: 0.0, to: 8.0, by: 0.5) {
+            XCTAssertFalse(model.isMosaicActive(atComposition: t), "区間 0 本で ON になっている t=\(t)")
         }
 
-        var gated = model.timeline
-        gated.applyRanges = [MosaicApplyRange(sourceID: sourceB, sourceStart: 0, sourceEnd: 6)]
-        model.setTimelineForTesting(gated)
+        setApplyRanges(model, [MosaicApplyRange(clipID: clipB.id, sourceID: sourceB,
+                                                sourceStart: 0, sourceEnd: 6)])
 
         XCTAssertFalse(model.isMosaicActive(atComposition: 1.0), "A 単独区間で ON になっている")
         XCTAssertTrue(model.isMosaicActive(atComposition: 3.0),
@@ -1006,13 +1029,11 @@ final class TimelineEditingModelTests: XCTestCase {
         XCTAssertTrue(model.isMosaicActive(atComposition: model.mapping.totalDuration))
     }
 
-    /// **孤児区間（どのクリップの使用範囲とも交差しない適用区間）で全区間 OFF に
-    /// ならないこと**（S10 レビュー修正）。
+    /// **帯 0 本 ⇔ 全区間 OFF**（不変条件 I1）を、モデル層の実経路で固定する。
     ///
-    /// 孤児区間は帯 UI（`TimelineBandLayout.applySpans`）に出ないので選択も削除もできず、
-    /// それをゲートに通すと undo 以外に復帰できない全区間 OFF になる。
-    /// レビュー実測の再現手順（4 秒素材の区間 source[1,2) を左端トリム 1 回で孤児にする）。
-    func test_applyRangeGate_orphanRangeFallsBackToWholeTimeline() {
+    /// 4 秒素材の区間 source[1,2) を左端トリム 1 回で孤児にすると、帯が 0 本になり
+    /// ゲートも全時刻 OFF になる。区間データそのものは温存されるのでトリムを戻せば復活する。
+    func test_applyRangeGate_orphanRangeTurnsGateOff() {
         let model = makeDenseFaceModel(sourceEnd: 4)
         model.addMosaicApplyRange(fromCompositionTime: 1, to: 2)
         XCTAssertEqual(model.effectiveApplyRanges.count, 1)
@@ -1030,12 +1051,16 @@ final class TimelineEditingModelTests: XCTestCase {
                       "前提が崩れている（孤児になっていない）")
         XCTAssertTrue(model.effectiveApplyRanges.isEmpty, "孤児区間がゲートに残っている")
 
-        // 帯 0 本 ⇔ ゲート常時 ON（＝区間指定なしと同じ挙動）。
+        // 帯 0 本 ⇔ ゲート全区間 OFF。
         for t in stride(from: 0.0, to: model.mapping.totalDuration, by: 0.05) {
-            XCTAssertTrue(model.isMosaicActive(atComposition: t), "t=\(t) で OFF になっている")
+            XCTAssertFalse(model.isMosaicActive(atComposition: t), "t=\(t) で ON になっている")
         }
-        XCTAssertFalse(model.displayFaces(at: 1.0).isEmpty,
-                       "孤児区間で顔モザイクが全区間消えている（復帰不能な事故）")
+        XCTAssertTrue(model.displayFaces(at: 1.0).isEmpty)
+
+        // トリムを戻せば帯もゲートも復活する（区間データを温存している証拠）。
+        model.trimClip(id: model.clips[0].id, sourceStart: 0, sourceEnd: 4)
+        XCTAssertEqual(model.effectiveApplyRanges.count, 1)
+        XCTAssertFalse(model.displayFaces(at: 1.5).isEmpty)
     }
 
     /// **ゲートを `shouldDetectPreviewFrame` に入れてはならない**という契約を固定する。
@@ -1347,6 +1372,649 @@ final class TimelineEditingModelTests: XCTestCase {
         XCTAssertEqual(store.images.count, decodes,
                        "デコード回数とキャッシュ枚数が一致しない（同じコマが重複して積まれている）")
     }
+
+    // MARK: - S10a: 動画素材の追加（appendVideoClip）
+
+    /// 追加した動画が composition に入ること: クリップ・素材メタ（kind = .video）・
+    /// 合成尺・実 composition の尺が 2 本ぶんになり、素材IDは別であること。
+    func test_appendVideoClip_addsSecondClipIntoComposition() async throws {
+        let base = try await makeTestVideo(seconds: 1.0)
+        let added = try await makeTestVideo(seconds: 2.0)
+        defer {
+            try? FileManager.default.removeItem(at: base)
+            try? FileManager.default.removeItem(at: added)
+        }
+        let model = makeModel()
+        model.load(videoURL: base)
+        try await waitUntilLoaded(model)
+        let firstSource = try XCTUnwrap(model.clips.first).sourceID
+        let baseDuration = model.videoDuration
+
+        await model.appendVideoClip(url: added)
+        await model.awaitPendingTimelineRebuild()
+
+        XCTAssertEqual(model.clips.count, 2, "追加した動画がクリップにならない")
+        let newClip = model.clips[1]
+        XCTAssertNotEqual(newClip.sourceID, firstSource, "追加素材が元素材と同じ素材IDになっている")
+        XCTAssertEqual(model.timeline.sources[newClip.sourceID]?.kind, .video,
+                       "追加素材の kind が .video で記録されていない")
+        XCTAssertEqual(newClip.sourceStart, 0, accuracy: 1e-9)
+        XCTAssertEqual(newClip.sourceEnd, 2.0, accuracy: 0.1, "追加素材の尺が反映されていない")
+        XCTAssertEqual(model.videoDuration, baseDuration + 2.0, accuracy: 0.1)
+        let composition = try XCTUnwrap(model.composition, "追加後に composition が無い")
+        XCTAssertEqual(CMTimeGetSeconds(composition.duration), model.mapping.totalDuration,
+                       accuracy: 0.05, "composition の尺が写像と一致しない（結合されていない）")
+        XCTAssertEqual(model.compositionGeneration, model.timelineGeneration)
+        XCTAssertTrue(model.timeline.validate())
+        // sources へ AVURLAsset として登録され、サムネイル・下書きが URL を取り出せること
+        XCTAssertEqual(model.sourceURL(forSourceID: newClip.sourceID), added)
+    }
+
+    // MARK: - S11: 適用区間の自動生成と「区間 0 本 = 全区間 OFF」
+
+    /// **新規読み込みでクリップ全体を覆う区間が 1 本だけ生成され、全時刻 ON になること。**
+    ///
+    /// 新仕様では区間 0 本 = 全区間 OFF なので、生成しないと新規プロジェクトが
+    /// 「どこにもモザイクが乗らない」状態で始まる。
+    func test_initialLoad_createsSingleFullCoverApplyRange() async throws {
+        let url = try await makeTestVideo(seconds: 1.0)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let model = makeModel()
+        model.load(videoURL: url)
+        try await waitUntilLoaded(model)
+
+        XCTAssertEqual(model.timeline.applyRanges.count, 1, "新規読み込みで全体区間が作られていない")
+        let clip = try XCTUnwrap(model.clips.first)
+        XCTAssertEqual(model.timeline.applyRanges[0].clipID, clip.id)
+        XCTAssertEqual(model.timeline.applyRanges[0].sourceStart, clip.sourceStart, accuracy: 1e-12)
+        XCTAssertEqual(model.timeline.applyRanges[0].sourceEnd, clip.sourceEnd, accuracy: 1e-12)
+        XCTAssertTrue(model.timeline.validate())
+        for t in stride(from: 0.0, to: model.mapping.totalDuration, by: 0.02) {
+            XCTAssertTrue(model.isMosaicActive(atComposition: t), "新規読み込み直後に OFF の時刻がある t=\(t)")
+        }
+
+        // 区間を全削除 → 全時刻 OFF。
+        model.removeMosaicApplyRange(id: model.timeline.applyRanges[0].id)
+        XCTAssertTrue(model.timeline.applyRanges.isEmpty)
+        for t in stride(from: 0.0, to: model.mapping.totalDuration, by: 0.02) {
+            XCTAssertFalse(model.isMosaicActive(atComposition: t), "全削除したのに ON の時刻がある t=\(t)")
+        }
+
+        // **全削除 → undo → 復活 → redo → 再び 0 本**（自動生成が undo を汚していないこと）。
+        model.undo()
+        XCTAssertEqual(model.timeline.applyRanges.count, 1, "undo で区間が戻らない")
+        XCTAssertTrue(model.isMosaicActive(atComposition: 0.5))
+        model.redo()
+        XCTAssertTrue(model.timeline.applyRanges.isEmpty, "redo で区間が復活している（自動生成が undo を汚した）")
+        XCTAssertFalse(model.isMosaicActive(atComposition: 0.5))
+    }
+
+    /// 素材追加でも新クリップに全体区間が 1 本付くこと（既存クリップの区間は変わらない）。
+    func test_appendVideoClip_addsFullCoverApplyRangeForNewClip() async throws {
+        let base = try await makeTestVideo(seconds: 1.0)
+        let added = try await makeTestVideo(seconds: 2.0)
+        defer {
+            try? FileManager.default.removeItem(at: base)
+            try? FileManager.default.removeItem(at: added)
+        }
+        let model = makeModel()
+        model.load(videoURL: base)
+        try await waitUntilLoaded(model)
+        let baseRanges = model.timeline.applyRanges
+
+        await model.appendVideoClip(url: added)
+        await model.awaitPendingTimelineRebuild()
+
+        XCTAssertEqual(model.timeline.applyRanges.count, 2, "追加クリップに区間が付いていない")
+        XCTAssertEqual(model.timeline.applyRanges[0], baseRanges[0], "既存クリップの区間が書き換わった")
+        XCTAssertEqual(model.timeline.applyRanges[1].clipID, model.clips[1].id)
+        XCTAssertTrue(model.timeline.validate())
+        for t in stride(from: 0.0, to: model.mapping.totalDuration, by: 0.05) {
+            XCTAssertTrue(model.isMosaicActive(atComposition: t), "追加後に OFF の時刻がある t=\(t)")
+        }
+    }
+
+    /// 下書き復元 3 パターン: (a) v2 の区間 0 本は 0 本のまま（意図的な全削除が復活しない）、
+    /// (b) v2 の区間ありはそのまま、(c) v1（`schemaVersion` 無し）は全体区間へ移行。
+    func test_draftRestore_doesNotRegenerateApplyRanges() async throws {
+        let url = try await makeTestVideo(seconds: 1.0)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        func restore(_ timeline: TimelineState, sourceID: UUID) async throws -> MosaicEditorModel {
+            let model = makeModel()
+            model.queueTimelineRestore(timeline: timeline, sourceURLs: [sourceID: url],
+                                       primarySourceID: sourceID)
+            model.load(videoURL: url)
+            try await waitUntilLoaded(model)
+            return model
+        }
+
+        // (a) ユーザーが全削除した下書き（v2・区間 0 本）→ 0 本のまま。
+        let sourceA = UUID()
+        let clipA = TimelineClip(sourceID: sourceA, sourceStart: 0, sourceEnd: 1)
+        let emptyState = try JSONDecoder().decode(
+            TimelineState.self,
+            from: try JSONEncoder().encode(TimelineState(clips: [clipA], applyRanges: [])))
+        let restoredEmpty = try await restore(emptyState, sourceID: sourceA)
+        XCTAssertTrue(restoredEmpty.timeline.applyRanges.isEmpty,
+                      "意図的に全削除した下書きで区間が復活している")
+        XCTAssertFalse(restoredEmpty.isMosaicActive(atComposition: 0.5))
+
+        // (b) 部分区間を持つ下書き（v2）→ そのまま。
+        let sourceB = UUID()
+        let clipB = TimelineClip(sourceID: sourceB, sourceStart: 0, sourceEnd: 1)
+        let partial = MosaicApplyRange(clipID: clipB.id, sourceID: sourceB,
+                                       sourceStart: 0.2, sourceEnd: 0.5)
+        let restoredPartial = try await restore(TimelineState(clips: [clipB], applyRanges: [partial]),
+                                                sourceID: sourceB)
+        XCTAssertEqual(restoredPartial.timeline.applyRanges, [partial])
+        XCTAssertTrue(restoredPartial.isMosaicActive(atComposition: 0.3))
+        XCTAssertFalse(restoredPartial.isMosaicActive(atComposition: 0.8))
+
+        // (c) v1 下書き（schemaVersion 無し・区間 0 本）→ 旧「空 = 全区間 ON」を保存する
+        //     ため全体区間へ移行。復元経路では再生成しないので、この 1 本だけが残る。
+        let sourceC = UUID()
+        let clipC = TimelineClip(sourceID: sourceC, sourceStart: 0, sourceEnd: 1)
+        var v1 = String(decoding: try JSONEncoder().encode(TimelineState(clips: [clipC])),
+                        as: UTF8.self)
+        v1 = v1.replacingOccurrences(of: ",\"schemaVersion\":2", with: "")
+        v1 = v1.replacingOccurrences(of: "\"schemaVersion\":2,", with: "")
+        let migrated = try JSONDecoder().decode(TimelineState.self, from: Data(v1.utf8))
+        let restoredV1 = try await restore(migrated, sourceID: sourceC)
+        XCTAssertEqual(restoredV1.timeline.applyRanges.count, 1)
+        XCTAssertEqual(restoredV1.timeline.applyRanges[0].clipID, clipC.id)
+        XCTAssertTrue(restoredV1.isMosaicActive(atComposition: 0.5))
+    }
+
+    /// 追加は編集履歴（undo/redo）に載ること。
+    func test_appendVideoClip_isUndoable() async throws {
+        let base = try await makeTestVideo(seconds: 1.0)
+        let added = try await makeTestVideo(seconds: 1.0)
+        defer {
+            try? FileManager.default.removeItem(at: base)
+            try? FileManager.default.removeItem(at: added)
+        }
+        let model = makeModel()
+        model.load(videoURL: base)
+        try await waitUntilLoaded(model)
+
+        await model.appendVideoClip(url: added)
+        XCTAssertEqual(model.clips.count, 2)
+
+        model.undo()
+        await model.awaitPendingTimelineRebuild()
+        XCTAssertEqual(model.clips.count, 1, "追加が undo で戻らない")
+
+        model.redo()
+        await model.awaitPendingTimelineRebuild()
+        XCTAssertEqual(model.clips.count, 2, "追加が redo で復元されない")
+    }
+
+    /// クリップ未構築（動画ロード前）では黙って no-op にせず、エラーを出すこと
+    /// （写真追加と同じ流儀）。
+    func test_appendVideoClip_beforeTimelineExists_reportsError() async throws {
+        let url = try await makeTestVideo(seconds: 1.0)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let model = makeModel()
+
+        await model.appendVideoClip(url: url)
+
+        XCTAssertTrue(model.clips.isEmpty)
+        XCTAssertNotNil(model.errorMessage, "タイムライン未構築での追加が無言で失敗している")
+    }
+
+    /// 尺が取れない URL（存在しないファイル）では素材を登録せずエラーにすること
+    /// （実体のないクリップを composition へ流さない）。
+    func test_appendVideoClip_withUnreadableURL_reportsErrorAndKeepsTimeline() async throws {
+        let base = try await makeTestVideo(seconds: 1.0)
+        defer { try? FileManager.default.removeItem(at: base) }
+        let model = makeModel()
+        model.load(videoURL: base)
+        try await waitUntilLoaded(model)
+        let generation = model.timelineGeneration
+
+        await model.appendVideoClip(
+            url: FileManager.default.temporaryDirectory
+                .appendingPathComponent("missing-\(UUID().uuidString).mp4"))
+
+        XCTAssertEqual(model.clips.count, 1, "読めない素材でクリップが増えた")
+        XCTAssertEqual(model.timelineGeneration, generation, "無効な追加で世代が進んだ")
+        XCTAssertNotNil(model.errorMessage)
+    }
+
+    /// 追加は「読み込み」ではないので既存の検出結果（`detectedFaces`）を置き換えず、
+    /// 追加素材の検出は**素材基準キー**で `detectionCache` に入って lookup に効くこと。
+    ///
+    /// 合成テスト動画には実際の顔が写らない（MediaPipe は何も検出しない）ため、
+    /// シードが通す経路そのもの——`cacheStore` への素材基準キー格納 → 写像 →
+    /// 素材スコープの選択照合 → `displayFaces`——を、シードと同じ格納 API で
+    /// 注入して固定する。
+    func test_appendVideoClip_keepsExistingFacesAndWiresSourceKeyedDetection() async throws {
+        let base = try await makeTestVideo(seconds: 1.0)
+        let added = try await makeTestVideo(seconds: 1.0)
+        defer {
+            try? FileManager.default.removeItem(at: base)
+            try? FileManager.default.removeItem(at: added)
+        }
+        let model = makeModel()
+        model.load(videoURL: base)
+        try await waitUntilLoaded(model)
+        let firstSource = try XCTUnwrap(model.clips.first).sourceID
+        // 元素材の顔（左上）を選択済みにしておく
+        let existingFace = fakeFace(cx: 0.25, cy: 0.25)
+        model.detectedFaces = [FaceTarget(id: UUID(), landmarks: existingFace,
+                                          thumbnail: UIImage(), isSelected: true,
+                                          sourceID: firstSource)]
+        model.cacheStore.store([existingFace], sourceID: firstSource, time: 0.5)
+
+        await model.appendVideoClip(url: added)
+        await model.awaitPendingTimelineRebuild()
+
+        XCTAssertTrue(model.detectedFaces.contains { $0.sourceID == firstSource },
+                      "追加で既存素材の顔（＝選択状態）が失われた")
+
+        // 追加素材のシードと同じ経路で検出結果を入れる（顔は右下に置き、
+        // 別素材の顔と取り違えていないことを重心で区別できるようにする）
+        let newSource = model.clips[1].sourceID
+        let newFace = fakeFace(cx: 0.75, cy: 0.75)
+        model.cacheStore.store([newFace], sourceID: newSource, time: 0.5)
+        model.detectedFaces.append(FaceTarget(id: UUID(), landmarks: newFace,
+                                              thumbnail: UIImage(), isSelected: true,
+                                              sourceID: newSource))
+        XCTAssertFalse(model.liveFlowCache.keys.contains { $0.sourceID == newSource },
+                       "実検出のシードがフローキャッシュ（liveFlowCache）へ混ざっている")
+
+        // 追加クリップ側の合成時刻で、追加素材の顔が引けること
+        let inAddedClip = model.videoDuration - 0.5
+        let faces = model.displayFaces(at: inAddedClip, matching: model.detectedFaces)
+        XCTAssertEqual(faces.count, 1, "追加クリップ区間で検出が引けない（写像が繋がっていない）")
+        let centroid = try XCTUnwrap(faces.first).points.reduce(into: (x: 0.0, y: 0.0)) {
+            $0.x += Double($1.x); $0.y += Double($1.y)
+        }
+        XCTAssertGreaterThan(centroid.x / 4, 0.5,
+                             "追加クリップ区間で元素材の顔が引かれている（素材スコープが効いていない）")
+
+        // 元クリップ側では元素材の顔が引けること（取り違えていない）
+        let inBaseClip = model.displayFaces(at: 0.5, matching: model.detectedFaces)
+        XCTAssertEqual(inBaseClip.count, 1)
+    }
+
+    /// 追加した素材が下書き v2 に保存され、再開（`queueTimelineRestore` + `load`）で
+    /// 2 クリップとして復元されること。
+    func test_appendVideoClip_survivesDraftSaveAndRestore() async throws {
+        let draftsDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AppendVideoDraft-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: draftsDir) }
+        let store = DraftStore(directory: draftsDir)
+        let base = try await makeTestVideo(seconds: 1.0)
+        let added = try await makeTestVideo(seconds: 1.0)
+        defer {
+            try? FileManager.default.removeItem(at: base)
+            try? FileManager.default.removeItem(at: added)
+        }
+        let model = makeModel()
+        model.load(videoURL: base)
+        try await waitUntilLoaded(model)
+        await model.appendVideoClip(url: added)
+        await model.awaitPendingTimelineRebuild()
+        let sourceIDs = model.clips.map(\.sourceID)
+
+        // 下書き保存: draftSources が 2 素材ぶんの URL を出せること
+        XCTAssertEqual(model.draftSources.map(\.id), sourceIDs,
+                       "追加素材が下書き保存対象（draftSources）に出てこない")
+        let draft = try XCTUnwrap(store.saveVideoDraft(
+            existing: nil,
+            sources: model.draftSources,
+            sessionSourceIDs: model.sessionReferencedSourceIDs,
+            timeline: model.timeline,
+            faceMosaicOn: true, backgroundMosaicOn: false,
+            faceBlockSize: 28, backgroundBlockSize: 28,
+            manualRects: [], thumbnail: nil))
+        XCTAssertEqual(draft.sources.count, 2)
+
+        // 再開: 2 クリップ・同じ素材IDで戻ること
+        let urls = store.sourceURLs(for: draft)
+        let restored = makeModel()
+        restored.queueTimelineRestore(timeline: draft.timeline, sourceURLs: urls,
+                                      primarySourceID: sourceIDs[0])
+        restored.load(videoURL: try XCTUnwrap(urls[sourceIDs[0]]))
+        try await waitUntilLoaded(restored)
+        await restored.awaitPendingTimelineRebuild()
+
+        XCTAssertEqual(restored.clips.map(\.sourceID), sourceIDs,
+                       "追加した素材が下書きから復元されない")
+        XCTAssertEqual(restored.videoDuration, model.videoDuration, accuracy: 0.1)
+        XCTAssertNotNil(restored.composition)
+    }
+
+    // MARK: - 下書き復元と顔モザイクの選択状態
+
+    /// 下書きを再開したあとの状態（`EditorView.loadMedia` と同じ順序で再開する）。
+    ///
+    /// 合成テスト動画には実際の顔が写らない（MediaPipe は何も検出しない）ため、
+    /// 「初期スキャンが顔を見つけた状態」は `load` の自動選択規則と同じ結果——
+    /// 顔が 1 つなら選択・複数なら全部非選択——を注入して再現する。
+    /// 検証対象は復元の照合ロジックであり、検出そのものではない。
+    private func restoreDraft(_ draft: EditingDraft, from store: DraftStore,
+                              primarySourceID: UUID,
+                              scannedFaces: [FaceLandmarkSet]) async throws -> MosaicEditorModel {
+        let urls = store.sourceURLs(for: draft)
+        let restored = makeModel()
+        if !draft.timeline.clips.isEmpty {
+            restored.queueTimelineRestore(timeline: draft.timeline, sourceURLs: urls,
+                                          primarySourceID: primarySourceID)
+        }
+        restored.load(videoURL: try XCTUnwrap(urls[primarySourceID]))
+        restored.detectedFaces = scannedFaces.enumerated().map { idx, lm in
+            FaceTarget(id: UUID(), landmarks: lm, thumbnail: UIImage(),
+                       isSelected: scannedFaces.count == 1 && idx == 0,
+                       sourceID: restored.currentSourceID)
+        }
+        restored.applyRestoredParameters(
+            faceMosaicOn: draft.faceMosaicOn, backgroundMosaicOn: draft.backgroundMosaicOn,
+            faceBlockSize: draft.faceBlockSize, backgroundBlockSize: draft.backgroundBlockSize,
+            manualRects: draft.manualRects, faceSelections: draft.faceSelections)
+        try await waitUntilLoaded(restored)
+        return restored
+    }
+
+    /// 顔を選択した状態のモデルを作り、そのまま下書きへ保存する
+    /// （`EditorView.persistDraft` と同じ引数の渡し方）。
+    private func saveDraftWithSelection(
+        store: DraftStore, url: URL, faces: [(FaceLandmarkSet, Bool)]
+    ) async throws -> (draft: EditingDraft, sourceID: UUID) {
+        let model = makeModel()
+        model.load(videoURL: url)
+        try await waitUntilLoaded(model)
+        let source = model.currentSourceID
+        model.detectedFaces = faces.map {
+            FaceTarget(id: UUID(), landmarks: $0.0, thumbnail: UIImage(),
+                       isSelected: $0.1, sourceID: source)
+        }
+        let draft = try XCTUnwrap(store.saveVideoDraft(
+            existing: nil, sources: model.draftSources,
+            sessionSourceIDs: model.sessionReferencedSourceIDs,
+            timeline: model.timeline,
+            faceMosaicOn: true, backgroundMosaicOn: false,
+            faceBlockSize: 28, backgroundBlockSize: 28,
+            manualRects: [], faceSelections: model.selectedFaceAnchors, thumbnail: nil))
+        return (draft, source)
+    }
+
+    /// **顔が 2 人以上写っている下書きを再開しても、選択されていた顔のモザイクが
+    /// 外れないこと**（修正前は初期スキャンの自動選択規則に落ち、実測 0 個選択だった。
+    /// プライバシーアプリで「復元したら顔が出ている」状態になる）。
+    ///
+    /// `FaceTarget.id` は検出のたびに振り直されるので ID では照合できない。
+    /// 素材ID＋正規化重心（`DraftFaceSelection`）で再照合されることを固定する。
+    func test_draftRestore_keepsSelectedFaces() async throws {
+        let draftsDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FaceSelDraft-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: draftsDir) }
+        let store = DraftStore(directory: draftsDir)
+        let url = try await makeTestVideo(seconds: 1.0)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let faceA = fakeFace(cx: 0.2, cy: 0.3)
+        let faceB = fakeFace(cx: 0.8, cy: 0.3)
+
+        // 2 顔とも選択して保存 → 再開
+        let saved = try await saveDraftWithSelection(
+            store: store, url: url, faces: [(faceA, true), (faceB, true)])
+        XCTAssertEqual(saved.draft.faceSelections?.count, 2,
+                       "選択された顔が下書きに保存されていない")
+        let restored = try await restoreDraft(saved.draft, from: store,
+                                              primarySourceID: saved.sourceID,
+                                              scannedFaces: [faceA, faceB])
+
+        XCTAssertEqual(restored.detectedFaces.filter(\.isSelected).count, 2,
+                       "復元後に顔の選択が失われている（顔が露出する）")
+        XCTAssertFalse(restored.canUndo,
+                       "復元した選択が履歴の起点になっていない（undo で選択が外れうる）")
+
+        // 片方だけ選択して保存した場合は、その片方だけが復元されること
+        // （安全側フォールバックが常時発火して全選択になっていないことの対照）。
+        let partial = try await saveDraftWithSelection(
+            store: store, url: url, faces: [(faceA, true), (faceB, false)])
+        let restoredPartial = try await restoreDraft(partial.draft, from: store,
+                                                     primarySourceID: partial.sourceID,
+                                                     scannedFaces: [faceA, faceB])
+        let selected = restoredPartial.detectedFaces.filter(\.isSelected)
+        XCTAssertEqual(selected.count, 1, "選択されていなかった顔まで復元されている")
+        XCTAssertEqual(restoredPartial.normalizedCentroid(of: try XCTUnwrap(selected.first).landmarks).x,
+                       0.2, accuracy: 0.01, "復元された顔が保存時と別人になっている")
+    }
+
+    /// 保存時の顔が復元時に見つからない（重心が閾値を超えて動いた・検出が変わった）
+    /// ときは、**その素材の顔を全選択**して安全側（過剰適用）へ倒すこと。
+    /// 「選択されていた顔の行方が説明できない」状態で 0 個選択に落とすと顔が露出する。
+    func test_draftRestore_unmatchedAnchorSelectsAllFacesOfSource() async throws {
+        let draftsDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FaceSelFallback-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: draftsDir) }
+        let store = DraftStore(directory: draftsDir)
+        let url = try await makeTestVideo(seconds: 1.0)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        // 保存時: 左上の顔だけを選択
+        let saved = try await saveDraftWithSelection(
+            store: store, url: url,
+            faces: [(fakeFace(cx: 0.1, cy: 0.1), true), (fakeFace(cx: 0.5, cy: 0.5), false)])
+
+        // 復元時: 顔が 2 つとも右下側へ移り、保存時の目印（0.1,0.1）とは
+        // 閾値 0.5 を超えて離れている → 照合失敗
+        let restored = try await restoreDraft(
+            saved.draft, from: store, primarySourceID: saved.sourceID,
+            scannedFaces: [fakeFace(cx: 0.9, cy: 0.9), fakeFace(cx: 0.75, cy: 0.95)])
+
+        XCTAssertEqual(restored.detectedFaces.filter(\.isSelected).count, 2,
+                       "照合に失敗したのに選択が空のまま（顔が露出する）")
+    }
+
+    /// 顔選択フィールドを持たない**旧下書き**は壊れずにデコードでき、復元時は
+    /// 顔の選択状態に一切触れない（初期スキャンの自動選択規則がそのまま残る）こと。
+    func test_draftRestore_legacyDraftWithoutFaceSelectionsKeepsAutoRule() async throws {
+        let draftsDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FaceSelLegacy-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: draftsDir) }
+        let store = DraftStore(directory: draftsDir)
+        let url = try await makeTestVideo(seconds: 1.0)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let model = makeModel()
+        model.load(videoURL: url)
+        try await waitUntilLoaded(model)
+        let source = model.currentSourceID
+
+        // faceSelections を渡さずに保存＝旧下書き相当（nil = 情報なし）
+        let draft = try XCTUnwrap(store.saveVideoDraft(
+            existing: nil, sources: model.draftSources,
+            sessionSourceIDs: model.sessionReferencedSourceIDs,
+            timeline: model.timeline,
+            faceMosaicOn: true, backgroundMosaicOn: false,
+            faceBlockSize: 28, backgroundBlockSize: 28,
+            manualRects: [], thumbnail: nil))
+        XCTAssertNil(draft.faceSelections, "情報なしが空配列に潰れている")
+
+        // 顔 2 つ → 自動選択規則どおり 0 個選択のまま（修正前と同じ挙動）
+        let restoredMulti = try await restoreDraft(
+            draft, from: store, primarySourceID: source,
+            scannedFaces: [fakeFace(cx: 0.2, cy: 0.3), fakeFace(cx: 0.8, cy: 0.3)])
+        XCTAssertEqual(restoredMulti.detectedFaces.filter(\.isSelected).count, 0)
+
+        // 顔 1 つ → 自動選択規則どおり選択される（旧下書きの単独顔が外れないこと）
+        let restoredSingle = try await restoreDraft(
+            draft, from: store, primarySourceID: source,
+            scannedFaces: [fakeFace(cx: 0.5, cy: 0.4)])
+        XCTAssertEqual(restoredSingle.detectedFaces.filter(\.isSelected).count, 1,
+                       "旧下書きの復元で単独の顔の自動選択まで外れている")
+    }
+
+    /// 初期スキャンが空（冒頭に顔が写らない動画）で復元した場合、目印は保留され、
+    /// ライブ検出が顔を見つけて `detectedFaces` が埋まった時点で適用されること。
+    /// 保留が無いと、この経路は「顔が複数なら 0 個選択」の自動規則に落ちて顔が露出する。
+    func test_draftRestore_appliesSelectionWhenFacesAppearLater() async throws {
+        let draftsDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FaceSelPending-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: draftsDir) }
+        let store = DraftStore(directory: draftsDir)
+        let url = try await makeTestVideo(seconds: 1.0)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let faceA = fakeFace(cx: 0.2, cy: 0.3)
+        let faceB = fakeFace(cx: 0.8, cy: 0.3)
+        let saved = try await saveDraftWithSelection(
+            store: store, url: url, faces: [(faceA, true), (faceB, true)])
+
+        // 初期スキャンが空のまま復元する
+        let restored = try await restoreDraft(saved.draft, from: store,
+                                              primarySourceID: saved.sourceID,
+                                              scannedFaces: [])
+        XCTAssertTrue(restored.detectedFaces.isEmpty)
+
+        // 後からライブ検出が顔を見つけた相当（自動選択規則では 2 顔とも非選択）
+        restored.detectedFaces = [faceA, faceB].map {
+            FaceTarget(id: UUID(), landmarks: $0, thumbnail: UIImage(),
+                       isSelected: false, sourceID: restored.currentSourceID)
+        }
+
+        XCTAssertEqual(restored.detectedFaces.filter(\.isSelected).count, 2,
+                       "後から現れた顔に下書きの選択が適用されていない")
+        XCTAssertFalse(restored.canUndo, "復元した選択が undo 可能な編集として積まれている")
+    }
+
+    /// 目印の適用が保留中（冒頭に顔が写らない動画の復元）に**素材を追加**しても、
+    /// 追加素材の顔の自動選択が打ち消されないこと。
+    ///
+    /// 保留中の目印は復元時点の素材に向けられたものなので、復元後に追加された素材には
+    /// 当てはまらない（「保存時に非選択だった」という解釈は、保存時に存在しなかった
+    /// 素材には成立しない）。打ち消されると追加クリップの区間だけモザイクが乗らない
+    /// ＝顔が露出する。
+    func test_pendingRestore_doesNotDeselectFacesOfSourceAddedAfterRestore() async throws {
+        let draftsDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FaceSelPendingAppend-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: draftsDir) }
+        let store = DraftStore(directory: draftsDir)
+        let url = try await makeTestVideo(seconds: 1.0)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let saved = try await saveDraftWithSelection(
+            store: store, url: url, faces: [(fakeFace(cx: 0.2, cy: 0.3), true)])
+
+        // 初期スキャンが空 → 目印は保留される
+        let restored = try await restoreDraft(saved.draft, from: store,
+                                              primarySourceID: saved.sourceID,
+                                              scannedFaces: [])
+        XCTAssertTrue(restored.detectedFaces.isEmpty)
+
+        // 保留中に素材を追加（実顔が無いので seed は空。素材登録だけが起きる）
+        let added = try await makeTestVideo(seconds: 1.0)
+        defer { try? FileManager.default.removeItem(at: added) }
+        await restored.appendVideoClip(url: added)
+        let addedSourceID = try XCTUnwrap(restored.timeline.clips.last?.sourceID)
+        XCTAssertNotEqual(addedSourceID, saved.sourceID, "クリップが追加されていない")
+
+        // seedVideoDetection と同じ形（検出した顔すべてを即選択して追記）
+        restored.detectedFaces += [fakeFace(cx: 0.7, cy: 0.6)].map {
+            FaceTarget(id: UUID(), landmarks: $0, thumbnail: UIImage(),
+                       isSelected: true, sourceID: addedSourceID)
+        }
+
+        let addedSelected = restored.detectedFaces
+            .filter { $0.sourceID == addedSourceID && $0.isSelected }
+        XCTAssertEqual(addedSelected.count, 1,
+                       "追加素材の顔の選択が下書き復元の保留目印に打ち消されている（顔が露出する）")
+    }
+
+    /// 復元時点で下書きに含まれていた素材については、目印が 1 つも無い＝
+    /// 「保存時に 0 個選択」という明示的な意思なので、非選択へ戻すこと
+    /// （上のテストの対照。追加素材を触らない修正が、この意味論まで壊していないこと）。
+    func test_draftRestore_emptyAnchorsStillDeselectFacesOfSavedSource() async throws {
+        let draftsDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FaceSelEmpty-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: draftsDir) }
+        let store = DraftStore(directory: draftsDir)
+        let url = try await makeTestVideo(seconds: 1.0)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        // 全部の顔を非選択にして保存（faceSelections == []）
+        let saved = try await saveDraftWithSelection(
+            store: store, url: url, faces: [(fakeFace(cx: 0.5, cy: 0.4), false)])
+        XCTAssertEqual(saved.draft.faceSelections, [], "0 個選択が保存されていない")
+
+        // 復元時に顔が 1 つ見つかる → 自動選択規則では選択される
+        let restored = try await restoreDraft(saved.draft, from: store,
+                                              primarySourceID: saved.sourceID,
+                                              scannedFaces: [fakeFace(cx: 0.5, cy: 0.4)])
+        XCTAssertEqual(restored.detectedFaces.filter(\.isSelected).count, 0,
+                       "保存時に非選択だった顔が復元で選択されている")
+    }
+
+    /// `redetect(at:)` が**再検出した素材の顔だけ**を差し替え、他素材の顔と選択を
+    /// 保つこと（複数クリップで踏むと、他素材のモザイクが丸ごと外れる）。
+    ///
+    /// 合成テスト動画には実顔が写らないので、再検出そのものは `detectedFaces` を
+    /// 直接注入して代替する（他テストと同じ手法）。ここで固定したいのは
+    /// 「配列を丸ごと差し替えない」ことと、素材スコープの選択引き継ぎ。
+    func test_carryingOverSelection_isScopedToRedetectedSource() async throws {
+        let url = try await makeTestVideo(seconds: 1.0)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let model = makeModel()
+        model.load(videoURL: url)
+        try await waitUntilLoaded(model)
+        let sourceA = model.currentSourceID
+        let sourceB = UUID()
+
+        model.detectedFaces = [
+            FaceTarget(id: UUID(), landmarks: fakeFace(cx: 0.2, cy: 0.2), thumbnail: UIImage(),
+                       isSelected: true, sourceID: sourceA),
+            FaceTarget(id: UUID(), landmarks: fakeFace(cx: 0.8, cy: 0.8), thumbnail: UIImage(),
+                       isSelected: true, sourceID: sourceB)
+        ]
+
+        // A を再検出した相当（A の顔が少し動いた）
+        model.replaceDetectedFaces(
+            [FaceTarget(id: UUID(), landmarks: fakeFace(cx: 0.25, cy: 0.22), thumbnail: UIImage(),
+                        isSelected: false, sourceID: sourceA)],
+            ofSource: sourceA)
+
+        let bFaces = model.detectedFaces.filter { $0.sourceID == sourceB }
+        XCTAssertEqual(bFaces.count, 1, "再検出していない素材の顔が消えている")
+        XCTAssertTrue(bFaces.allSatisfy(\.isSelected), "再検出していない素材の顔の選択が消えている")
+        let aFaces = model.detectedFaces.filter { $0.sourceID == sourceA }
+        XCTAssertEqual(aFaces.count, 1, "再検出した素材の顔が差し替わっていない")
+        XCTAssertTrue(aFaces.allSatisfy(\.isSelected), "再検出前の選択が引き継がれていない")
+    }
+
+    /// 素材スコープの選択引き継ぎでも、フェイルクローズ（誰も選択されない結果に
+    /// なるならその素材を全選択）は維持されること。他素材が選択済みでも、
+    /// **再検出した素材の中で**判定する（他素材の選択に釣られて 0 個選択にしない）。
+    func test_carryingOverSelection_failsClosedWithinRedetectedSource() async throws {
+        let url = try await makeTestVideo(seconds: 1.0)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let model = makeModel()
+        model.load(videoURL: url)
+        try await waitUntilLoaded(model)
+        let sourceA = model.currentSourceID
+        let sourceB = UUID()
+
+        model.detectedFaces = [
+            FaceTarget(id: UUID(), landmarks: fakeFace(cx: 0.1, cy: 0.1), thumbnail: UIImage(),
+                       isSelected: false, sourceID: sourceA),
+            FaceTarget(id: UUID(), landmarks: fakeFace(cx: 0.15, cy: 0.12), thumbnail: UIImage(),
+                       isSelected: true, sourceID: sourceB)
+        ]
+
+        // A の再検出結果は、A の選択顔（0 個）と照合できない → A を全選択
+        model.replaceDetectedFaces(
+            [FaceTarget(id: UUID(), landmarks: fakeFace(cx: 0.9, cy: 0.9), thumbnail: UIImage(),
+                        isSelected: false, sourceID: sourceA)],
+            ofSource: sourceA)
+
+        let aFaces = model.detectedFaces.filter { $0.sourceID == sourceA }
+        XCTAssertEqual(aFaces.count, 1, "再検出した素材の顔が差し替わっていない")
+        XCTAssertTrue(aFaces.allSatisfy(\.isSelected),
+                      "再検出でその素材の選択が空のまま残っている（以降モザイクが掛からない）")
+        let bFaces = model.detectedFaces.filter { $0.sourceID == sourceB }
+        XCTAssertEqual(bFaces.count, 1, "再検出していない素材の顔が消えている")
+        XCTAssertTrue(bFaces.allSatisfy(\.isSelected), "他素材の選択が巻き込まれている")
+    }
 }
 
 /// S5: `EditingDraft` v2（sources + timeline）と `DraftStore` の複数素材コピー/GC のテスト。
@@ -1406,6 +2074,61 @@ final class DraftStoreV2Tests: XCTestCase {
         XCTAssertFalse(draft.faceMosaicOn)
         XCTAssertEqual(draft.faceBlockSize, 40)
         XCTAssertFalse(draft.backgroundMosaicOn)
+        XCTAssertNil(draft.faceSelections,
+                     "顔選択キーの無い旧下書きが『0 個選択』に化けている（復元で顔の選択が外れる）")
+    }
+
+    // MARK: - 顔選択（faceSelections）
+
+    /// 顔選択キーを持たない下書き JSON がデコードで壊れず、nil（＝情報なし）に
+    /// なること。`sources` / `timeline` を持つ v2 下書きも対象。
+    func test_draftWithoutFaceSelectionsKey_decodesAsNil() throws {
+        let json = """
+        {"id":"11111111-2222-3333-4444-555566667777",
+         "kind":"video",
+         "sourceFileName":"source-V2.mov",
+         "faceMosaicOn":true,
+         "backgroundMosaicOn":false,
+         "faceBlockSize":28,
+         "backgroundBlockSize":28,
+         "manualRects":[],
+         "sources":[{"id":"AAAAAAAA-2222-3333-4444-555566667777","fileName":"source-V2.mov"}]}
+        """
+        let draft = try JSONDecoder().decode(EditingDraft.self, from: Data(json.utf8))
+        XCTAssertNil(draft.faceSelections)
+        XCTAssertEqual(draft.sources.first?.fileName, "source-V2.mov")
+    }
+
+    /// 顔選択（素材ID＋正規化重心）が保存 → 再読込で往復すること。
+    /// 「0 個選択（空配列）」と「情報なし（nil）」が区別されたまま残ること。
+    func test_faceSelections_roundTripsAndKeepsEmptyDistinctFromNil() throws {
+        let store = makeStore()
+        let url = try makeSourceFile("faces.mov")
+        let source = UUID()
+        let anchors = [DraftFaceSelection(sourceID: source, centroid: CGPoint(x: 0.25, y: 0.4)),
+                       DraftFaceSelection(sourceID: nil, centroid: CGPoint(x: 0.75, y: 0.6))]
+        let saved = try XCTUnwrap(store.saveVideoDraft(
+            existing: nil, sources: [(source, url)],
+            timeline: TimelineState(clips: [TimelineClip(sourceID: source,
+                                                         sourceStart: 0, sourceEnd: 1)]),
+            faceMosaicOn: true, backgroundMosaicOn: false,
+            faceBlockSize: 28, backgroundBlockSize: 28,
+            manualRects: [], faceSelections: anchors, thumbnail: nil))
+
+        let reloaded = try XCTUnwrap(makeStore().videoDrafts.first { $0.id == saved.id })
+        XCTAssertEqual(reloaded.faceSelections, anchors,
+                       "顔選択（素材ID・重心）が保存 → 再読込で往復していない")
+
+        // 0 個選択は空配列として残る（nil ＝情報なしに化けない）。
+        let empty = try XCTUnwrap(store.saveVideoDraft(
+            existing: saved.id, sources: [(source, url)],
+            timeline: reloaded.timeline,
+            faceMosaicOn: true, backgroundMosaicOn: false,
+            faceBlockSize: 28, backgroundBlockSize: 28,
+            manualRects: [], faceSelections: [], thumbnail: nil))
+        let reloadedEmpty = try XCTUnwrap(makeStore().videoDrafts.first { $0.id == empty.id })
+        XCTAssertEqual(reloadedEmpty.faceSelections, [],
+                       "『0 個選択』が『情報なし』に化けている")
     }
 
     // MARK: - v2 round-trip
@@ -2053,9 +2776,13 @@ final class TransitionOverlapModelTests: XCTestCase {
         let sourceB = UUID()
         let clipA = TimelineClip(sourceID: sourceA, sourceStart: 0, sourceEnd: 2)
         let clipB = TimelineClip(sourceID: sourceB, sourceStart: 0, sourceEnd: 2)
+        // S11: 区間 0 本 = 全区間 OFF なので、新規プロジェクトの既定（クリップ全体を
+        // 覆う区間）を明示的に入れる。ここで見たいのは重なり区間の顔の union であって
+        // 適用区間ゲートではない。
         model.setTimelineForTesting(TimelineState(
             clips: [clipA, clipB],
-            transitions: [clipA.id: TransitionSpec(kind: kind, duration: 0.5)]))
+            transitions: [clipA.id: TransitionSpec(kind: kind, duration: 0.5)],
+            applyRanges: MosaicApplyGate.fullCoverRanges(for: [clipA, clipB])))
         // 重なり区間（合成 [1.5, 2.0)）に対応する素材時刻に顔を仕込む。
         // A は素材時刻 1.5〜2.0、B は素材時刻 0.0〜0.5。
         for time in stride(from: 1.5, through: 2.0, by: 0.1) {
@@ -2153,7 +2880,8 @@ final class TransitionOverlapModelTests: XCTestCase {
         let clipB = TimelineClip(sourceID: sourceB, sourceStart: 0, sourceEnd: 2)
         model.setTimelineForTesting(TimelineState(
             clips: [clipA, clipB],
-            transitions: [clipA.id: TransitionSpec(kind: .slideLeft, duration: 0.5)]))
+            transitions: [clipA.id: TransitionSpec(kind: .slideLeft, duration: 0.5)],
+            applyRanges: MosaicApplyGate.fullCoverRanges(for: [clipA, clipB])))
         // 重なり [1.5, 2.0)。t=1.85 → progress 0.7。
         // outgoing(A) は dx=−0.7、incoming(B) は dx=+0.3 平行移動する。
         for time in stride(from: 1.5, through: 2.0, by: 0.1) {
@@ -2190,7 +2918,8 @@ final class TransitionOverlapModelTests: XCTestCase {
         let model = makeModel()
         let sourceA = model.currentSourceID
         let clip = TimelineClip(sourceID: sourceA, sourceStart: 0, sourceEnd: 2)
-        model.setTimelineForTesting(TimelineState(clips: [clip]))
+        model.setTimelineForTesting(TimelineState(
+            clips: [clip], applyRanges: MosaicApplyGate.fullCoverRanges(for: [clip])))
         // 240x320 を 320x240 のフレームへフィットした配置（x=0.21875 / 幅 0.5625）。
         let placement = AspectFit.placement(of: CGSize(width: 240, height: 320),
                                             in: CGSize(width: 320, height: 240))
@@ -2251,4 +2980,322 @@ final class TransitionOverlapModelTests: XCTestCase {
         XCTAssertEqual(inBar[0].sourceID, sourceA)
     }
 
+}
+
+/// S12: 写真クリップの尺（capacity 方式）とクリップ音量のモデル層テスト。
+///
+/// - 写真素材は `PhotoClipEncoder.clipCapacitySeconds` の headroom 付きでエンコードし、
+///   クリップの `sourceEnd` だけ `defaultClipSeconds` にする。トリムは `sourceEnd` を
+///   素材尺までしか伸ばせないため、この方式でないと「3 秒より長くできない」ままになる。
+/// - `setClipVolume` は `applyTimelineEdit` 経由なので undo/redo にそのまま載る。
+@MainActor
+final class PhotoClipDurationAndVolumeTests: XCTestCase {
+    private func makeModel() -> MosaicEditorModel {
+        MosaicEditorModel(mode: .video, recents: RecentItemsStore())
+    }
+
+    private func solidImage(width: CGFloat, height: CGFloat) -> UIImage {
+        let format = UIGraphicsImageRendererFormat.default()
+        format.scale = 1
+        return UIGraphicsImageRenderer(size: CGSize(width: width, height: height),
+                                       format: format).image { ctx in
+            UIColor.darkGray.setFill()
+            ctx.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        }
+    }
+
+    /// 追加直後は既定尺（3s）でも、**トリムで既定尺より長く** capacity まで伸ばせること。
+    /// capacity を超える指定は素材尺へクランプされること（trimClip の既存契約）。
+    func test_appendedPhotoClip_canBeTrimmedLongerThanDefault() async throws {
+        let model = makeModel()
+        model.setClipsForTesting([TimelineClip(sourceID: model.currentSourceID,
+                                               sourceStart: 0, sourceEnd: 5)])
+        model.commitEdit()
+
+        await model.appendPhotoClip(image: solidImage(width: 320, height: 240))
+        await model.awaitPendingTimelineRebuild()
+
+        XCTAssertNil(model.errorMessage)
+        let photo = try XCTUnwrap(model.clips.last)
+        XCTAssertEqual(photo.sourceEnd, PhotoClipEncoder.defaultClipSeconds, accuracy: 0.1,
+                       "追加直後のクリップ尺が既定尺でない")
+        let materialSeconds = try XCTUnwrap(model.sourceDuration(forClipID: photo.id))
+        XCTAssertGreaterThanOrEqual(materialSeconds, PhotoClipEncoder.clipCapacitySeconds - 0.2,
+                                    "素材が headroom 付きでエンコードされていない（伸ばせない）")
+
+        // 既定尺より長い範囲へトリム（これが 3 秒の壁の解消そのもの）。
+        let longer = PhotoClipEncoder.defaultClipSeconds + 5
+        model.trimClip(id: photo.id, sourceStart: 0, sourceEnd: longer)
+        let trimmed = try XCTUnwrap(model.clips.last)
+        XCTAssertEqual(trimmed.sourceEnd, longer, accuracy: 1e-6,
+                       "写真クリップを既定尺より長くできない")
+        XCTAssertTrue(model.timeline.validate())
+
+        // capacity を超える指定は素材尺でクランプ（実体のない区間を作らない）。
+        model.trimClip(id: photo.id, sourceStart: 0, sourceEnd: 999)
+        let clamped = try XCTUnwrap(model.clips.last)
+        XCTAssertEqual(clamped.sourceEnd, materialSeconds, accuracy: 1e-6,
+                       "素材尺を超える範囲が素通りしている")
+    }
+
+    /// 高ディテールの画像（圧縮の worst case。単色だと尺による差が出ない）。
+    private func noisyImage(width: CGFloat, height: CGFloat) -> UIImage {
+        let format = UIGraphicsImageRendererFormat.default()
+        format.scale = 1
+        return UIGraphicsImageRenderer(size: CGSize(width: width, height: height),
+                                       format: format).image { ctx in
+            for y in stride(from: 0, to: height, by: 4) {
+                for x in stride(from: 0, to: width, by: 4) {
+                    UIColor(red: CGFloat(Int(x) * 7 % 255) / 255,
+                            green: CGFloat(Int(y) * 13 % 255) / 255,
+                            blue: CGFloat(Int(x) * Int(y) % 255) / 255, alpha: 1).setFill()
+                    ctx.fill(CGRect(x: x, y: y, width: 4, height: 4))
+                }
+            }
+        }
+    }
+
+    /// エンコード済み mp4 の（同期サンプル数, 総サンプル数）。圧縮サンプルのまま読む。
+    private func sampleCounts(of url: URL) async throws -> (sync: Int, total: Int) {
+        let asset = AVURLAsset(url: url)
+        let tracks = try await asset.loadTracks(withMediaType: .video)
+        let track = try XCTUnwrap(tracks.first)
+        let reader = try AVAssetReader(asset: asset)
+        let output = AVAssetReaderTrackOutput(track: track, outputSettings: nil)
+        reader.add(output)
+        reader.startReading()
+        var sync = 0
+        var total = 0
+        while let sample = output.copyNextSampleBuffer() {
+            total += 1
+            let attachments = CMSampleBufferGetSampleAttachmentsArray(sample, createIfNecessary: false)
+                as? [[CFString: Any]]
+            let notSync = attachments?.first?[kCMSampleAttachmentKey_NotSync] as? Bool ?? false
+            if !notSync { sync += 1 }
+        }
+        return (sync, total)
+    }
+
+    /// 長 GOP（`AVVideoMaxKeyFrameIntervalKey`）が効いていること。
+    ///
+    /// 静止画の連続なので I フレームを絞れば以降は P フレームだけになり、ファイルサイズが下がる。
+    /// 写真素材は素材時刻 0 以外へシークされない（`TimelineState.clampedSourceTime`）ため
+    /// 長 GOP のデメリットが無い。
+    ///
+    /// **「I フレームちょうど 1 枚」は要求できない**: このキーは上限のヒントであり、
+    /// エンコーダは自身の判断で IDR を追加してよい（Simulator の実測は 4s / 64 サンプル中
+    /// 同期サンプル 5 枚）。ここでは「毎秒 IDR が入るような短い GOP になっていない」ことだけを見る。
+    func test_photoClipEncode_usesLongGOP() async throws {
+        let encoded = try await PhotoClipEncoder().encode(image: noisyImage(width: 720, height: 1280),
+                                                          seconds: 4.0)
+        defer { try? FileManager.default.removeItem(at: encoded.url) }
+        let counts = try await sampleCounts(of: encoded.url)
+        print("[PHOTOCLIP] keyframes=\(counts.sync)/\(counts.total)")
+        XCTAssertGreaterThanOrEqual(counts.total, 60, "15fps × 4s 分のサンプルが書けていない")
+        XCTAssertLessThanOrEqual(counts.sync, max(1, counts.total / 8),
+                                 "I フレームが多すぎる（長 GOP 設定が効いていない）")
+    }
+
+    /// capacity 尺のエンコードの実測（所要時間・ファイルサイズ）。
+    ///
+    /// 複数選択の追加は 1 枚ずつ直列 await されるので、1 枚あたりのコストが枚数倍で効く。
+    /// **capacity を上げるときは必ずこの数字を見ること。** サイズは長 GOP でも尺に対して
+    /// 横ばいにはならない（同一フレームでも P フレームにビットが乗る）ため、
+    /// ここでは「比例していないこと」ではなく絶対値の上限を見る。
+    ///
+    /// **所要時間は「3 秒版との比」で見る**（絶対秒は実行環境の負荷に丸ごと引きずられる）。
+    /// 同じ実行の中で採った 2 点なので、マシンが遅ければ両方が同じだけ遅くなり比は保たれる。
+    /// 絶対秒の上限も残すが、これは「桁で遅くなった」ときだけ鳴る**大雑把な安全弁**に留める。
+    func test_photoClipEncode_capacityCostIsAcceptable() async throws {
+        let image = noisyImage(width: 1080, height: 1920)
+
+        let startDefault = Date()
+        let short = try await PhotoClipEncoder().encode(image: image,
+                                                        seconds: PhotoClipEncoder.defaultClipSeconds)
+        let shortElapsed = Date().timeIntervalSince(startDefault)
+        defer { try? FileManager.default.removeItem(at: short.url) }
+
+        let startCapacity = Date()
+        let long = try await PhotoClipEncoder().encode(image: image,
+                                                       seconds: PhotoClipEncoder.clipCapacitySeconds)
+        let longElapsed = Date().timeIntervalSince(startCapacity)
+        defer { try? FileManager.default.removeItem(at: long.url) }
+
+        let shortBytes = try XCTUnwrap(
+            FileManager.default.attributesOfItem(atPath: short.url.path)[.size] as? NSNumber).intValue
+        let longBytes = try XCTUnwrap(
+            FileManager.default.attributesOfItem(atPath: long.url.path)[.size] as? NSNumber).intValue
+        print("[PHOTOCLIP] \(PhotoClipEncoder.defaultClipSeconds)s: \(shortElapsed)s / \(shortBytes) bytes")
+        print("[PHOTOCLIP] \(PhotoClipEncoder.clipCapacitySeconds)s: \(longElapsed)s / \(longBytes) bytes")
+
+        XCTAssertEqual(long.duration, PhotoClipEncoder.clipCapacitySeconds, accuracy: 0.1)
+        XCTAssertGreaterThan(shortBytes, 0)
+        // 尺は 3s → 15s の 5 倍。エンコードは尺に対しておおむね線形（固定コストがあるぶん
+        // 比は 5 未満に落ち着く）なので、**線形の 2 倍**を超えたら構造的な悪化とみなす。
+        //
+        // 実測（Simulator iPhone 17e）: 無負荷（load avg 約 3）で 4.31 倍（0.950s / 0.220s）×2、
+        // 並行ビルド下（load avg 約 9.5）で 4.45 倍（2.687s / 0.604s）・4.46 倍（2.602s / 0.584s）・
+        // 5.92 倍（3.032s / 0.512s）、6.90 倍（1.777s / 0.258s。全件実行の中で暖まった状態）。
+        // **比が跳ねるのは 3s 側**（固定コストの割合が大きく 0.26〜0.60s とばらつく）ため、
+        // 上限は実測最大 6.90 の 1.45 倍にあたる 10.0 まで見る。
+        // capacity を 60s へ上げれば比は 19 前後になりここで落ちる。**30s 程度の小さな引き上げは
+        // この比では捕まえきれないので、変更時は上の print を必ず目視すること。**
+        XCTAssertGreaterThan(shortElapsed, 0)
+        XCTAssertLessThan(longElapsed / shortElapsed, 10.0,
+                          "capacity 尺のエンコードが尺に対して線形以上に重い（capacity を下げること）")
+        // 絶対秒の安全弁。旧版は 4.0s だったが、これは**ホストが空いているときの実測 0.85s**
+        // （無負荷での再実測も 0.95s で一致）を基準にした値で、並行ビルド下の実測 2.6〜3.0s に
+        // 対しては余裕が 1.3 倍しか無く、負荷次第で落ちていた（過去に 4.6s の失敗報告あり）。
+        // 負荷時実測の約 3 倍を上限に置く。**エンコード自体の速さはこの値ではなく比で見ること。**
+        XCTAssertLessThan(longElapsed, 8.0, "capacity 尺のエンコードが桁で遅い（環境かエンコーダ設定を疑う）")
+        XCTAssertLessThan(longBytes, 8 * 1_048_576, "capacity 尺のファイルが大きすぎる")
+    }
+
+    /// setClipVolume が状態へ反映され、undo/redo で戻ること（合成尺は変わらない）。
+    func test_setClipVolume_isUndoable_andKeepsDuration() {
+        let model = makeModel()
+        let clip = TimelineClip(sourceID: model.currentSourceID, sourceStart: 0, sourceEnd: 10)
+        model.setClipsForTesting([clip])
+        model.commitEdit()   // 履歴基準を確立
+        XCTAssertFalse(model.canUndo)
+
+        model.setClipVolume(id: clip.id, volume: 0.25)
+        XCTAssertEqual(model.clips[0].originalAudioVolume, 0.25, accuracy: 1e-6)
+        XCTAssertEqual(model.videoDuration, 10.0, accuracy: 1e-9, "音量で合成尺が変わった")
+        XCTAssertTrue(model.canUndo, "音量変更が履歴に積まれていない")
+
+        model.undo()
+        XCTAssertEqual(model.clips[0].originalAudioVolume, 1.0, accuracy: 1e-6,
+                       "undo で音量が戻らない")
+        model.redo()
+        XCTAssertEqual(model.clips[0].originalAudioVolume, 0.25, accuracy: 1e-6,
+                       "redo で音量が復元されない")
+
+        // 同値の再設定は世代・履歴を進めない（settingVolume の self 契約が通っていること）。
+        let generation = model.timelineGeneration
+        model.setClipVolume(id: clip.id, volume: 0.25)
+        XCTAssertEqual(model.timelineGeneration, generation,
+                       "変化の無い音量設定で世代トークンが進んでいる")
+    }
+
+    // MARK: - 一時ファイルの掃除（配線）
+
+    /// `TempMediaJanitor.sweep` が「期限切れの中間ファイルだけ」を消すこと。
+    ///
+    /// 判定そのものは `TempFileSweeper`（コア層）のテストが担うので、ここは配線
+    /// （ディレクトリ列挙・更新日時の読み取り・削除対象の取り違え）を見る。
+    /// **`source-*` / `thumb-*` / 索引 JSON を消したら下書きが壊れる**ので、
+    /// それらが残ることを明示的に固定する。
+    func test_tempMediaJanitor_deletesOnlyAgedIntermediateFiles() throws {
+        let fileManager = FileManager.default
+        let dir = fileManager.temporaryDirectory.appendingPathComponent("janitor-\(UUID().uuidString)")
+        try fileManager.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: dir) }
+        let now = Date()
+        func write(_ name: String, ageHours: Double) throws -> URL {
+            let url = dir.appendingPathComponent(name)
+            try Data("x".utf8).write(to: url)
+            try fileManager.setAttributes([.modificationDate: now.addingTimeInterval(-ageHours * 3600)],
+                                          ofItemAtPath: url.path)
+            return url
+        }
+        let deletable = [try write("picked-old.mov", ageHours: 48),
+                         try write("photoclip-old.mp4", ageHours: 48),
+                         try write("mosaic-old.mp4", ageHours: 48)]
+        let kept = [try write("picked-fresh.mov", ageHours: 1),      // 編集中のセッションの実体
+                    try write("source-old.mov", ageHours: 48),       // 下書きの素材本体
+                    try write("thumb-old.jpg", ageHours: 48),
+                    try write("drafts.json", ageHours: 48)]
+
+        let removed = TempMediaJanitor.sweep(directory: dir, now: now)
+
+        XCTAssertEqual(removed, deletable.count)
+        for url in deletable {
+            XCTAssertFalse(fileManager.fileExists(atPath: url.path),
+                           "期限切れの中間ファイルが残った: \(url.lastPathComponent)")
+        }
+        for url in kept {
+            XCTAssertTrue(fileManager.fileExists(atPath: url.path),
+                          "消してはならないファイルを削除した: \(url.lastPathComponent)")
+        }
+    }
+}
+
+/// S12(UI): クリップ音量シート（`TimelineVolumeSheet`）の配線。
+///
+/// View そのものは描画を伴うので、テストで固定するのは
+/// 1. 活性判定（`TimelineVolumeAvailability`。View から切り出した純ロジック）
+/// 2. シートが受け取るコールバック経由の値変更が undo/redo に載ること
+/// の 2 点だけ。スライダーの見た目・ミュートボタンの表示は実機での目視に委ねる。
+@MainActor
+final class TimelineVolumeSheetWiringTests: XCTestCase {
+    private func makeModel() -> MosaicEditorModel {
+        MosaicEditorModel(mode: .video, recents: RecentItemsStore())
+    }
+
+    /// 写真クリップでは音量メニューが活性にならないこと（音声トラックが無く、
+    /// `AudioMixFactory` が `originalAudioVolume` を無視するため）。
+    func test_volumeAvailability_excludesPhotoClips() {
+        let videoSourceID = UUID()
+        let photoSourceID = UUID()
+        let unregisteredSourceID = UUID()
+        let videoClip = TimelineClip(sourceID: videoSourceID, sourceStart: 0, sourceEnd: 4)
+        let photoClip = TimelineClip(sourceID: photoSourceID, sourceStart: 0, sourceEnd: 3)
+        let legacyClip = TimelineClip(sourceID: unregisteredSourceID, sourceStart: 0, sourceEnd: 2)
+        let timeline = TimelineState(
+            clips: [videoClip, photoClip, legacyClip],
+            sources: [videoSourceID: TimelineSource(id: videoSourceID, kind: .video),
+                      photoSourceID: TimelineSource(id: photoSourceID, kind: .photo)])
+
+        XCTAssertTrue(TimelineVolumeAvailability.isEnabled(timeline: timeline, clipID: videoClip.id),
+                      "動画クリップで音量メニューが活性にならない")
+        XCTAssertFalse(TimelineVolumeAvailability.isEnabled(timeline: timeline, clipID: photoClip.id),
+                       "写真クリップで音量メニューが活性になっている（設定しても無視される）")
+        XCTAssertTrue(TimelineVolumeAvailability.isEnabled(timeline: timeline, clipID: legacyClip.id),
+                      "素材メタ未登録（= 動画扱い）のクリップが除外されている")
+        XCTAssertFalse(TimelineVolumeAvailability.isEnabled(timeline: timeline, clipID: nil),
+                       "未選択で音量メニューが活性になっている")
+        XCTAssertFalse(TimelineVolumeAvailability.isEnabled(timeline: timeline, clipID: UUID()),
+                       "存在しないクリップIDで音量メニューが活性になっている")
+    }
+
+    /// シートのコールバック（`TimelineVolumeSheet.onApply`）を通した値変更が
+    /// undo で戻り、redo で復元されること。ミュート（0）も同じ経路に載ること。
+    func test_volumeSheetCallback_appliesAndIsUndoable() throws {
+        let model = makeModel()
+        let clip = TimelineClip(sourceID: model.currentSourceID, sourceStart: 0, sourceEnd: 8)
+        model.setClipsForTesting([clip])
+        model.commitEdit()   // 履歴基準を確立
+        XCTAssertFalse(model.canUndo)
+
+        // `TimelineEditSheetsModifier` が渡しているのと同じクロージャを組み立てる。
+        let sheet = TimelineVolumeSheet(initialVolume: clip.originalAudioVolume) { volume in
+            model.setClipVolume(id: clip.id, volume: volume)
+        }
+
+        sheet.onApply(0.4)
+        XCTAssertEqual(model.clips[0].originalAudioVolume, 0.4, accuracy: 1e-6,
+                       "シート経由の音量がモデルへ反映されていない")
+
+        // ミュート（0）。範囲下端も同じ経路に載る。
+        sheet.onApply(0)
+        XCTAssertEqual(model.clips[0].originalAudioVolume, 0, accuracy: 1e-6,
+                       "ミュートがモデルへ反映されていない")
+        XCTAssertEqual(model.videoDuration, 8.0, accuracy: 1e-9, "音量で合成尺が変わった")
+
+        model.undo()
+        XCTAssertEqual(model.clips[0].originalAudioVolume, 0.4, accuracy: 1e-6,
+                       "undo でミュート前の音量に戻らない")
+        model.undo()
+        XCTAssertEqual(model.clips[0].originalAudioVolume, 1.0, accuracy: 1e-6,
+                       "undo で初期音量に戻らない")
+        model.redo()
+        XCTAssertEqual(model.clips[0].originalAudioVolume, 0.4, accuracy: 1e-6,
+                       "redo で音量が復元されない")
+
+        // 範囲外は `TimelineClip.clampedVolume` で切られる（UI から壊れた値を入れられない）。
+        sheet.onApply(1.8)
+        XCTAssertEqual(model.clips[0].originalAudioVolume, 1.0, accuracy: 1e-6,
+                       "範囲外の音量が素通りしている")
+    }
 }

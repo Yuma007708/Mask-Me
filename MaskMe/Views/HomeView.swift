@@ -12,6 +12,13 @@ struct HomeView: View {
     @State private var pickedMedia: PickedMedia?
     @State private var resumeContext: EditorView.ResumeContext?
     @State private var showEditor = false
+    /// 取り込み失敗の文言（`MediaPicker` の `onFailure`）。ここには
+    /// `MosaicEditorModel.errorMessage` が無いのでこの画面のアラートで伝える。
+    @State private var pickerError: String?
+
+    private var showPickerError: Binding<Bool> {
+        Binding(get: { pickerError != nil }, set: { if !$0 { pickerError = nil } })
+    }
 
     var body: some View {
         VStack(spacing: 20) {
@@ -30,13 +37,23 @@ struct HomeView: View {
         }
         .navigationTitle("Mask Me")
         .sheet(item: $pickerFilter) { filter in
-            MediaPicker(filter: filter) { media in
-                pickerFilter = nil
-                pickedMedia = media
-                resumeContext = nil
-                showEditor = true
-            }
-            .ignoresSafeArea()
+            // ここは**新規編集セッションの開始**なので 1 件のまま（既定値）。
+            // 複数選択はタイムラインへの素材追加（VideoTimelineView）だけが使う。
+            MediaPicker(filter: filter,
+                        onFailure: { pickerError = $0 },
+                        onPick: { picked in
+                            pickerFilter = nil
+                            guard let media = picked.first else { return }
+                            pickedMedia = media
+                            resumeContext = nil
+                            showEditor = true
+                        })
+                .ignoresSafeArea()
+        }
+        .alert("読み込みに失敗しました", isPresented: showPickerError) {
+            Button("OK", role: .cancel) { pickerError = nil }
+        } message: {
+            Text(pickerError ?? "")
         }
         .navigationDestination(isPresented: $showEditor) {
             if let pickedMedia {

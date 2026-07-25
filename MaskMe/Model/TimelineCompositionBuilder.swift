@@ -45,6 +45,13 @@ struct TimelineCompositionBuilder {
         let audioMix: AVMutableAudioMix?
         /// 顔ランドマーク（素材フレーム基準）を合成フレーム基準へ写すレイアウト。
         let layout: TimelineRenderLayout
+        /// 出力解像度（先頭クリップ基準）。**`videoComposition` が nil でもこの値が
+        /// 出力サイズになる**（無装着構成は先頭＝唯一のフォーマットがそのまま出る）ので、
+        /// UI へ出す値をここから取ること。クリップが 1 本も無いときだけ `.zero`。
+        let outputSize: CGSize
+        /// 出力枠より大きく、縮小されて収まるクリップの id（UI の注意表示用）。
+        /// 判定は `TimelineOutputSummary.downscaledIndices`（コア層の純関数）。
+        let downscaledClipIDs: Set<UUID>
     }
 
     /// 映像トラックの混在判定用フォーマット（naturalSize / preferredTransform）。
@@ -139,8 +146,17 @@ struct TimelineCompositionBuilder {
         let audioMix = AudioMixFactory.make(placements: placements,
                                             overlaps: mapping.overlaps,
                                             tracks: survivingAudio)
+        // 出力解像度の算出は `VideoCompositionFactory.renderSize(for:)` の単一実装を使う
+        // （コア層に再実装しない。表示と実出力が食い違う二重管理を作らないため。
+        // `TimelineOutputSummary` の doc 参照）。
+        let outputSize = placements.first.map { VideoCompositionFactory.renderSize(for: $0.format) }
+            ?? .zero
+        let downscaled = TimelineOutputSummary.downscaledIndices(
+            renderSize: outputSize,
+            displaySizes: placements.map { VideoCompositionFactory.displaySize(of: $0.format) })
         return Built(composition: composition, videoComposition: videoComposition,
-                     audioMix: audioMix, layout: layout)
+                     audioMix: audioMix, layout: layout, outputSize: outputSize,
+                     downscaledClipIDs: Set(downscaled.map { placements[$0].clip.id }))
     }
 
     /// A/B いずれかのトラック組（同じスロットの映像トラックと音声トラック）。
