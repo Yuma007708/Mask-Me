@@ -317,6 +317,12 @@ public final class VideoMosaicExporter: @unchecked Sendable {
         backgroundBlock: Float = 28,
         speed: ExportSpeed = .balanced,
         /// 動画の書き出し範囲（0...1 正規化）。既定は全長。
+        ///
+        /// **S9 現在、実アプリの呼び出しは常に既定（全長）である**
+        /// （UI からの書き込み経路が無い。`MosaicEditorModel.trimRange` の doc 参照）。
+        /// 将来の再導入に備えて PTS シフト経路ごと意図的に残してあり、
+        /// 写像との二重適用を起こさないことは `MultiClipExportTests` が固定している。
+        ///
         /// 範囲外のフレーム/音声サンプルは reader.timeRange で読まず、writer 側の
         /// 時刻を `trimRange.lowerBound` 分シフトして出力尺を短縮する。
         /// トリム時の音声はパススルーではなく AAC 再エンコードになり、末尾の余剰は

@@ -8,7 +8,15 @@ import UIKit
 /// `MosaicEditorModel` のタイムライン編集 API と Composition 再構築（S4）。
 ///
 /// 編集操作はすべて `TimelineState` の編集ラッパ（純関数）を経由する薄い層で、
-/// 変更があったときだけ世代トークン付きの非同期再構築を走らせる。UI 接続は S9。
+/// 変更があったときだけ世代トークン付きの非同期再構築を走らせる。
+/// UI（`VideoTimelineView` 一式）は S9 で接続済み。
+///
+/// **モザイク適用区間の編集も同じ `applyTimelineEdit` を通す。** 適用区間は
+/// composition の構成に影響しないので再構築は本来不要だが、`timeline` の didSet が
+/// 世代を進める設計上、再構築を省くと `compositionGeneration != timelineGeneration`
+/// のまま残り `exportVideo` が「更新が完了していません」で止まる。世代と composition の
+/// 整合を唯一の不変条件として保つため、余分な再構築を受け入れている
+/// （区間編集はジェスチャ確定時の 1 回だけなので実用上の負荷は split/trim と同等）。
 ///
 /// **注意（Swift の言語制約）**: `timeline` / `timelineGeneration` / `sources` /
 /// `composition` は格納プロパティのため、この extension には物理的に移動できず
@@ -28,11 +36,25 @@ extension MosaicEditorModel {
 
     // MARK: - 公開編集 API（TimelineState の編集ラッパを呼ぶ薄い層。UI 接続は S9）
 
-    /// 現在の再生位置でクリップを 2 分割する。
+    /// 現在の再生位置でクリップを 2 分割する（対象は帰属規則が決める）。
     /// 分割できない位置（クリップ境界・最小尺未満）では何もしない。
+    ///
+    /// **UI からはこれを使わない**（トランジションの重なり区間で選択と対象が食い違う。
+    /// `TimelineState.splitting(atDisplayTime:)` の doc 参照）。UI は
+    /// `splitClip(id:)` を使う。
     public func splitAtCurrentPosition() {
         let time = compositionTime(forPosition: playbackPosition)
         applyTimelineEdit { $0.splitting(atDisplayTime: time) }
+    }
+
+    /// 指定クリップを現在の再生位置で 2 分割する（UI の「分割」ボタンの入口）。
+    ///
+    /// 対象を id で明示するため、トランジションの重なり区間でも選択したクリップが割れる。
+    /// 押せるかどうかの判定は `TimelineState.canSplit(clipID:atDisplayTime:)`
+    /// （実行と同じ純関数）を UI がそのまま使うこと。
+    public func splitClip(id: UUID) {
+        let time = compositionTime(forPosition: playbackPosition)
+        applyTimelineEdit { $0.splitting(clipID: id, atDisplayTime: time) }
     }
 
     /// 指定クリップを取り除く（最後の 1 本は消せない）。
@@ -52,21 +74,79 @@ extension MosaicEditorModel {
     /// composition ができる（S4 レビューの実測）。素材尺が取れない場合（テスト直注入等）
     /// はクランプせず、コア層の有限性・順序ガードに委ねる。
     public func trimClip(id: UUID, sourceStart: Double, sourceEnd: Double) {
-        var clampedEnd = sourceEnd
-        if let clip = timeline.clips.first(where: { $0.id == id }),
-           let asset = sources[clip.sourceID] {
-            // 同期取得は load(videoURL:) の初期スキャンと同じ流儀（ローカル素材のみ）。
-            let sourceDuration = CMTimeGetSeconds(asset.duration)
-            if sourceDuration.isFinite, sourceDuration > 0 {
-                clampedEnd = min(sourceEnd, sourceDuration)
-            }
-        }
+        let clampedEnd = sourceDuration(forClipID: id).map { min(sourceEnd, $0) } ?? sourceEnd
         applyTimelineEdit { $0.trimming(clipID: id, sourceStart: sourceStart, sourceEnd: clampedEnd) }
     }
 
     /// 指定クリップの再生倍率（0.1x〜10x にクランプ）を設定する。
     public func setClipRate(id: UUID, rate: Double) {
         applyTimelineEdit { $0.settingRate(clipID: id, rate: rate) }
+    }
+
+    /// 素材IDに対応するローカルファイル URL（サムネイル生成用）。
+    ///
+    /// load / 下書き復元 / 写真クリップ追加の経路の asset は常に `AVURLAsset` である。
+    /// URL を持たない asset（テスト直注入）では nil。
+    public func sourceURL(forSourceID id: UUID) -> URL? {
+        (sources[id] as? AVURLAsset)?.url
+    }
+
+    /// 指定クリップの素材の実尺（秒）。取得できない場合は nil。
+    ///
+    /// 用途は 2 つで、どちらも同じ値を見ることが要件:
+    /// - `trimClip` の `sourceEnd` クランプ（素材尺を超える範囲をコアへ素通しさせない）
+    /// - トリム UI が「右端をどこまで伸ばせるか」を知るため
+    ///   （`TimelineBandLayout.trimmedBounds(clip:edge:deltaCompositionSeconds:sourceDuration:)`）
+    ///
+    /// 同期取得は `load(videoURL:)` の初期スキャンと同じ流儀（ローカル素材のみ）。
+    /// 非同期の `load(.duration)` に置き換えないこと（トリムのドラッグ確定は同期経路）。
+    public func sourceDuration(forClipID id: UUID) -> Double? {
+        guard let clip = timeline.clips.first(where: { $0.id == id }),
+              let asset = sources[clip.sourceID] else { return nil }
+        let seconds = CMTimeGetSeconds(asset.duration)
+        return seconds.isFinite && seconds > 0 ? seconds : nil
+    }
+
+    // MARK: - トランジション（S9。S8 レビュー m-5 の「編集 API が無い」への対応）
+
+    /// 指定クリップの直後の境界にトランジションを設定する（種類・長さの変更も同じ入口）。
+    ///
+    /// duration は `TimelineState.maximumTransitionDuration(afterClipID:)`
+    /// （= min(両クリップ合成尺)/2）へクランプされる。設定できない境界（末尾クリップ・
+    /// クリップが短すぎる）では何もしない。`applyTimelineEdit` 経由なので
+    /// undo/redo（`EditSnapshot.timeline`）と下書き v2（`TimelineState` の Codable）に
+    /// そのまま載る。
+    public func setTransition(afterClipID id: UUID, kind: TransitionKind, duration: Double) {
+        applyTimelineEdit { $0.settingTransition(afterClipID: id, kind: kind, duration: duration) }
+    }
+
+    /// 指定クリップの直後の境界からトランジションを取り除く。
+    public func removeTransition(afterClipID id: UUID) {
+        applyTimelineEdit { $0.removingTransition(afterClipID: id) }
+    }
+
+    // MARK: - モザイク適用区間（S9。状態編集と表示まで。描画ゲートの配線は S10）
+
+    /// 合成時刻の区間 [from, to) をモザイク適用区間として追加する。
+    ///
+    /// UI は合成時刻で操作し、保存は素材時刻アンカーへ写す（`MosaicApplyGate` が担当）。
+    /// クリップを跨ぐ区間は素材ごとに分解され、重複・隣接はマージされる。
+    public func addMosaicApplyRange(fromCompositionTime from: Double, to: Double) {
+        applyTimelineEdit { $0.addingApplyRange(fromCompositionTime: from, to: to) }
+    }
+
+    /// 指定した適用区間を取り除く。
+    public func removeMosaicApplyRange(id: UUID) {
+        applyTimelineEdit { $0.removingApplyRange(id: id) }
+    }
+
+    /// 掴んだセグメント（適用区間 × クリップ）を新しい合成区間で置き換える（端ドラッグの確定）。
+    ///
+    /// 差し替えは素材時刻で行われ、当該クリップの使用範囲外にある素材区間は温存される
+    /// （`TimelineState.replacingApplyRange(id:clipID:compositionInterval:)` の doc 参照）。
+    /// マージで id が変わり得るので、UI は編集後に区間を引き直すこと。
+    public func setMosaicApplyRange(id: UUID, clipID: UUID, interval: CompositionInterval) {
+        applyTimelineEdit { $0.replacingApplyRange(id: id, clipID: clipID, compositionInterval: interval) }
     }
 
     // MARK: - 写真クリップ（S6）
@@ -88,7 +168,8 @@ extension MosaicEditorModel {
     /// 以後の lookup・ライブ検出は `resolveSourceTime` の clamp（写真素材 → 素材時刻 0）
     /// でこの seed にヒットし、写真区間で 2 回目以降の実検出・重複 submit は走らない。
     ///
-    /// - Parameter seconds: クリップの尺（秒）。既定 3 秒は UI（S9）実装までの固定値。
+    /// - Parameter seconds: クリップの尺（秒）。**固定 3 秒**（S9 の UI に尺の選択肢は無い。
+    ///   追加後にクリップ端のトリムで伸縮できるため、追加時の選択 UI は設けていない）。
     ///   上限 60s へのクランプはエンコーダ側が保証する。
     public func appendPhotoClip(image: UIImage, seconds: Double = 3.0) async {
         // クリップ未構築（動画ロード完了前・写真モード）では追加先のタイムラインが無い。
@@ -210,6 +291,11 @@ extension MosaicEditorModel {
     /// - Parameter keepSeconds: 復元したい再生位置（編集前の合成時刻）。
     ///   新しい合成尺にクランプして `playbackPosition` とプレビューへ反映する。
     func rebuildComposition(generation: Int, keepingCompositionSeconds keepSeconds: Double? = nil) async {
+        // 再構築の全体（build → replaceAsset → seek）をデコード占有として宣言する。
+        // `replaceAsset` と `seek` を個別に囲むだけでは両者の await の隙間で busy が
+        // 0 に戻り、その窓でサムネイル生成が始まってしまう。
+        beginPreviewDecode()
+        defer { endPreviewDecode() }
         guard generation == timelineGeneration else { return }
         let clipsSnapshot = timeline.clips
         let sourcesSnapshot = sources

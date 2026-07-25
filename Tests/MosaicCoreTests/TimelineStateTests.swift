@@ -260,4 +260,89 @@ final class TimelineStateTests: XCTestCase {
         // 合成尺 4+4+4 − (1+1) = 10 秒。
         XCTAssertEqual(state.mapping.totalDuration, 10.0, accuracy: 1e-9)
     }
+
+    // MARK: - トランジションの編集 API（S9）
+
+    /// 上限は min(両クリップ合成尺)/2。末尾クリップ・不在 id では nil。
+    func test_maximumTransitionDuration() {
+        let short = TimelineClip(sourceID: sourceA, sourceStart: 0, sourceEnd: 3)
+        let long = TimelineClip(sourceID: sourceB, sourceStart: 0, sourceEnd: 10)
+        let state = TimelineState(clips: [short, long])
+
+        XCTAssertEqual(state.maximumTransitionDuration(afterClipID: short.id) ?? -1, 1.5, accuracy: 1e-9)
+        XCTAssertNil(state.maximumTransitionDuration(afterClipID: long.id), "末尾クリップには継ぎ目が無い")
+        XCTAssertNil(state.maximumTransitionDuration(afterClipID: UUID()))
+    }
+
+    /// 上限が最小尺を下回る境界では設定できない（設定 API も nil 判定と一致する）。
+    func test_maximumTransitionDuration_tooShortClipsCannotHost() {
+        let tiny = TimelineClip(sourceID: sourceA, sourceStart: 0, sourceEnd: 0.15)
+        let next = TimelineClip(sourceID: sourceB, sourceStart: 0, sourceEnd: 5)
+        let state = TimelineState(clips: [tiny, next])
+
+        XCTAssertNil(state.maximumTransitionDuration(afterClipID: tiny.id))
+        let attempted = state.settingTransition(afterClipID: tiny.id, kind: .crossfade, duration: 0.5)
+        XCTAssertEqual(attempted, state, "設定不可な境界では self を返す")
+    }
+
+    func test_settingTransition_addsAndReplaces() {
+        let state = makeState(durationAB: 1.0, durationBC: 1.0)
+        let clipA = state.clips[0]
+
+        let changed = state.settingTransition(afterClipID: clipA.id, kind: .slideLeft, duration: 1.5)
+        XCTAssertEqual(changed.transitions[clipA.id]?.kind, .slideLeft)
+        XCTAssertEqual(changed.transitions[clipA.id]?.duration ?? -1, 1.5, accuracy: 1e-9)
+        XCTAssertEqual(changed.transitions.count, 2, "他の境界は変わらない")
+        XCTAssertTrue(changed.validate())
+        // 合成尺は重なり長ぶんだけ縮む: 12 − (1.5 + 1) = 9.5
+        XCTAssertEqual(changed.mapping.totalDuration, 9.5, accuracy: 1e-9)
+    }
+
+    /// duration は min(両クリップ合成尺)/2 へクランプされる（`validate` を破らない）。
+    func test_settingTransition_clampsDuration() {
+        let state = makeState()
+        let clipA = state.clips[0]
+        let clamped = state.settingTransition(afterClipID: clipA.id, kind: .fadeToBlack, duration: 99)
+
+        XCTAssertEqual(clamped.transitions[clipA.id]?.duration ?? -1, 2.0, accuracy: 1e-9)
+        XCTAssertTrue(clamped.validate())
+    }
+
+    /// 最小尺未満・非有限の duration は最小尺へ持ち上げる／拒否する。
+    func test_settingTransition_rejectsNonFiniteAndLiftsBelowMinimum() {
+        let state = makeState()
+        let clipA = state.clips[0]
+
+        let lifted = state.settingTransition(afterClipID: clipA.id, kind: .crossfade, duration: 0.001)
+        XCTAssertEqual(lifted.transitions[clipA.id]?.duration ?? -1,
+                       TransitionSpec.minimumDuration, accuracy: 1e-9)
+        for value in [Double.nan, .infinity, -.infinity] {
+            XCTAssertEqual(state.settingTransition(afterClipID: clipA.id, kind: .crossfade, duration: value),
+                           state, "非有限の duration は設定しない（self を返す）")
+        }
+    }
+
+    func test_removingTransition() {
+        let state = makeState()
+        let clipA = state.clips[0]
+        let removed = state.removingTransition(afterClipID: clipA.id)
+
+        XCTAssertNil(removed.transitions[clipA.id])
+        XCTAssertEqual(removed.transitions.count, 1)
+        XCTAssertEqual(removed.mapping.totalDuration, 11.0, accuracy: 1e-9)
+        XCTAssertEqual(removed.removingTransition(afterClipID: clipA.id), removed, "無ければ self")
+    }
+
+    /// applyRanges / sources は トランジション編集で失われないこと。
+    func test_transitionEditsPreserveApplyRangesAndSources() {
+        var state = makeState()
+        state.applyRanges = [MosaicApplyRange(sourceID: sourceA, sourceStart: 0, sourceEnd: 1)]
+        state.sources = [sourceA: TimelineSource(id: sourceA, kind: .photo)]
+
+        let changed = state.settingTransition(afterClipID: state.clips[0].id, kind: .slideRight, duration: 0.5)
+        XCTAssertEqual(changed.applyRanges, state.applyRanges)
+        XCTAssertEqual(changed.sources, state.sources)
+        XCTAssertEqual(changed.removingTransition(afterClipID: state.clips[0].id).applyRanges, state.applyRanges)
+    }
+
 }

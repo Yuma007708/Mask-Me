@@ -370,12 +370,18 @@ final class TimelineEditingModelTests: XCTestCase {
     }
 
     /// trimRange（書き出し範囲）の変更が履歴に積まれ、undo/redo で復元されること。
+    ///
+    /// **注意: この機能には S9 現在ユーザー操作からの到達経路が無い**
+    /// （全体 In/Out トリム UI はクリップ単位のトリムへ置き換わった。
+    /// `MosaicEditorModel.trimRange` の doc 参照）。将来の再導入に備えて
+    /// スナップショットへの載せ方だけを固定しているテストであり、
+    /// 「UI から触れる機能を守っている」と読まないこと。
     func test_trimRangeChange_isUndoable() {
         let model = makeModel()
         model.commitEdit()   // 履歴基準（trimRange 0...1）
 
         model.trimRange = 0.2...0.8
-        model.commitEdit()   // トリムハンドルの DragGesture.onEnded 相当
+        model.commitEdit()   // 直接代入（UI 経路は無い）
 
         model.undo()
         XCTAssertEqual(model.trimRange, 0...1)
@@ -535,6 +541,415 @@ final class TimelineEditingModelTests: XCTestCase {
 
         XCTAssertNotNil(model.errorMessage, "不整合な composition のまま書き出しが進んだ")
         XCTAssertNil(model.exportProgress)
+    }
+
+    // MARK: - S9: トランジション編集 API（UI から到達可能になった経路）
+
+    /// 2 クリップ状態を作る（sources は存在確認だけに使われる stub）。
+    private func makeTwoClipModel() -> (MosaicEditorModel, TimelineClip, TimelineClip) {
+        let model = makeModel()
+        let sourceA = model.currentSourceID
+        let sourceB = UUID()
+        let clipA = TimelineClip(sourceID: sourceA, sourceStart: 0, sourceEnd: 4)
+        let clipB = TimelineClip(sourceID: sourceB, sourceStart: 0, sourceEnd: 6)
+        model.setTimelineForTesting(TimelineState(clips: [clipA, clipB]))
+        let stub = AVURLAsset(url: URL(fileURLWithPath: "/dev/null"))
+        model.sources = [sourceA: stub, sourceB: stub]
+        model.commitEdit()   // 履歴基準
+        return (model, clipA, clipB)
+    }
+
+    /// トランジションの設定が合成尺・世代・履歴に反映されること。
+    func test_setTransition_appliesClampsAndIsUndoable() {
+        let (model, clipA, _) = makeTwoClipModel()
+        let generationBefore = model.timelineGeneration
+        XCTAssertEqual(model.videoDuration, 10.0, accuracy: 1e-9)
+
+        // 上限 min(4, 6)/2 = 2.0 を超える指定はクランプされる。
+        model.setTransition(afterClipID: clipA.id, kind: .crossfade, duration: 5.0)
+
+        XCTAssertEqual(model.timeline.transitions[clipA.id]?.kind, .crossfade)
+        XCTAssertEqual(model.timeline.transitions[clipA.id]?.duration ?? -1, 2.0, accuracy: 1e-9)
+        XCTAssertEqual(model.videoDuration, 8.0, accuracy: 1e-9, "重なりぶん合成尺が縮んでいない")
+        XCTAssertGreaterThan(model.timelineGeneration, generationBefore)
+        XCTAssertTrue(model.timeline.validate())
+
+        XCTAssertTrue(model.canUndo, "トランジション設定が履歴に積まれていない")
+        model.undo()
+        XCTAssertTrue(model.timeline.transitions.isEmpty)
+        XCTAssertEqual(model.videoDuration, 10.0, accuracy: 1e-9)
+        model.redo()
+        XCTAssertEqual(model.timeline.transitions[clipA.id]?.duration ?? -1, 2.0, accuracy: 1e-9)
+    }
+
+    /// 種類の差し替えと削除。設定できない境界（末尾クリップ）は no-op で世代も進めない。
+    func test_setTransition_replaceRemoveAndNoOp() {
+        let (model, clipA, clipB) = makeTwoClipModel()
+        model.setTransition(afterClipID: clipA.id, kind: .crossfade, duration: 1.0)
+        model.setTransition(afterClipID: clipA.id, kind: .wipeRight, duration: 1.0)
+        XCTAssertEqual(model.timeline.transitions[clipA.id]?.kind, .wipeRight)
+
+        let generation = model.timelineGeneration
+        model.setTransition(afterClipID: clipB.id, kind: .crossfade, duration: 1.0)
+        XCTAssertEqual(model.timelineGeneration, generation, "末尾クリップへの設定で世代が進んだ")
+        model.removeTransition(afterClipID: clipB.id)
+        XCTAssertEqual(model.timelineGeneration, generation, "無いトランジションの削除で世代が進んだ")
+
+        model.removeTransition(afterClipID: clipA.id)
+        XCTAssertTrue(model.timeline.transitions.isEmpty)
+        XCTAssertEqual(model.videoDuration, 10.0, accuracy: 1e-9)
+    }
+
+    /// 下書き（`TimelineState` の Codable）にトランジションが載ること。
+    func test_transition_survivesDraftRoundTrip() throws {
+        let (model, clipA, _) = makeTwoClipModel()
+        model.setTransition(afterClipID: clipA.id, kind: .slideLeft, duration: 1.5)
+
+        let data = try JSONEncoder().encode(model.timeline)
+        let decoded = try JSONDecoder().decode(TimelineState.self, from: data)
+        XCTAssertEqual(decoded, model.timeline)
+        XCTAssertEqual(decoded.transitions[clipA.id]?.kind, .slideLeft)
+    }
+
+    // MARK: - S9: モザイク適用区間の編集 API
+
+    /// 合成時刻で追加した区間が素材アンカーで保存され、undo/redo に載ること。
+    func test_addMosaicApplyRange_storesSourceAnchorsAndIsUndoable() throws {
+        let (model, clipA, clipB) = makeTwoClipModel()
+
+        // 合成 [3, 5) は clipA の [3,4) と clipB の [0,1) に分解される。
+        model.addMosaicApplyRange(fromCompositionTime: 3, to: 5)
+
+        XCTAssertEqual(model.timeline.applyRanges.count, 2)
+        let forA = try XCTUnwrap(model.timeline.applyRanges.first { $0.sourceID == clipA.sourceID })
+        XCTAssertEqual(forA.sourceStart, 3, accuracy: 1e-9)
+        XCTAssertEqual(forA.sourceEnd, 4, accuracy: 1e-9)
+        let forB = try XCTUnwrap(model.timeline.applyRanges.first { $0.sourceID == clipB.sourceID })
+        XCTAssertEqual(forB.sourceStart, 0, accuracy: 1e-9)
+        XCTAssertEqual(forB.sourceEnd, 1, accuracy: 1e-9)
+        XCTAssertTrue(model.timeline.validate())
+        XCTAssertEqual(model.videoDuration, 10.0, accuracy: 1e-9, "区間追加が合成尺を変えてはいけない")
+
+        model.undo()
+        XCTAssertTrue(model.timeline.applyRanges.isEmpty)
+        model.redo()
+        XCTAssertEqual(model.timeline.applyRanges.count, 2)
+    }
+
+    /// 端ドラッグの確定（区間置き換え）と削除。
+    func test_setAndRemoveMosaicApplyRange() throws {
+        let (model, clipA, _) = makeTwoClipModel()
+        model.addMosaicApplyRange(fromCompositionTime: 1, to: 3)
+        let id = try XCTUnwrap(model.timeline.applyRanges.first).id
+
+        model.setMosaicApplyRange(id: id, clipID: clipA.id,
+                                  interval: CompositionInterval(start: 1.5, end: 2.0))
+        XCTAssertEqual(model.timeline.applyRanges.count, 1)
+        XCTAssertEqual(model.timeline.applyRanges[0].sourceID, clipA.sourceID)
+        XCTAssertEqual(model.timeline.applyRanges[0].sourceStart, 1.5, accuracy: 1e-9)
+        XCTAssertEqual(model.timeline.applyRanges[0].sourceEnd, 2.0, accuracy: 1e-9)
+
+        let newID = model.timeline.applyRanges[0].id
+        model.removeMosaicApplyRange(id: newID)
+        XCTAssertTrue(model.timeline.applyRanges.isEmpty)
+        model.undo()
+        XCTAssertEqual(model.timeline.applyRanges.count, 1)
+    }
+
+    /// 区間編集の後でも composition と mapping の世代が揃うこと
+    /// （揃わないと `exportVideo` が「更新が完了していません」で止まる）。
+    func test_applyRangeEdit_keepsCompositionGenerationAligned() async throws {
+        let url = try await makeTestVideo(seconds: 1.0)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let model = makeModel()
+        model.load(videoURL: url)
+        try await waitUntilLoaded(model)
+
+        model.addMosaicApplyRange(fromCompositionTime: 0.1, to: 0.5)
+        await model.awaitPendingTimelineRebuild()
+
+        XCTAssertEqual(model.timeline.applyRanges.count, 1)
+        XCTAssertEqual(model.compositionGeneration, model.timelineGeneration,
+                       "適用区間の編集後に composition と mapping の世代が揃わない")
+    }
+
+    // MARK: - S9: UI が使う補助 API
+
+    /// `sourceDuration(forClipID:)` が素材の実尺を返し、トリムのクランプ根拠と一致すること。
+    func test_sourceDuration_matchesAssetDuration() async throws {
+        let url = try await makeTestVideo(seconds: 1.0)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let model = makeModel()
+        model.load(videoURL: url)
+        try await waitUntilLoaded(model)
+        let clipID = try XCTUnwrap(model.clips.first).id
+
+        let duration = try XCTUnwrap(model.sourceDuration(forClipID: clipID))
+        XCTAssertEqual(duration, 1.0, accuracy: 0.1)
+        XCTAssertNotNil(model.sourceURL(forSourceID: model.currentSourceID))
+        XCTAssertNil(model.sourceDuration(forClipID: UUID()), "不在クリップは nil")
+        XCTAssertNil(model.sourceURL(forSourceID: UUID()))
+    }
+
+    // MARK: - S9 レビュー: 分割対象の明示（トランジション重なり内）
+
+    /// `splitClip(id:)` はトランジションの重なり区間でも**選択したクリップ**を割ること。
+    /// 帰属規則（重なり内は incoming 側）に任せる `splitAtCurrentPosition` は別のクリップを割る。
+    func test_splitClip_splitsSelectedClipInsideTransitionOverlap() {
+        let (model, clipA, clipB) = makeTwoClipModel()   // A 4s + B 6s
+        model.setTransition(afterClipID: clipA.id, kind: .crossfade, duration: 2.0)
+        XCTAssertEqual(model.videoDuration, 8.0, accuracy: 1e-9)
+        // 重なりは表示時刻 [2, 4)。3.0 は重なりの中。
+        XCTAssertNotNil(model.mapping.overlap(at: 3.0))
+        model.playbackPosition = 3.0 / model.videoDuration
+
+        XCTAssertTrue(model.timeline.canSplit(clipID: clipA.id, atDisplayTime: 3.0))
+        model.splitClip(id: clipA.id)
+
+        XCTAssertEqual(model.clips.filter { $0.sourceID == clipA.sourceID }.count, 2,
+                       "選択したクリップが割れていない")
+        XCTAssertEqual(model.clips.filter { $0.sourceID == clipB.sourceID }.count, 1,
+                       "選択していないクリップが割れた")
+        XCTAssertTrue(model.timeline.validate())
+    }
+
+    // MARK: - S9 レビュー: プレビューのデコード資源占有（M-B3）
+
+    /// `beginPreviewDecode` / `endPreviewDecode` が対で動き、値が変わったときだけ
+    /// 通知すること（`@Published` にできない = 通知が多いと画面全体が再描画される）。
+    func test_previewDecodeBusy_pairsBeginAndEndAndNotifiesOnChangeOnly() {
+        let model = makeModel()
+        var events: [Bool] = []
+        model.onPreviewDecodeBusyChanged = { events.append($0) }
+
+        XCTAssertFalse(model.isPreviewDecodeBusy)
+        model.beginPreviewDecode()
+        XCTAssertTrue(model.isPreviewDecodeBusy)
+        model.beginPreviewDecode()          // 入れ子（rebuild の中の seek など）
+        model.endPreviewDecode()
+        XCTAssertTrue(model.isPreviewDecodeBusy, "入れ子の内側で busy が落ちている")
+        model.endPreviewDecode()
+        XCTAssertFalse(model.isPreviewDecodeBusy)
+        XCTAssertEqual(model.previewDecodeDepthForTesting, 0)
+        XCTAssertEqual(events, [true, false], "値が変わらない通知が飛んでいる")
+
+        // 余分な end で深さが負に沈まないこと（沈むと以降の begin が効かなくなる）。
+        model.endPreviewDecode()
+        XCTAssertEqual(model.previewDecodeDepthForTesting, 0)
+        model.beginPreviewDecode()
+        XCTAssertTrue(model.isPreviewDecodeBusy)
+        model.endPreviewDecode()
+        XCTAssertFalse(model.isPreviewDecodeBusy)
+    }
+
+    /// 実素材での編集（composition 差し替え + seek）とスクラブ用シークの後、
+    /// 占有の深さが 0 に戻ること（`defer` の対が崩れていないことの実測）。
+    func test_previewDecodeBusy_returnsToZeroAfterEditAndSeek() async throws {
+        let url = try await makeTestVideo(seconds: 1.0)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let model = makeModel()
+        model.load(videoURL: url)
+        try await waitUntilLoaded(model)
+        let clipID = try XCTUnwrap(model.clips.first).id
+
+        model.trimClip(id: clipID, sourceStart: 0, sourceEnd: 0.5)
+        await model.awaitPendingTimelineRebuild()
+        XCTAssertEqual(model.previewDecodeDepthForTesting, 0, "編集経路で立ち下げが漏れている")
+
+        model.seekToLatest(position: 0.3)
+        let deadline = Date().addingTimeInterval(5)
+        while model.isPreviewDecodeBusy, Date() < deadline {
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        XCTAssertEqual(model.previewDecodeDepthForTesting, 0, "シーク経路で立ち下げが漏れている")
+        XCTAssertFalse(model.isPreviewDecodeBusy)
+    }
+
+    /// 編集（composition 差し替え + zero-tolerance seek）の**最中**にサムネイル生成が
+    /// 抑止されること。`isPlaying` は false のままなので、旧ガードでは 1 つも覆えなかった経路。
+    func test_previewDecodeBusy_blocksThumbnailGenerationDuringEdit() async throws {
+        let url = try await makeTestVideo(seconds: 1.0)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let model = makeModel()
+        model.load(videoURL: url)
+        try await waitUntilLoaded(model)
+        let clipID = try XCTUnwrap(model.clips.first).id
+
+        let store = TimelineThumbnailStore()
+        // VideoTimelineView.bindPreviewBusy と同じ結線。
+        model.onPreviewDecodeBusyChanged = { busy in store.setPreviewBusy(busy) }
+        store.request(thumbnailJobs(sourceID: model.currentSourceID, url: url, count: 4))
+        try await waitUntilThumbnailsSettle(store)
+
+        model.trimClip(id: clipID, sourceStart: 0, sourceEnd: 0.5)
+        var observedBusy = false
+        var blockedWhileBusy = false
+        var playingWhileBusy = true
+        let deadline = Date().addingTimeInterval(5)
+        while Date() < deadline {
+            if model.isPreviewDecodeBusy {
+                observedBusy = true
+                blockedWhileBusy = store.isGenerationBlockedForTesting
+                playingWhileBusy = model.isPlaying
+                break
+            }
+            try await Task.sleep(nanoseconds: 1_000_000)
+        }
+        await model.awaitPendingTimelineRebuild()
+
+        XCTAssertTrue(observedBusy, "編集中にプレビューのデコード占有が立っていない")
+        XCTAssertFalse(playingWhileBusy, "isPlaying ガードでは覆えない経路であることの確認")
+        XCTAssertTrue(blockedWhileBusy, "編集中にサムネイル生成が抑止されていない")
+        XCTAssertFalse(model.isPreviewDecodeBusy, "編集後に占有が下がっていない")
+    }
+
+    // MARK: - S9 レビュー: サムネイル生成の不変条件（M-B1 / M-B2 / M-B3）
+
+    private func thumbnailJobs(sourceID: UUID, url: URL,
+                               count: Int = 6) -> [TimelineThumbnailStore.Request] {
+        (0..<count).map {
+            TimelineThumbnailStore.Request(sourceID: sourceID, url: url,
+                                           sourceTime: Double($0) * 0.25)
+        }
+    }
+
+    private func waitUntilThumbnailsSettle(_ store: TimelineThumbnailStore,
+                                           timeout: TimeInterval = 30) async throws {
+        let deadline = Date().addingTimeInterval(timeout)
+        while store.isGeneratingForTesting || store.pendingCountForTesting > 0 {
+            if Date() > deadline {
+                XCTFail("サムネイル生成が \(timeout)s 以内に落ち着かない")
+                return
+            }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        // 最後の finish（MainActor へ戻る後始末）が走り切るのを待つ。
+        try await Task.sleep(nanoseconds: 100_000_000)
+    }
+
+    /// **生成器が 2 個同時に走らないこと。**
+    ///
+    /// 旧実装は `setPlaying(true)` が `activeBatch = nil` していたため、
+    /// 「再生 → 即一時停止」の連打で生成器が 1 個ずつ増えた（デコード中のバッチは
+    /// キャンセルされても完走するため、その窓の間だけ並走する）。
+    func test_thumbnailStore_neverRunsTwoGeneratorsConcurrently() async throws {
+        let urlA = try await makeTestVideo(seconds: 2.0)
+        let urlB = try await makeTestVideo(seconds: 2.0)
+        defer {
+            try? FileManager.default.removeItem(at: urlA)
+            try? FileManager.default.removeItem(at: urlB)
+        }
+        timelineThumbnailConcurrencyProbe.reset()
+        let store = TimelineThumbnailStore()
+        // 別素材のジョブも積む（1 バッチは同一素材ぶんだけ取るので B は保留に残り、
+        // 打ち切り直後の pump が「別 url の新バッチ」を起こせる状態を作る）。
+        store.request(thumbnailJobs(sourceID: UUID(), url: urlA, count: 12))
+        store.request(thumbnailJobs(sourceID: UUID(), url: urlB, count: 12))
+        // 「再生 → 即一時停止」をデコード進行中に何度も割り込ませる
+        // （旧実装はこの窓のたびに生成器が 1 個増えた）。
+        for _ in 0..<40 {
+            try await Task.sleep(nanoseconds: 1_000_000)
+            store.setPlaying(true)
+            store.setPlaying(false)
+        }
+        try await waitUntilThumbnailsSettle(store)
+
+        XCTAssertEqual(timelineThumbnailConcurrencyProbe.overlapCount, 0,
+                       "サムネイル生成器が並走した（HW デコーダの取り合い）")
+        XCTAssertLessThanOrEqual(timelineThumbnailConcurrencyProbe.maximumConcurrent, 1)
+    }
+
+    /// **破棄した素材の結果を捨てること**（世代トークン）。
+    ///
+    /// 旧実装は `reset()` が `activeBatch = nil` していたため、直後の新素材バッチが
+    /// 走り、その後届いた旧バッチの `finish` が旧 url のジョブを保留へ戻して
+    /// 「捨てた動画のデコードし直し」を起こし、描画に使えないキャッシュが残った。
+    func test_thumbnailStore_resetDiscardsPreviousGenerationResults() async throws {
+        let oldURL = try await makeTestVideo(seconds: 2.0)
+        let newURL = try await makeTestVideo(seconds: 2.0)
+        defer {
+            try? FileManager.default.removeItem(at: oldURL)
+            try? FileManager.default.removeItem(at: newURL)
+        }
+        let store = TimelineThumbnailStore()
+        let oldSource = UUID()
+        let newSource = UUID()
+        store.request(thumbnailJobs(sourceID: oldSource, url: oldURL))
+        try await Task.sleep(nanoseconds: 50_000_000)   // 旧バッチがデコード中
+
+        let generationBefore = store.generationForTesting
+        store.reset()
+        XCTAssertEqual(store.generationForTesting, generationBefore + 1)
+        store.request(thumbnailJobs(sourceID: newSource, url: newURL))
+        try await waitUntilThumbnailsSettle(store)
+
+        XCTAssertFalse(store.images.isEmpty, "新素材のサムネイルが生成されていない")
+        XCTAssertTrue(store.images.keys.allSatisfy { $0.sourceID == newSource },
+                      "破棄した素材のサムネイルがキャッシュに残っている")
+        XCTAssertNil(store.image(sourceID: oldSource, sourceTime: 0))
+    }
+
+    /// **プレビューがデコード資源を握っている間・スクラブ中は生成しないこと**、
+    /// かつその間の要求が捨てられずに後で取り直せること。
+    func test_thumbnailStore_holdsGenerationWhilePreviewBusyOrScrubbing() async throws {
+        let url = try await makeTestVideo(seconds: 2.0)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let store = TimelineThumbnailStore()
+        let source = UUID()
+
+        store.setPreviewBusy(true)
+        store.request(thumbnailJobs(sourceID: source, url: url))
+        try await Task.sleep(nanoseconds: 150_000_000)
+        XCTAssertTrue(store.images.isEmpty, "プレビューのデコード中に生成が始まった")
+        XCTAssertFalse(store.isGeneratingForTesting)
+        XCTAssertGreaterThan(store.pendingCountForTesting, 0, "要求が捨てられている")
+
+        store.setPreviewBusy(false)
+        try await waitUntilThumbnailsSettle(store)
+        XCTAssertFalse(store.images.isEmpty, "抑止解除後に生成が再開しない")
+
+        // スクラブは別フラグ（seek ごとに busy が立ち下がっても止め続ける）。
+        store.setScrubbing(true)
+        XCTAssertTrue(store.isGenerationBlockedForTesting)
+        store.setPreviewBusy(true)
+        store.setPreviewBusy(false)
+        XCTAssertTrue(store.isGenerationBlockedForTesting,
+                      "スクラブ中に seek の立ち下がりで生成が再開している")
+        store.setScrubbing(false)
+        XCTAssertFalse(store.isGenerationBlockedForTesting)
+
+        // 画面離脱・バックグラウンドでも止まる。
+        store.setSuspended(true)
+        XCTAssertTrue(store.isGenerationBlockedForTesting)
+        store.setSuspended(false)
+        XCTAssertFalse(store.isGenerationBlockedForTesting)
+    }
+
+    /// 同一キーフレームへ解決される要求はデコードを 1 回で済ませ、
+    /// **実コマの時刻**でキャッシュされること（要求時刻キーだと同じコマが何枚も積まれる）。
+    ///
+    /// 別名（要求バケット → 実コマバケット）が張られるので、要求した全枠は描画できる。
+    func test_thumbnailStore_deduplicatesRequestsResolvingToSameKeyframe() async throws {
+        let url = try await makeTestVideo(seconds: 4.0)
+        defer { try? FileManager.default.removeItem(at: url) }
+        timelineThumbnailConcurrencyProbe.reset()
+        let store = TimelineThumbnailStore()
+        let source = UUID()
+        let times = (0..<8).map { Double($0) * 0.5 }   // 8 バケット（0〜3.5 秒）
+        store.request(times.map {
+            TimelineThumbnailStore.Request(sourceID: source, url: url, sourceTime: $0)
+        })
+        try await waitUntilThumbnailsSettle(store)
+
+        for time in times {
+            XCTAssertNotNil(store.image(sourceID: source, sourceTime: time),
+                            "要求した枠が描画できない（t=\(time)）")
+        }
+        let decodes = timelineThumbnailConcurrencyProbe.decodeCount
+        print("[MMTHUMB] requested=8 decodes=\(decodes) cacheEntries=\(store.images.count)")
+        XCTAssertLessThanOrEqual(decodes, 8)
+        XCTAssertEqual(store.images.count, decodes,
+                       "デコード回数とキャッシュ枚数が一致しない（同じコマが重複して積まれている）")
     }
 }
 
@@ -1439,4 +1854,5 @@ final class TransitionOverlapModelTests: XCTestCase {
         XCTAssertEqual(inBar.count, 1, "対応領域の無いクリップが走査対象に残っている")
         XCTAssertEqual(inBar[0].sourceID, sourceA)
     }
+
 }

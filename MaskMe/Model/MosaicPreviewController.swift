@@ -128,6 +128,11 @@ final class MosaicPreviewController {
     func replaceAsset(_ asset: AVAsset,
                       videoComposition: AVVideoComposition? = nil,
                       audioMix: AVAudioMix? = nil) async {
+        // item 差し替えは新しい composition のデコードを開始させる。サムネイル生成と
+        // 重ねないよう占有を宣言する（`MosaicEditorModel.isPreviewDecodeBusy`）。
+        // 早期 return でも必ず下がるよう defer で対にする。
+        model?.beginPreviewDecode()
+        defer { model?.endPreviewDecode() }
         guard let player else { return }
         if let oldItem = player.currentItem {
             NotificationCenter.default.removeObserver(
@@ -165,6 +170,10 @@ final class MosaicPreviewController {
     }
 
     func seek(to position: Double) async {
+        // zero-tolerance seek は直近キーフレームからのデコードを強制する。
+        // サムネイル生成と重ねないよう占有を宣言する（早期 return でも defer で下がる）。
+        model?.beginPreviewDecode()
+        defer { model?.endPreviewDecode() }
         guard let player, duration > 0 else { return }
         let sec = position * duration
         let time = CMTime(seconds: sec, preferredTimescale: 600)
@@ -233,6 +242,11 @@ final class MosaicPreviewController {
               let videoOutput,
               let model,
               let cache = textureCache else { return }
+        // フレーム取り出し + Metal 描画の間は GPU / デコーダを占有する。
+        // 再生中は 30fps で立ち上げ下げを繰り返すため、通知は @Published ではなく
+        // コールバック 1 本（`MosaicEditorModel.onPreviewDecodeBusyChanged`）で受ける。
+        model.beginPreviewDecode()
+        defer { model.endPreviewDecode() }
 
         let currentTime = player.currentTime()
         // `copyPixelBuffer(forItemTime:)` は要求時刻に最も近いフレームを返すだけで、

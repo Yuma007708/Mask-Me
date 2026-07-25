@@ -10,16 +10,14 @@ public struct TimelineState: Codable, Equatable, Sendable {
     public var clips: [TimelineClip]
     /// クリップ境界のトランジション。キーは**先行（outgoing）クリップの id**。
     ///
-    /// **書き込み経路（S8 時点）**: 下書き v2 のデコードと、この `var` への直接代入
-    /// （テスト・`MosaicEditorModel.setTimelineForTesting`）だけ。**トランジションを
-    /// 設定する公開 API はまだ無い**（`normalizingTransitions` は private の整合処理で、
-    /// 値を新規に入れる手段ではない）。したがって S8 の実装は完成しているが、
-    /// 通常のユーザー操作からは到達できない。編集 API（付与・種類変更・duration 変更・
-    /// 削除）と UI は **S9 で足す**。
+    /// **書き込み経路（S9 時点）**: 編集 API（`settingTransition(afterClipID:kind:duration:)` /
+    /// `removingTransition(afterClipID:)`）、下書き v2 のデコード、この `var` への直接代入
+    /// （テスト・`MosaicEditorModel.setTimelineForTesting`）。
     ///
     /// クリップ列を変える編集（split / delete / move / trim）を通したときの
-    /// 付け替え・破棄・duration クランプは、既に `normalizingTransitions` が
-    /// 面倒を見ている（S9 の編集 API はそこへ乗るだけで済む）。
+    /// 付け替え・破棄・duration クランプは `normalizingTransitions` が面倒を見ている。
+    /// 編集 API 側は `maximumTransitionDuration(afterClipID:)` で同じ制約へクランプする
+    /// （UI のスライダー上限もこれを使う）。
     public var transitions: [UUID: TransitionSpec]
     /// モザイク適用範囲（素材時刻アンカー）。空なら全区間適用。
     public var applyRanges: [MosaicApplyRange]
@@ -81,14 +79,60 @@ public struct TimelineState: Codable, Equatable, Sendable {
     // MARK: - 編集操作
 
     /// 表示タイムライン（トランジションの重なり込み = `mapping` の合成時刻）の時刻で
-    /// クリップを 2 分割する。UI が再生位置などの表示時刻から分割するときはこちらを使う。
+    /// クリップを 2 分割する。**分割対象は帰属規則（重なり内は incoming 側）が決める。**
     ///
     /// 内部で `TimelineMapping.editTime(forDisplayTime:)` により編集タイムラインの時刻へ
-    /// 変換してから `splitting(at:)` を呼ぶ（重なり内の帰属は incoming 側）。
-    /// 範囲外の時刻では self をそのまま返す。
+    /// 変換してから `splitting(at:)` を呼ぶ。範囲外の時刻では self をそのまま返す。
+    ///
+    /// **UI からはこれを使わないこと。** トランジションの重なり区間では「選択中クリップ」と
+    /// 「帰属規則が選ぶクリップ」が食い違い、選択と別のクリップが割れる（実測: 6s+6s /
+    /// crossfade 2.0s の重なり [4,6) で clipA を選び 5.0 秒で分割すると clipB が割れた）。
+    /// UI は対象を明示する `splitting(clipID:atDisplayTime:)` と、その活性判定
+    /// `canSplit(clipID:atDisplayTime:)` を使う。
     public func splitting(atDisplayTime displayTime: Double) -> TimelineState {
         guard let editTime = mapping.editTime(forDisplayTime: displayTime) else { return self }
         return splitting(at: editTime)
+    }
+
+    /// 指定したクリップを、表示タイムラインの時刻で 2 分割する。
+    ///
+    /// 帰属規則に頼らず `clipID` のクリップを割るため、トランジションの重なり区間でも
+    /// 「選択したクリップが割れる」ことが保証される。分割できない場合は self を返す。
+    public func splitting(clipID: UUID, atDisplayTime displayTime: Double) -> TimelineState {
+        guard let editTime = splitEditTime(clipID: clipID, displayTime: displayTime) else { return self }
+        return splitting(at: editTime)
+    }
+
+    /// `splitting(clipID:atDisplayTime:)` が実際に分割するかどうか。
+    ///
+    /// **ボタンの活性判定はこれを使うこと**（判定と対象が別の規則で決まると、
+    /// 押せるのに何も起きない・選択と別のクリップが割れるといった食い違いになる）。
+    public func canSplit(clipID: UUID, atDisplayTime displayTime: Double) -> Bool {
+        splitEditTime(clipID: clipID, displayTime: displayTime) != nil
+    }
+
+    /// 分割に使う**編集タイムライン**の時刻（分割できない場合は nil）。
+    /// 判定（`canSplit`）と実行（`splitting`）の唯一の情報源。
+    ///
+    /// クリップ開始時刻は `TimelineEditOperations.split` が内部で使う
+    /// `TimelineMapping.clipStartTime`（先頭からの `duration` 累算）と**同じ順序で
+    /// 累算する**こと。別の式で作ると 1 ulp のずれで最小尺の境界ちょうどで
+    /// 判定と実行が食い違う（押せるのに割れない、が復活する）。
+    private func splitEditTime(clipID: UUID, displayTime: Double) -> Double? {
+        guard displayTime.isFinite,
+              let span = mapping.clipSpans.first(where: { $0.clip.id == clipID }) else { return nil }
+        var editStart = 0.0
+        for clip in clips {
+            if clip.id == clipID { break }
+            editStart += clip.duration
+        }
+        let editTime = editStart + (displayTime - span.start)
+        let minimum = TimelineEditOperations.minimumClipDuration
+        // split 側と同じ引き算で前半尺を出す（`editTime - editStart` が `displayTime -
+        // span.start` と bit 一致するとは限らないため、こちらの値で判定する）。
+        let front = editTime - editStart
+        guard front >= minimum, span.clip.duration - front >= minimum else { return nil }
+        return editTime
     }
 
     /// **編集タイムライン**（重なりを含まない = `TimelineMapping(clips:)` の写像）の
@@ -176,6 +220,92 @@ public struct TimelineState: Codable, Equatable, Sendable {
         var result = self
         result.clips.append(clip)
         if let source { result.sources[source.id] = source }
+        return result
+    }
+
+    // MARK: - トランジションの編集（S9）
+
+    /// クリップ境界に設定できるトランジションの最大 duration（秒）。
+    ///
+    /// `= min(両クリップ合成尺)/2`。設定できない境界（`clipID` が不在・末尾クリップ・
+    /// 上限が `TransitionSpec.minimumDuration` 未満）では nil を返す。
+    /// UI はこれをスライダーの上限に使い、「設定したのに黙って消える」状態を避ける。
+    public func maximumTransitionDuration(afterClipID clipID: UUID) -> Double? {
+        guard let index = clips.firstIndex(where: { $0.id == clipID }), index + 1 < clips.count else { return nil }
+        let cap = min(clips[index].duration, clips[index + 1].duration) / 2
+        guard cap.isFinite, cap >= TransitionSpec.minimumDuration else { return nil }
+        return cap
+    }
+
+    /// 指定した先行クリップの直後の境界にトランジションを設定する（種類・長さの変更も同じ入口）。
+    ///
+    /// duration は `maximumTransitionDuration(afterClipID:)` へクランプする。
+    /// クランプ後に `TransitionSpec.minimumDuration` を下回る境界では設定せず self を返す
+    /// （他の編集操作と同じ「失敗時は self」契約）。
+    public func settingTransition(afterClipID clipID: UUID,
+                                  kind: TransitionKind,
+                                  duration: Double) -> TimelineState {
+        guard let cap = maximumTransitionDuration(afterClipID: clipID), duration.isFinite else { return self }
+        let clamped = min(max(duration, TransitionSpec.minimumDuration), cap)
+        var result = self
+        result.transitions[clipID] = TransitionSpec(kind: kind, duration: clamped)
+        return result
+    }
+
+    /// 指定した先行クリップの直後の境界からトランジションを取り除く。
+    /// 設定が無ければ self を返す。
+    public func removingTransition(afterClipID clipID: UUID) -> TimelineState {
+        guard transitions[clipID] != nil else { return self }
+        var result = self
+        result.transitions.removeValue(forKey: clipID)
+        return result
+    }
+
+    // MARK: - モザイク適用区間の編集（S9）
+
+    /// 合成時刻の区間 [from, to) をモザイク適用区間として追加する。
+    ///
+    /// 素材時刻アンカーへの分解・重複マージは `MosaicApplyGate` が行う
+    /// （合成時刻のまま保存する誤実装を UI 側で書けないようにするための唯一の入口）。
+    public func addingApplyRange(fromCompositionTime from: Double, to: Double) -> TimelineState {
+        guard from.isFinite, to.isFinite, from < to else { return self }
+        var result = self
+        result.applyRanges = MosaicApplyGate.ranges(addingCompositionInterval: from, to: to,
+                                                    mapping: mapping, existing: applyRanges,
+                                                    photoSourceIDs: photoSourceIDs)
+        return result
+    }
+
+    /// 指定した適用区間を取り除く。
+    public func removingApplyRange(id: UUID) -> TimelineState {
+        let newRanges = MosaicApplyGate.removingRange(id: id, from: applyRanges)
+        guard newRanges.count != applyRanges.count else { return self }
+        var result = self
+        result.applyRanges = newRanges
+        return result
+    }
+
+    /// 掴んだセグメント（`id` の適用区間 × `clipID` のクリップ）を、新しい合成区間で
+    /// 置き換える（端ドラッグの確定）。
+    ///
+    /// **差し替えは素材時刻で行う**（`MosaicApplyGate.ranges(replacingRangeID:...)`）。
+    /// 当該クリップが使っている素材区間だけが置き換わり、クリップ使用範囲外の素材区間は
+    /// 温存されるため、UI は掴んだセグメントの情報だけを渡せばよい。
+    /// 「合成時刻の区間列から作り直す」旧実装が構造的に落としていた区間の詳細は
+    /// `MosaicApplyRange` 型の doc を参照。
+    ///
+    /// 縮める操作も表現できる。差し替え結果が現状と同じ（ドラッグ量 0）なら self を返す。
+    /// マージで id が変わり得るので、UI は id を保持し続けず編集後に引き直すこと。
+    public func replacingApplyRange(id: UUID,
+                                    clipID: UUID,
+                                    compositionInterval interval: CompositionInterval) -> TimelineState {
+        let newRanges = MosaicApplyGate.ranges(replacingRangeID: id, clipID: clipID,
+                                               compositionInterval: interval,
+                                               mapping: mapping, existing: applyRanges,
+                                               photoSourceIDs: photoSourceIDs)
+        guard newRanges != applyRanges else { return self }
+        var result = self
+        result.applyRanges = newRanges
         return result
     }
 

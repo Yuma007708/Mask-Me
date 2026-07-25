@@ -40,6 +40,8 @@ public final class MosaicEditorModel: ObservableObject {
         var backgroundBlockSize: Float
         var selectedFaceIDs: Set<UUID>
         var manualRects: [CGRect]
+        /// 書き出し範囲。S9 以降ユーザー操作からの書き込み経路は無い
+        /// （`MosaicEditorModel.trimRange` の doc 参照）。常に `0...1`。
         var trimRange: ClosedRange<Double>
         var timeline: TimelineState
     }
@@ -62,9 +64,20 @@ public final class MosaicEditorModel: ObservableObject {
     @Published public var playbackPosition: Double = 0
     @Published public private(set) var videoDuration: Double = 0
     @Published public var isPlaying = false
-    /// 動画の書き出し対象範囲（0...1 正規化）。タイムラインの左右ハンドルで調整。
+    /// 動画の書き出し対象範囲（0...1 正規化）。
     /// エクスポート時は `AVAssetReaderTrackOutput` からのフレームのうち、
     /// この範囲外の `presentationTime` をスキップして出力尺を短縮する。
+    ///
+    /// **S9 現在、ユーザー操作からの書き込み経路は存在しない**（意図的に残している）。
+    /// 全体 In/Out トリムの UI はクリップ単位のトリム（`TimelineClip.sourceStart/End`）へ
+    /// 置き換わり、下書きにも保存されない（`DraftStore` にフィールドが無く、復元時は
+    /// 常に `0...1` が代入される）。値は常に `0...1` なので `VideoMosaicExporter` の
+    /// PTS シフト経路（`trimRange` 引数）も恒等で通る。
+    ///
+    /// 削除せず残す理由: 書き出し範囲の指定は将来の再導入候補であり、
+    /// エクスポータ側の PTS シフトと写像の二重適用回避は
+    /// `MultiClipExportTests` が固定している資産（消すとテストごと失われる）。
+    /// **新しい UI をここへ繋ぐまでは到達不能コードであることを前提に読むこと。**
     @Published public var trimRange: ClosedRange<Double> = 0...1
 
     // コントロール（効果ごと）
@@ -217,6 +230,50 @@ public final class MosaicEditorModel: ObservableObject {
     var renderLayout: TimelineRenderLayout = .identity
     private(set) var previewController: MosaicPreviewController?
     private var cancellables: Set<AnyCancellable> = []
+
+    // MARK: - プレビューのデコード資源占有
+
+    /// **プレビュー側が HW デコーダを握っているか。**
+    ///
+    /// サムネイル生成（`TimelineThumbnailStore`）の抑止条件は `isPlaying` では足りない。
+    /// 分割・トリム・削除・並べ替え・速度・トランジション・適用区間の**すべての編集**が
+    /// `replaceCurrentItem` + `toleranceBefore/After: .zero` の seek + `renderCurrentFrame`
+    /// を起こし、スクラブも `onChanged` ごとに zero-tolerance seek を撃つ。どちらも
+    /// `isPlaying == false` なので、`isPlaying` ガードは実際の競合を 1 つも覆っていない
+    /// （実測: `copyCGImage` の平均コストは idle 6.57ms → 再生中 10.41ms（+58%）→
+    /// スクラブ中 10.16ms（+55%）。事故の機序はデコーダの取り合いであって再生ではない）。
+    ///
+    /// **`@Published` にしないこと。** `renderCurrentFrame` は再生中 30fps で
+    /// 立ち下げ・立ち上げを繰り返すため、`@Published` にするとエディタ画面全体が
+    /// 毎フレーム再描画される。購読は `onPreviewDecodeBusyChanged` の 1 本だけ。
+    private(set) var isPreviewDecodeBusy = false
+    /// `beginPreviewDecode` / `endPreviewDecode` の入れ子深さ。
+    /// **必ず対で呼ぶこと**（早期 return・throw でも下がるよう `defer` で下げる）。
+    private var previewDecodeDepth = 0
+    /// busy の立ち上がり・立ち下がりの通知（値が変わったときだけ呼ばれる）。
+    var onPreviewDecodeBusyChanged: ((Bool) -> Void)?
+
+    /// デコード資源の占有を宣言する（`defer { endPreviewDecode() }` と対で使う）。
+    func beginPreviewDecode() {
+        previewDecodeDepth += 1
+        setPreviewDecodeBusy(true)
+    }
+
+    /// デコード資源の占有を解除する。深さが 0 に戻ったときだけ busy が下がる。
+    func endPreviewDecode() {
+        previewDecodeDepth = max(0, previewDecodeDepth - 1)
+        guard previewDecodeDepth == 0 else { return }
+        setPreviewDecodeBusy(false)
+    }
+
+    /// テスト用: 立ち下げ漏れ（`begin` と `end` の非対称）を検出するための深さ。
+    var previewDecodeDepthForTesting: Int { previewDecodeDepth }
+
+    private func setPreviewDecodeBusy(_ busy: Bool) {
+        guard isPreviewDecodeBusy != busy else { return }
+        isPreviewDecodeBusy = busy
+        onPreviewDecodeBusyChanged?(busy)
+    }
 
     private let edgeSoftness: Float = 0.35
 
