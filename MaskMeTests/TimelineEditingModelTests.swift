@@ -2017,6 +2017,174 @@ final class TimelineEditingModelTests: XCTestCase {
         XCTAssertEqual(bFaces.count, 1, "再検出していない素材の顔が消えている")
         XCTAssertTrue(bFaces.allSatisfy(\.isSelected), "他素材の選択が巻き込まれている")
     }
+
+    // MARK: - S11: 編集 → Undo/Redo → 下書き保存 → 復元の全結合ラウンドトリップ
+
+    /// **A（モデル側）: 全機能を積み上げた状態が Undo/Redo で完全に往復し、
+    /// 下書き保存 → 復元で余さず戻ること。**
+    ///
+    /// 動画 2 本 + 写真 1 枚に対して 分割・並べ替え・速度変更（0.5x/2x）・
+    /// トランジション 2 種・モザイク適用区間 を順に適用し、
+    /// 1. すべて undo すると初期状態（1 クリップ）まで戻る
+    /// 2. すべて redo すると**完全に同じ TimelineState**（クリップ ID・順序・rate・
+    ///    トランジション・適用区間）へ戻る
+    /// 3. その状態 + 顔選択 + 粗さを下書きに保存し、再開すると全部復元される
+    /// を実測で固定する。
+    func test_S11_e2e_fullEditStack_undoRedoAndDraftRoundTrip() async throws {
+        let draftsDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("S11E2EDraft-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: draftsDir) }
+        let store = DraftStore(directory: draftsDir)
+        let urlA = try await makeTestVideo(seconds: 4.0)
+        let urlB = try await makeTestVideo(seconds: 4.0)
+        defer {
+            try? FileManager.default.removeItem(at: urlA)
+            try? FileManager.default.removeItem(at: urlB)
+        }
+
+        let model = makeModel()
+        model.load(videoURL: urlA)
+        try await waitUntilLoaded(model)
+        let sourceA = model.currentSourceID
+        let initialTimeline = model.timeline
+        XCTAssertEqual(model.clips.count, 1, "読み込み直後は 1 クリップのはず")
+        XCTAssertFalse(model.canUndo, "読み込み直後が履歴基準になっていない")
+
+        // 1) 動画をもう 1 本追加
+        await model.appendVideoClip(url: urlB)
+        await model.awaitPendingTimelineRebuild()
+        XCTAssertEqual(model.clips.count, 2, "動画素材の追加でクリップが増えていない")
+
+        // 2) 写真クリップを追加（既定 3s）
+        let format = UIGraphicsImageRendererFormat.default()
+        format.scale = 1
+        let photoImage = UIGraphicsImageRenderer(size: CGSize(width: 320, height: 240),
+                                                 format: format).image { ctx in
+            UIColor.systemTeal.setFill()
+            ctx.fill(CGRect(x: 0, y: 0, width: 320, height: 240))
+        }
+        await model.appendPhotoClip(image: photoImage)
+        await model.awaitPendingTimelineRebuild()
+        XCTAssertEqual(model.clips.count, 3, "写真クリップが追加されていない")
+        XCTAssertEqual(model.timeline.photoSourceIDs.count, 1,
+                       "写真素材が photo として登録されていない")
+
+        // 3) 先頭クリップを分割（合成尺 4+4+3=11s の 0.2 = 2.2s → clip0 の内側）
+        model.playbackPosition = 0.2
+        XCTAssertEqual(model.compositionTime(forPosition: 0.2), 2.2, accuracy: 0.05,
+                       "正規化位置 → 合成時刻の換算が想定と違う")
+        model.splitAtCurrentPosition()
+        XCTAssertEqual(model.clips.count, 4, "分割でクリップが増えていない")
+
+        // 4) 並べ替え: 分割した 2 本目を末尾へ
+        let movedID = model.clips[1].id
+        model.moveClip(id: movedID, toIndex: 3)
+        XCTAssertEqual(model.clips.last?.id, movedID, "並べ替えが反映されていない")
+
+        // 5) 速度変更 0.5x / 2x
+        model.setClipRate(id: model.clips[0].id, rate: 0.5)
+        model.setClipRate(id: model.clips[1].id, rate: 2.0)
+        XCTAssertEqual(model.clips[0].rate, 0.5, accuracy: 1e-9)
+        XCTAssertEqual(model.clips[1].rate, 2.0, accuracy: 1e-9)
+
+        // 6) トランジション 2 種
+        model.setTransition(afterClipID: model.clips[0].id, kind: .crossfade, duration: 0.5)
+        model.setTransition(afterClipID: model.clips[1].id, kind: .wipeLeft, duration: 0.5)
+        XCTAssertEqual(model.timeline.transitions.count, 2, "トランジションが 2 本入っていない")
+
+        // 7) モザイク適用区間
+        model.addMosaicApplyRange(fromCompositionTime: 0.5, to: 2.0)
+        XCTAssertFalse(model.timeline.applyRanges.isEmpty, "適用区間が入っていない")
+        await model.awaitPendingTimelineRebuild()
+
+        let fullState = model.timeline
+        XCTAssertTrue(fullState.validate(), "積み上げた状態が validate を通らない")
+        let fullDuration = model.videoDuration
+        print("[S11-MODEL] clips=\(fullState.clips.count) "
+              + "transitions=\(fullState.transitions.count) "
+              + "applyRanges=\(fullState.applyRanges.count) "
+              + String(format: "尺=%.3f", fullDuration))
+
+        // --- Undo: 全部戻す ---
+        var undoSteps = 0
+        while model.canUndo {
+            model.undo()
+            undoSteps += 1
+            XCTAssertLessThan(undoSteps, 50, "undo が終わらない（履歴が循環している）")
+        }
+        print("[S11-MODEL] undo 段数=\(undoSteps) 戻り先クリップ数=\(model.clips.count)")
+        XCTAssertEqual(model.timeline, initialTimeline,
+                       "全 undo で読み込み直後の状態に戻っていない")
+
+        // --- Redo: 全部やり直す ---
+        var redoSteps = 0
+        while model.canRedo {
+            model.redo()
+            redoSteps += 1
+            XCTAssertLessThan(redoSteps, 50, "redo が終わらない")
+        }
+        XCTAssertEqual(redoSteps, undoSteps, "redo の段数が undo と一致しない")
+        XCTAssertEqual(model.timeline, fullState,
+                       "全 redo で編集後の状態が完全復元されない"
+                       + "（クリップID・順序・rate・トランジション・適用区間）")
+        await model.awaitPendingTimelineRebuild()
+        XCTAssertEqual(model.videoDuration, fullDuration, accuracy: 0.05,
+                       "redo 後の合成尺が編集直後と違う")
+
+        // --- 顔選択と粗さを設定して下書き保存 ---
+        model.faceBlockSize = 44
+        model.backgroundBlockSize = 36
+        model.detectedFaces = [
+            FaceTarget(id: UUID(), landmarks: fakeFace(cx: 0.25, cy: 0.4),
+                       thumbnail: UIImage(), isSelected: true, sourceID: sourceA),
+            FaceTarget(id: UUID(), landmarks: fakeFace(cx: 0.75, cy: 0.4),
+                       thumbnail: UIImage(), isSelected: false, sourceID: sourceA)
+        ]
+        let anchors = model.selectedFaceAnchors
+        XCTAssertEqual(anchors.count, 1, "選択中の顔だけがアンカーになっていない")
+
+        let draft = try XCTUnwrap(store.saveVideoDraft(
+            existing: nil,
+            sources: model.draftSources,
+            sessionSourceIDs: model.sessionReferencedSourceIDs,
+            timeline: model.timeline,
+            faceMosaicOn: true, backgroundMosaicOn: true,
+            faceBlockSize: 44, backgroundBlockSize: 36,
+            manualRects: [CGRect(x: 0.1, y: 0.1, width: 0.2, height: 0.2)],
+            faceSelections: anchors, thumbnail: nil))
+        XCTAssertEqual(draft.sources.count, 3, "3 素材ぶんが下書きに登録されていない")
+
+        // --- 復元 ---
+        let restored = try await restoreDraft(
+            draft, from: store, primarySourceID: sourceA,
+            scannedFaces: [fakeFace(cx: 0.25, cy: 0.4), fakeFace(cx: 0.75, cy: 0.4)])
+        await restored.awaitPendingTimelineRebuild()
+
+        XCTAssertEqual(restored.timeline, fullState,
+                       "下書き復元でタイムラインが完全一致しない")
+        XCTAssertEqual(restored.timeline.applyRanges.count, fullState.applyRanges.count,
+                       "適用区間が復元されていない")
+        XCTAssertEqual(restored.timeline.transitions, fullState.transitions,
+                       "トランジションが復元されていない")
+        XCTAssertEqual(restored.faceBlockSize, 44, accuracy: 1e-6, "顔の粗さが復元されていない")
+        XCTAssertEqual(restored.backgroundBlockSize, 36, accuracy: 1e-6,
+                       "背景の粗さが復元されていない")
+        XCTAssertTrue(restored.backgroundMosaicOn, "背景モザイクの ON/OFF が復元されていない")
+        XCTAssertEqual(restored.manualRects.count, 1, "手動矩形が復元されていない")
+        XCTAssertEqual(restored.videoDuration, fullDuration, accuracy: 0.1,
+                       "復元後の合成尺が保存時と違う")
+
+        let selected = restored.detectedFaces.filter(\.isSelected)
+        XCTAssertEqual(selected.count, 1,
+                       "顔選択が復元されていない（選択数=\(selected.count)）")
+        let centroid = restored.normalizedCentroid(of: try XCTUnwrap(selected.first).landmarks)
+        XCTAssertEqual(Double(centroid.x), 0.25, accuracy: 0.05,
+                       "復元された選択が別の顔に付いている")
+        print("[S11-MODEL] 復元 OK clips=\(restored.clips.count) "
+              + "applyRanges=\(restored.timeline.applyRanges.count) "
+              + "faceBlock=\(restored.faceBlockSize) 選択=\(selected.count)")
+    }
+
 }
 
 /// S5: `EditingDraft` v2（sources + timeline）と `DraftStore` の複数素材コピー/GC のテスト。

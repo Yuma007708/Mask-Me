@@ -49,7 +49,7 @@ open MaskMe.xcworkspace
 xcodebuild test \
   -workspace MaskMe.xcworkspace \
   -scheme MaskMe \
-  -destination 'platform=iOS Simulator,name=iPhone 16'
+  -destination 'platform=iOS Simulator,name=iPhone 17'
 ```
 
 - `MaskMeTests/Fixtures/` に実画像・動画・`face_landmarker.task` を配置（未配置は `XCTSkip`）。

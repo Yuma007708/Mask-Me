@@ -1,5 +1,6 @@
 import XCTest
 import AVFoundation
+import Accelerate
 import MosaicCore
 import UIKit
 @testable import MaskMe
@@ -2029,6 +2030,659 @@ final class MultiClipExportTests: XCTestCase {
         let duration = try await AVURLAsset(url: outURL).load(.duration)
         XCTAssertEqual(CMTimeGetSeconds(duration), 2.0, accuracy: 0.2,
                        "再利用した exporter の書き出しが完走していない")
+    }
+
+    // MARK: - S11: 全機能結合の E2E / 性能 / 音声ピッチ
+
+    /// 8px 市松 + 440Hz サイン波の動画。E2E で「画素（モザイクの有無）」と
+    /// 「音声（トラック存続・位置）」を同じ素材で同時に見るために使う。
+    private func makeCheckerboardVideoWithSine(seconds: Double) async throws -> URL {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(UUID().uuidString).mp4")
+        let writer = try AVAssetWriter(outputURL: url, fileType: .mp4)
+        let videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: [
+            AVVideoCodecKey: AVVideoCodecType.h264,
+            AVVideoWidthKey: width,
+            AVVideoHeightKey: height
+        ])
+        videoInput.expectsMediaDataInRealTime = false
+        let adaptor = AVAssetWriterInputPixelBufferAdaptor(
+            assetWriterInput: videoInput,
+            sourcePixelBufferAttributes: [
+                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+                kCVPixelBufferWidthKey as String: width,
+                kCVPixelBufferHeightKey as String: height
+            ])
+        writer.add(videoInput)
+        let audioInput = AVAssetWriterInput(mediaType: .audio, outputSettings: [
+            AVFormatIDKey: kAudioFormatMPEG4AAC,
+            AVSampleRateKey: 44100.0,
+            AVNumberOfChannelsKey: 1,
+            AVEncoderBitRateKey: 64000
+        ])
+        audioInput.expectsMediaDataInRealTime = false
+        writer.add(audioInput)
+
+        writer.startWriting()
+        writer.startSession(atSourceTime: .zero)
+        try appendSineAudio(to: audioInput, seconds: seconds)
+        audioInput.markAsFinished()
+
+        for i in 0..<Int(seconds * Double(fps)) {
+            while !videoInput.isReadyForMoreMediaData {
+                try await Task.sleep(nanoseconds: 1_000_000)
+            }
+            var pb: CVPixelBuffer?
+            CVPixelBufferCreate(kCFAllocatorDefault, width, height,
+                                kCVPixelFormatType_32BGRA, nil, &pb)
+            guard let buffer = pb else { continue }
+            CVPixelBufferLockBaseAddress(buffer, [])
+            if let base = CVPixelBufferGetBaseAddress(buffer)?.assumingMemoryBound(to: UInt8.self) {
+                let bytesPerRow = CVPixelBufferGetBytesPerRow(buffer)
+                for y in 0..<height {
+                    for x in 0..<width {
+                        let value: UInt8 = ((x / 8) + (y / 8)) % 2 == 0 ? 0 : 255
+                        let offset = y * bytesPerRow + x * 4
+                        base[offset] = value
+                        base[offset + 1] = value
+                        base[offset + 2] = value
+                        base[offset + 3] = 255
+                    }
+                }
+            }
+            CVPixelBufferUnlockBaseAddress(buffer, [])
+            adaptor.append(buffer, withPresentationTime:
+                            CMTime(value: CMTimeValue(i), timescale: CMTimeScale(fps)))
+        }
+        videoInput.markAsFinished()
+        await writer.finishWriting()
+        return url
+    }
+
+    /// 8px 市松の写真クリップ（単色だとモザイクの有無が画素に出ないため）。
+    private func makeCheckerboardPhotoClip(seconds: Double) async throws
+    -> PhotoClipEncoder.EncodedPhotoClip {
+        let format = UIGraphicsImageRendererFormat.default()
+        format.scale = 1
+        let image = UIGraphicsImageRenderer(size: CGSize(width: width, height: height),
+                                            format: format).image { ctx in
+            for y in 0..<(height / 8) {
+                for x in 0..<(width / 8) {
+                    let dark = (x + y) % 2 == 0
+                    (dark ? UIColor.black : UIColor.white).setFill()
+                    ctx.fill(CGRect(x: x * 8, y: y * 8, width: 8, height: 8))
+                }
+            }
+        }
+        return try await PhotoClipEncoder().encode(image: image, seconds: seconds)
+    }
+
+    /// **A. 全機能結合の E2E（S11 最終検証項目）**。
+    ///
+    /// 動画 2 本 + 写真 1 枚を、分割・並べ替え・速度変更（0.5x / 2x）・
+    /// トランジション 2 種（クロスフェード + ワイプ）・モザイク適用区間指定
+    /// の全部盛りで書き出し、次を実測で固定する:
+    ///
+    /// 1. 合成尺が「速度スケール後の各クリップ尺の総和 − トランジションの重なり」と一致
+    /// 2. 出力の pts 列が単調増加で、フレーム間隔に破綻（脱落・重複）が無い
+    /// 3. **モザイクが適用区間を指定したクリップにだけ乗る**（顔領域の輝度 std で判定）
+    /// 4. 音声トラックが 1 本残り、尺が映像と揃う
+    func test_S11_e2e_twoVideosPlusPhoto_reorderRateTransitionApplyRange() async throws {
+        guard MTLCreateSystemDefaultDevice() != nil else {
+            throw XCTSkip("Metal デバイスが無い環境ではスキップ")
+        }
+        let urlA = try await makeCheckerboardVideoWithSine(seconds: 4.0)
+        let urlB = try await makeCheckerboardVideoWithSine(seconds: 4.0)
+        let photo = try await makeCheckerboardPhotoClip(seconds: 3.0)
+        defer {
+            for url in [urlA, urlB, photo.url] { try? FileManager.default.removeItem(at: url) }
+        }
+
+        let sourceA = UUID(), sourceB = UUID(), sourcePhoto = UUID()
+        // 「A を [0,2)/[2,4) に分割して後半だけ残し、B と写真を後ろに並べた」状態。
+        // clip0: A[2,4) を 0.5x → 4.0s / clip1: B[0,4) を 2x → 2.0s / clip2: 写真 3.0s
+        let clip0 = TimelineClip(sourceID: sourceA, sourceStart: 2, sourceEnd: 4, rate: 0.5)
+        let clip1 = TimelineClip(sourceID: sourceB, sourceStart: 0, sourceEnd: 4, rate: 2.0)
+        let clip2 = TimelineClip(sourceID: sourcePhoto, sourceStart: 0, sourceEnd: photo.duration)
+        let clips = [clip0, clip1, clip2]
+        let transitions = [
+            clip0.id: TransitionSpec(kind: .crossfade, duration: 0.5),
+            clip1.id: TransitionSpec(kind: .wipeLeft, duration: 0.5)
+        ]
+        let sources: [UUID: AVAsset] = [
+            sourceA: AVURLAsset(url: urlA), sourceB: AVURLAsset(url: urlB),
+            sourcePhoto: AVURLAsset(url: photo.url)
+        ]
+        let built = try await TimelineCompositionBuilder()
+            .build(clips: clips, transitions: transitions, sources: sources)
+        let mapping = TimelineMapping(clips: clips, transitions: transitions)
+
+        // 1) 合成尺: 4.0 + 2.0 + 3.0 − 0.5 − 0.5 = 8.0s
+        XCTAssertEqual(clip0.duration, 4.0, accuracy: 1e-9)
+        XCTAssertEqual(clip1.duration, 2.0, accuracy: 1e-9)
+        XCTAssertEqual(mapping.totalDuration, 8.0, accuracy: 1e-6,
+                       "写像の合成尺が「速度スケール後の総和 − 重なり」になっていない")
+        let compositionDuration = CMTimeGetSeconds(try await built.composition.load(.duration))
+        XCTAssertEqual(compositionDuration, 8.0, accuracy: 0.1,
+                       "AVComposition の実尺が写像の合成尺と食い違っている")
+        XCTAssertEqual(mapping.overlaps.count, 2, "トランジション 2 本ぶんの重なりが作られていない")
+
+        // 適用区間: clip1（B・顔は画面右）と clip2（写真・顔は画面左）だけ ON。
+        // clip0（A・顔は画面左）は帯を一切置かない = OFF。
+        let applyRanges = [
+            MosaicApplyRange(clipID: clip1.id, sourceID: sourceB, sourceStart: 0, sourceEnd: 4),
+            MosaicApplyRange(clipID: clip2.id, sourceID: sourcePhoto,
+                             sourceStart: 0, sourceEnd: photo.duration)
+        ]
+        let caches = [
+            sourceA: denseCache(face: makeSyntheticFace(cx: 0.25, cy: 0.5, radius: 0.09),
+                                seconds: 4.0),
+            sourceB: denseCache(face: makeSyntheticFace(cx: 0.75, cy: 0.5, radius: 0.09),
+                                seconds: 4.0),
+            sourcePhoto: [0.0: [makeSyntheticFace(cx: 0.25, cy: 0.5, radius: 0.09)]]
+        ]
+
+        let started = CFAbsoluteTimeGetCurrent()
+        let outURL = try await makeExporter().export(
+            asset: built.composition, detectionCaches: caches, mapping: mapping,
+            photoSourceIDs: [sourcePhoto], applyRanges: applyRanges,
+            videoComposition: built.videoComposition, audioMix: built.audioMix,
+            renderLayout: built.layout) { _ in }
+        defer { try? FileManager.default.removeItem(at: outURL) }
+        let elapsed = CFAbsoluteTimeGetCurrent() - started
+
+        let out = AVURLAsset(url: outURL)
+        let outDuration = CMTimeGetSeconds(try await out.load(.duration))
+        XCTAssertEqual(outDuration, 8.0, accuracy: 0.2, "出力尺が合成尺と一致しない")
+
+        // 2) pts 列の連続性
+        // ⚠️ pts は**デコード済みフレーム**（`facePatches`）で採ること。
+        // `videoPresentationTimes`（無変換パススルー読み）には非画フレームの
+        // マーカーバッファが混ざり、pts=0 の重複と末尾 1 枚の水増しが必ず出る
+        // （`test_S11_diag_duplicatePTSByConfiguration` で全構成に共通と実測済み）。
+        let patches = try await facePatches(of: outURL)
+        let pts = patches.map(\.pts).sorted()
+        XCTAssertGreaterThan(pts.count, 100, "出力フレームが極端に少ない")
+        var deltas: [Double] = []
+        var duplicates = 0
+        for index in 1..<pts.count {
+            let delta = pts[index] - pts[index - 1]
+            if delta <= 1e-9 { duplicates += 1 }
+            deltas.append(delta)
+        }
+        let sortedDeltas = deltas.sorted()
+        let median = sortedDeltas[sortedDeltas.count / 2]
+        let maxDelta = sortedDeltas.last ?? 0
+        var histogram: [Int: Int] = [:]
+        for delta in deltas { histogram[Int((delta * 600).rounded()), default: 0] += 1 }
+        print(String(format:
+            "[S11-E2E] frames=%d duration=%.3f 先頭pts=%.4f 末尾pts=%.4f "
+            + "medianΔ=%.5f maxΔ=%.5f 重複pts=%d export=%.2fs",
+            pts.count, outDuration, pts.first ?? -1, pts.last ?? -1,
+            median, maxDelta, duplicates, elapsed))
+        print("[S11-E2E] Δヒストグラム(1/600秒単位)=\(histogram.sorted { $0.key < $1.key })")
+        XCTAssertEqual(duplicates, 0, "同じ pts のフレームが重複して書かれている")
+        XCTAssertLessThan(maxDelta, median * 2.5,
+                          "pts に飛び（フレーム脱落）がある max=\(maxDelta) median=\(median)")
+        XCTAssertLessThan(pts.first ?? 1, 0.05, "先頭フレームの pts が 0 付近から始まっていない")
+        XCTAssertGreaterThan(pts.last ?? 0, outDuration - 3 * median,
+                             "末尾フレームが合成尺の手前で途切れている")
+
+        // 3) 画素検証: 適用区間の有無どおりにモザイクが乗ること
+        let mosaicMax = 60.0
+        let rawMin = 90.0
+        func stats(_ window: Range<Double>, left: Bool) -> [Double] {
+            patches.filter { window.contains($0.pts) }
+                .map { luminanceStdDev(left ? $0.left : $0.right) }
+        }
+        // clip0 単独区間 [0, 3.5) → 顔は左。適用区間ゼロなので素のまま。
+        let clip0Left = stats(0.2..<3.3, left: true)
+        XCTAssertGreaterThanOrEqual(clip0Left.count, 30, "clip0 単独区間のフレームが取れていない")
+        // clip1 単独区間 [4.0, 5.0) → 顔は右。適用区間 ON なのでモザイク。
+        let clip1Right = stats(4.1..<4.9, left: false)
+        XCTAssertGreaterThanOrEqual(clip1Right.count, 10, "clip1 単独区間のフレームが取れていない")
+        // clip2（写真）単独区間 [5.5, 8.0) → 顔は左。適用区間 ON なのでモザイク。
+        let photoLeft = stats(5.7..<7.8, left: true)
+        XCTAssertGreaterThanOrEqual(photoLeft.count, 20, "写真クリップ区間のフレームが取れていない")
+
+        print(String(format: "[S11-E2E] std clip0(OFF,左)=%.1f clip1(ON,右)=%.1f photo(ON,左)=%.1f",
+                     clip0Left.reduce(0, +) / Double(clip0Left.count),
+                     clip1Right.reduce(0, +) / Double(clip1Right.count),
+                     photoLeft.reduce(0, +) / Double(photoLeft.count)))
+
+        for value in clip0Left {
+            XCTAssertGreaterThan(value, rawMin,
+                                 "適用区間を置いていない clip0 の顔にモザイクが乗っている std=\(value)")
+        }
+        for value in clip1Right {
+            XCTAssertLessThan(value, mosaicMax,
+                              "適用区間 ON の clip1 の顔にモザイクが乗っていない std=\(value)")
+        }
+        for value in photoLeft {
+            XCTAssertLessThan(value, mosaicMax,
+                              "適用区間 ON の写真クリップにモザイクが乗っていない std=\(value)")
+        }
+
+        // 4) 音声
+        let audioTracks = try await out.loadTracks(withMediaType: .audio)
+        XCTAssertEqual(audioTracks.count, 1, "全部盛り構成で音声トラックが消えている")
+        if let audio = audioTracks.first {
+            let range = try await audio.load(.timeRange)
+            let audioEnd = CMTimeGetSeconds(range.start) + CMTimeGetSeconds(range.duration)
+            print(String(format: "[S11-E2E] 出力 audio start=%.4f dur=%.4f",
+                         CMTimeGetSeconds(range.start), CMTimeGetSeconds(range.duration)))
+            // 末尾クリップ（写真）は音声を持たないので、音声トラックは最後の
+            // 有音クリップの終端（合成 5.5s）までしか伸びない。映像側 8.0s との差は
+            // 無音であり、AVFoundation の合成でも同じ（composition の音声トラックも 5.5s）。
+            XCTAssertGreaterThan(audioEnd, 5.4,
+                                 "最後の有音クリップ（B）の終端まで音声が届いていない")
+            XCTAssertLessThanOrEqual(audioEnd, 8.1, "音声が映像より長い（尺超過）")
+        }
+        // clip0（A）本体と clip1（B）本体の両方に音が載っていること。
+        let clip0RMS = try await audioRMS(url: outURL, window: 0.3...3.0)
+        let clip1RMS = try await audioRMS(url: outURL, window: 4.1...4.9)
+        let photoRMS = try await audioRMS(url: outURL, window: 5.8...7.8)
+        print(String(format: "[S11-E2E] rms clip0=%.3f clip1=%.3f photo=%.3f",
+                     clip0RMS, clip1RMS, photoRMS))
+        XCTAssertGreaterThan(clip0RMS, 0.1, "先行クリップの音が載っていない")
+        XCTAssertGreaterThan(clip1RMS, 0.1,
+                             "後続クリップ（トランジション越しの B 側）の音が載っていない")
+        XCTAssertLessThan(photoRMS, 0.03, "無音のはずの写真区間に音が載っている")
+    }
+
+    /// 構成別の**デコード済み出力フレーム数**と pts の健全性を固定する。
+    ///
+    /// ⚠️ 計測の落とし穴（S11 で実測）: `videoPresentationTimes`（`outputSettings: nil` の
+    /// パススルー読み）は非画フレームのマーカーバッファまで拾うため、**どの構成でも
+    /// 必ず pts=0 の重複 1 件と末尾 1 枚の水増しが出る**（＝出力ファイルの欠陥ではない）。
+    /// フレーム数・連続性を検証するときは必ずデコードして読むこと。
+    func test_S11_decodedFrameCountAndPTSByConfiguration() async throws {
+        guard MTLCreateSystemDefaultDevice() != nil else {
+            throw XCTSkip("Metal デバイスが無い環境ではスキップ")
+        }
+        let urlA = try await makeTestVideo(seconds: 2.0, withAudio: false)
+        let urlB = try await makeTestVideo(seconds: 2.0, withAudio: false)
+        defer {
+            try? FileManager.default.removeItem(at: urlA)
+            try? FileManager.default.removeItem(at: urlB)
+        }
+        let sourceA = UUID(), sourceB = UUID()
+        let assets: [UUID: AVAsset] = [sourceA: AVURLAsset(url: urlA), sourceB: AVURLAsset(url: urlB)]
+
+        func report(_ label: String, clips: [TimelineClip],
+                    transitions: [UUID: TransitionSpec],
+                    expectedFrames: Int) async throws -> Int {
+            let built = try await TimelineCompositionBuilder()
+                .build(clips: clips, transitions: transitions, sources: assets)
+            let outURL = try await makeExporter().export(
+                asset: built.composition,
+                mapping: TimelineMapping(clips: clips, transitions: transitions),
+                videoComposition: built.videoComposition, audioMix: built.audioMix,
+                renderLayout: built.layout) { _ in }
+            defer { try? FileManager.default.removeItem(at: outURL) }
+            let pts = try await videoPresentationTimes(of: outURL).sorted()
+            let dups = (1..<max(pts.count, 2)).filter { pts[$0] - pts[$0 - 1] <= 1e-9 }
+            // デコードして読む経路（マーカーバッファが混ざらない）と突き合わせる。
+            let decoded = try await facePatches(of: outURL).map(\.pts).sorted()
+            let decodedDups = (1..<max(decoded.count, 2))
+                .filter { decoded[$0] - decoded[$0 - 1] <= 1e-9 }
+            print(String(format: "[S11-DIAG]   ↳ デコード読み frames=%d 重複=%d",
+                         decoded.count, decodedDups.count))
+            let frameDuration = built.videoComposition
+                .map { CMTimeGetSeconds($0.frameDuration) } ?? -1
+            print(String(format:
+                "[S11-DIAG] %@ vc=%@ frameDur=%.5f 生frames=%d 生重複=%d 末尾=%.4f",
+                label, built.videoComposition == nil ? "nil" : "attach",
+                frameDuration, pts.count, dups.count, pts.last ?? -1))
+            XCTAssertEqual(decodedDups.count, 0,
+                           "\(label): デコード済み出力に同一 pts のフレームがある")
+            XCTAssertEqual(decoded.count, expectedFrames,
+                           "\(label): デコード済み出力フレーム数が想定と違う")
+            // パススルー読みの水増しは「マーカーバッファ由来」であることの実証。
+            // デコード読みと必ず一致しないが、その差は毎回 2 枚（重複 1 + 末尾 1）。
+            XCTAssertEqual(pts.count - decoded.count, 2,
+                           "\(label): パススルー読みとデコード読みの差が想定（2枚）と違う")
+            return dups.count
+        }
+
+        let single = [TimelineClip(sourceID: sourceA, sourceStart: 0, sourceEnd: 2)]
+        _ = try await report("単一クリップ・無変換", clips: single, transitions: [:],
+                             expectedFrames: 60)
+
+        let two = [TimelineClip(sourceID: sourceA, sourceStart: 0, sourceEnd: 2),
+                   TimelineClip(sourceID: sourceB, sourceStart: 0, sourceEnd: 2)]
+        _ = try await report("2クリップ・トランジション無し", clips: two, transitions: [:],
+                             expectedFrames: 120)
+        _ = try await report("2クリップ・クロスフェード", clips: two,
+                             transitions: [two[0].id: TransitionSpec(kind: .crossfade,
+                                                                     duration: 0.5)],
+                             expectedFrames: 105)
+
+        let rated = [TimelineClip(sourceID: sourceA, sourceStart: 0, sourceEnd: 2, rate: 0.5)]
+        _ = try await report("単一クリップ・rate 0.5", clips: rated, transitions: [:],
+                             expectedFrames: 60)
+
+        let mixed = [TimelineClip(sourceID: sourceA, sourceStart: 0, sourceEnd: 2, rate: 0.5),
+                     TimelineClip(sourceID: sourceB, sourceStart: 0, sourceEnd: 2, rate: 2.0)]
+        _ = try await report("rate 混在 0.5x+2x・トランジション無し", clips: mixed,
+                             transitions: [:], expectedFrames: 90)
+        _ = try await report("rate 混在 0.5x+2x・クロスフェード", clips: mixed,
+                             transitions: [mixed[0].id: TransitionSpec(kind: .crossfade,
+                                                                       duration: 0.5)],
+                             expectedFrames: 83)
+    }
+
+    // MARK: - C. 音声のピッチ保持（440Hz サイン波の FFT）
+
+    /// 出力音声の指定窓を PCM（モノラル Float）で取り出す。
+    private func audioSamples(url: URL, window: ClosedRange<Double>) async throws
+    -> (samples: [Float], sampleRate: Double) {
+        let asset = AVURLAsset(url: url)
+        guard let track = try await asset.loadTracks(withMediaType: .audio).first else {
+            return ([], 0)
+        }
+        let reader = try AVAssetReader(asset: asset)
+        let out = AVAssetReaderAudioMixOutput(audioTracks: [track], audioSettings: [
+            AVFormatIDKey: kAudioFormatLinearPCM,
+            AVLinearPCMBitDepthKey: 16,
+            AVLinearPCMIsFloatKey: false,
+            AVLinearPCMIsBigEndianKey: false,
+            AVLinearPCMIsNonInterleaved: false
+        ])
+        reader.add(out)
+        reader.startReading()
+        var samples: [Float] = []
+        var rate = 0.0
+        while let sample = out.copyNextSampleBuffer() {
+            guard CMSampleBufferGetNumSamples(sample) > 0,
+                  let block = CMSampleBufferGetDataBuffer(sample),
+                  let format = CMSampleBufferGetFormatDescription(sample),
+                  let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(format)?.pointee
+            else { continue }
+            rate = asbd.mSampleRate
+            let channels = max(1, Int(asbd.mChannelsPerFrame))
+            let start = CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sample))
+            var lengthAtOffset = 0, totalLength = 0
+            var dataPointer: UnsafeMutablePointer<Int8>?
+            CMBlockBufferGetDataPointer(block, atOffset: 0,
+                                        lengthAtOffsetOut: &lengthAtOffset,
+                                        totalLengthOut: &totalLength,
+                                        dataPointerOut: &dataPointer)
+            guard let dataPointer, lengthAtOffset == totalLength else { continue }
+            let frameCount = totalLength / (2 * channels)
+            dataPointer.withMemoryRebound(to: Int16.self, capacity: totalLength / 2) { ptr in
+                for frame in 0..<frameCount {
+                    let t = start + Double(frame) / rate
+                    guard window.contains(t) else { continue }
+                    samples.append(Float(ptr[frame * channels]) / 32768.0)
+                }
+            }
+        }
+        return (samples, rate)
+    }
+
+    /// Hann 窓 + 実数 FFT でスペクトルのピーク周波数（Hz）を返す。
+    private func dominantFrequency(samples: [Float], sampleRate: Double) -> Double {
+        let count = 1 << Int(floor(log2(Double(samples.count))))
+        guard count >= 4096, sampleRate > 0 else { return .nan }
+        let log2n = vDSP_Length(log2(Double(count)))
+        guard let setup = vDSP_create_fftsetup(log2n, FFTRadix(kFFTRadix2)) else { return .nan }
+        defer { vDSP_destroy_fftsetup(setup) }
+
+        var input = Array(samples.prefix(count))
+        var window = [Float](repeating: 0, count: count)
+        vDSP_hann_window(&window, vDSP_Length(count), Int32(vDSP_HANN_NORM))
+        vDSP_vmul(input, 1, window, 1, &input, 1, vDSP_Length(count))
+
+        let half = count / 2
+        let realp = UnsafeMutablePointer<Float>.allocate(capacity: half)
+        let imagp = UnsafeMutablePointer<Float>.allocate(capacity: half)
+        defer { realp.deallocate(); imagp.deallocate() }
+        realp.initialize(repeating: 0, count: half)
+        imagp.initialize(repeating: 0, count: half)
+        var split = DSPSplitComplex(realp: realp, imagp: imagp)
+        input.withUnsafeBufferPointer { ptr in
+            ptr.baseAddress!.withMemoryRebound(to: DSPComplex.self, capacity: half) { typed in
+                vDSP_ctoz(typed, 2, &split, 1, vDSP_Length(half))
+            }
+        }
+        vDSP_fft_zrip(setup, &split, 1, log2n, FFTDirection(FFT_FORWARD))
+        var magnitudes = [Float](repeating: 0, count: half)
+        vDSP_zvmags(&split, 1, &magnitudes, 1, vDSP_Length(half))
+
+        var peakIndex = 1
+        var peak: Float = 0
+        // DC 近傍（index 0,1）は窓のリークで大きくなるので除く。
+        for index in 2..<half where magnitudes[index] > peak {
+            peak = magnitudes[index]
+            peakIndex = index
+        }
+        return Double(peakIndex) * sampleRate / Double(count)
+    }
+
+    /// **C. 速度変更でピッチが保たれること**（`.spectral` の実効検証）。
+    ///
+    /// 440Hz のサイン波素材を rate=2 / rate=0.5 で書き出し、FFT のピークが
+    /// **440Hz のまま**であることを確認する。ピッチシフト（`.varispeed` 相当）なら
+    /// rate=2 で 880Hz、rate=0.5 で 220Hz に出る。
+    func test_S11_rateChangePreservesPitch_440HzStaysAt440Hz() async throws {
+        guard MTLCreateSystemDefaultDevice() != nil else {
+            throw XCTSkip("Metal デバイスが無い環境ではスキップ")
+        }
+        let url = try await makeTestVideo(seconds: 4.0, withAudio: true)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let sourceID = UUID()
+
+        func exportAt(rate: Double) async throws -> URL {
+            let clips = [TimelineClip(sourceID: sourceID, sourceStart: 0, sourceEnd: 4, rate: rate)]
+            let built = try await TimelineCompositionBuilder()
+                .build(clips: clips, sources: [sourceID: AVURLAsset(url: url)])
+            return try await makeExporter().export(
+                asset: built.composition, mapping: TimelineMapping(clips: clips),
+                videoComposition: built.videoComposition, audioMix: built.audioMix,
+                renderLayout: built.layout) { _ in }
+        }
+
+        // 対照: 等倍書き出しの計測系が 440Hz を返すこと。
+        let baseURL = try await exportAt(rate: 1.0)
+        defer { try? FileManager.default.removeItem(at: baseURL) }
+        let base = try await audioSamples(url: baseURL, window: 0.3...3.7)
+        let baseFreq = dominantFrequency(samples: base.samples, sampleRate: base.sampleRate)
+        print(String(format: "[S11-PITCH] rate=1.0 sr=%.0f n=%d peak=%.1fHz",
+                     base.sampleRate, base.samples.count, baseFreq))
+        XCTAssertEqual(baseFreq, 440, accuracy: 15, "計測系が素材の 440Hz を検出できていない")
+
+        // rate=2: 尺が半分、ピッチは 440Hz のまま。
+        let fastURL = try await exportAt(rate: 2.0)
+        defer { try? FileManager.default.removeItem(at: fastURL) }
+        let fastDuration = CMTimeGetSeconds(try await AVURLAsset(url: fastURL).load(.duration))
+        XCTAssertEqual(fastDuration, 2.0, accuracy: 0.15, "rate=2 で尺が半分になっていない")
+        let fast = try await audioSamples(url: fastURL, window: 0.2...1.8)
+        let fastFreq = dominantFrequency(samples: fast.samples, sampleRate: fast.sampleRate)
+        print(String(format: "[S11-PITCH] rate=2.0 dur=%.3f n=%d peak=%.1fHz",
+                     fastDuration, fast.samples.count, fastFreq))
+        XCTAssertEqual(fastFreq, 440, accuracy: 20,
+                       "rate=2 で基本周波数がずれた（ピッチシフトしている。880Hz なら varispeed）")
+
+        // rate=0.5: 尺が倍、ピッチは 440Hz のまま。
+        let slowURL = try await exportAt(rate: 0.5)
+        defer { try? FileManager.default.removeItem(at: slowURL) }
+        let slowDuration = CMTimeGetSeconds(try await AVURLAsset(url: slowURL).load(.duration))
+        XCTAssertEqual(slowDuration, 8.0, accuracy: 0.2, "rate=0.5 で尺が倍になっていない")
+        let slow = try await audioSamples(url: slowURL, window: 0.5...7.5)
+        let slowFreq = dominantFrequency(samples: slow.samples, sampleRate: slow.sampleRate)
+        print(String(format: "[S11-PITCH] rate=0.5 dur=%.3f n=%d peak=%.1fHz",
+                     slowDuration, slow.samples.count, slowFreq))
+        XCTAssertEqual(slowFreq, 440, accuracy: 20,
+                       "rate=0.5 で基本周波数がずれた（220Hz なら varispeed）")
+    }
+
+    // MARK: - B. 性能計測
+
+    /// **B-1. 速度変更の両端（0.1x / 10x）の書き出し**。
+    ///
+    /// 0.1x はフレーム洪水（合成尺 10 倍 = 書くフレームが 10 倍）、
+    /// 10x は間延び（素材を 10 倍の速さで読み飛ばす）の両端。
+    /// 所要時間・出力尺・出力フレーム数を実測値として残す。
+    func test_S11_perf_extremeRates_010x_and_10x() async throws {
+        guard MTLCreateSystemDefaultDevice() != nil else {
+            throw XCTSkip("Metal デバイスが無い環境ではスキップ")
+        }
+        let url = try await makeTestVideo(seconds: 2.0, withAudio: true)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let sourceID = UUID()
+
+        func measure(rate: Double, expected: Double) async throws {
+            let clips = [TimelineClip(sourceID: sourceID, sourceStart: 0, sourceEnd: 2, rate: rate)]
+            let built = try await TimelineCompositionBuilder()
+                .build(clips: clips, sources: [sourceID: AVURLAsset(url: url)])
+            let started = CFAbsoluteTimeGetCurrent()
+            let outURL = try await makeExporter().export(
+                asset: built.composition, mapping: TimelineMapping(clips: clips),
+                applyRanges: MosaicApplyGate.fullCoverRanges(for: clips, photoSourceIDs: []),
+                videoComposition: built.videoComposition, audioMix: built.audioMix,
+                renderLayout: built.layout) { _ in }
+            let elapsed = CFAbsoluteTimeGetCurrent() - started
+            defer { try? FileManager.default.removeItem(at: outURL) }
+
+            let duration = CMTimeGetSeconds(try await AVURLAsset(url: outURL).load(.duration))
+            let pts = try await videoPresentationTimes(of: outURL)
+            let audioTracks = try await AVURLAsset(url: outURL).loadTracks(withMediaType: .audio)
+            print(String(format:
+                "[S11-PERF] rate=%.2f wall=%.2fs 出力尺=%.3fs frames=%d 実効fps=%.1f audio=%d",
+                rate, elapsed, duration, pts.count,
+                Double(pts.count) / max(duration, 0.001), audioTracks.count))
+            XCTAssertEqual(duration, expected, accuracy: max(0.2, expected * 0.05),
+                           "rate=\(rate) の出力尺が想定と違う")
+            XCTAssertGreaterThan(pts.count, 0, "rate=\(rate) で出力フレームが 0")
+            XCTAssertEqual(audioTracks.count, 1, "rate=\(rate) で音声トラックが消えている")
+            XCTAssertLessThan(elapsed, 180,
+                              "rate=\(rate) の書き出しが 3 分を超えた（実用外）")
+        }
+
+        try await measure(rate: 0.1, expected: 20.0)
+        try await measure(rate: 10.0, expected: 0.2)
+    }
+
+    /// 指定解像度の単色動画（4K 計測用）。
+    private func makeSolidVideo(pixelWidth: Int, pixelHeight: Int,
+                                seconds: Double) async throws -> URL {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(UUID().uuidString).mp4")
+        let writer = try AVAssetWriter(outputURL: url, fileType: .mp4)
+        let input = AVAssetWriterInput(mediaType: .video, outputSettings: [
+            AVVideoCodecKey: AVVideoCodecType.h264,
+            AVVideoWidthKey: pixelWidth,
+            AVVideoHeightKey: pixelHeight
+        ])
+        input.expectsMediaDataInRealTime = false
+        let adaptor = AVAssetWriterInputPixelBufferAdaptor(
+            assetWriterInput: input,
+            sourcePixelBufferAttributes: [
+                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+                kCVPixelBufferWidthKey as String: pixelWidth,
+                kCVPixelBufferHeightKey as String: pixelHeight
+            ])
+        writer.add(input)
+        writer.startWriting()
+        writer.startSession(atSourceTime: .zero)
+        for i in 0..<Int(seconds * Double(fps)) {
+            while !input.isReadyForMoreMediaData {
+                try await Task.sleep(nanoseconds: 1_000_000)
+            }
+            var pb: CVPixelBuffer?
+            CVPixelBufferCreate(kCFAllocatorDefault, pixelWidth, pixelHeight,
+                                kCVPixelFormatType_32BGRA, nil, &pb)
+            guard let buffer = pb else { continue }
+            CVPixelBufferLockBaseAddress(buffer, [])
+            memset(CVPixelBufferGetBaseAddress(buffer), Int32(0x30 + (i % 2) * 0x50),
+                   CVPixelBufferGetBytesPerRow(buffer) * pixelHeight)
+            CVPixelBufferUnlockBaseAddress(buffer, [])
+            adaptor.append(buffer, withPresentationTime:
+                            CMTime(value: CMTimeValue(i), timescale: CMTimeScale(fps)))
+        }
+        input.markAsFinished()
+        await writer.finishWriting()
+        return url
+    }
+
+    /// **B-2. 4K 素材どうしのトランジション書き出し**。
+    ///
+    /// トランジション区間は 2 系統のデコードが同時に走る（A/B トラック）。
+    /// 4K で完走するか・どれくらい掛かるかを実測する。
+    func test_S11_perf_4KTransitionExport() async throws {
+        guard MTLCreateSystemDefaultDevice() != nil else {
+            throw XCTSkip("Metal デバイスが無い環境ではスキップ")
+        }
+        let urlA = try await makeSolidVideo(pixelWidth: 3840, pixelHeight: 2160, seconds: 1.5)
+        let urlB = try await makeSolidVideo(pixelWidth: 3840, pixelHeight: 2160, seconds: 1.5)
+        defer {
+            try? FileManager.default.removeItem(at: urlA)
+            try? FileManager.default.removeItem(at: urlB)
+        }
+        let sourceA = UUID(), sourceB = UUID()
+        let clipA = TimelineClip(sourceID: sourceA, sourceStart: 0, sourceEnd: 1.5)
+        let clipB = TimelineClip(sourceID: sourceB, sourceStart: 0, sourceEnd: 1.5)
+        let transitions = [clipA.id: TransitionSpec(kind: .crossfade, duration: 0.5)]
+        let built = try await TimelineCompositionBuilder().build(
+            clips: [clipA, clipB], transitions: transitions,
+            sources: [sourceA: AVURLAsset(url: urlA), sourceB: AVURLAsset(url: urlB)])
+        XCTAssertEqual(built.outputSize, CGSize(width: 3840, height: 2160),
+                       "4K 素材なのに出力解像度が 4K でない")
+
+        let caches = [
+            sourceA: denseCache(face: makeSyntheticFace(cx: 0.3, cy: 0.5, radius: 0.09),
+                                seconds: 1.5),
+            sourceB: denseCache(face: makeSyntheticFace(cx: 0.7, cy: 0.5, radius: 0.09),
+                                seconds: 1.5)
+        ]
+        // 対照: 同じ 4K 素材 2 本を**トランジション無し**で連結した書き出し
+        // （2 系統デコードが同時に走らない構成）。所要時間の差がトランジションのコスト。
+        let plainBuilt = try await TimelineCompositionBuilder().build(
+            clips: [clipA, clipB],
+            sources: [sourceA: AVURLAsset(url: urlA), sourceB: AVURLAsset(url: urlB)])
+        let plainStarted = CFAbsoluteTimeGetCurrent()
+        let plainURL = try await makeExporter().export(
+            asset: plainBuilt.composition,
+            mapping: TimelineMapping(clips: [clipA, clipB]),
+            applyRanges: MosaicApplyGate.fullCoverRanges(for: [clipA, clipB], photoSourceIDs: []),
+            videoComposition: plainBuilt.videoComposition, audioMix: plainBuilt.audioMix,
+            renderLayout: plainBuilt.layout) { _ in }
+        let plainElapsed = CFAbsoluteTimeGetCurrent() - plainStarted
+        defer { try? FileManager.default.removeItem(at: plainURL) }
+        let plainDuration = CMTimeGetSeconds(try await AVURLAsset(url: plainURL).load(.duration))
+        let plainFrames = try await videoPresentationTimes(of: plainURL).count
+        print(String(format:
+            "[S11-PERF-4K] 対照(トランジション無し) wall=%.2fs 尺=%.3fs frames=%d 実時間比=%.2fx",
+            plainElapsed, plainDuration, plainFrames,
+            plainElapsed / max(plainDuration, 0.001)))
+
+        let started = CFAbsoluteTimeGetCurrent()
+        let outURL = try await makeExporter().export(
+            asset: built.composition, detectionCaches: caches,
+            mapping: TimelineMapping(clips: [clipA, clipB], transitions: transitions),
+            applyRanges: MosaicApplyGate.fullCoverRanges(for: [clipA, clipB], photoSourceIDs: []),
+            videoComposition: built.videoComposition, audioMix: built.audioMix,
+            renderLayout: built.layout) { _ in }
+        let elapsed = CFAbsoluteTimeGetCurrent() - started
+        defer { try? FileManager.default.removeItem(at: outURL) }
+
+        let duration = CMTimeGetSeconds(try await AVURLAsset(url: outURL).load(.duration))
+        let pts = try await videoPresentationTimes(of: outURL)
+        let attributes = try? FileManager.default.attributesOfItem(atPath: outURL.path)
+        let bytes = (attributes?[.size] as? Int) ?? 0
+        print(String(format:
+            "[S11-PERF-4K] wall=%.2fs 尺=%.3fs frames=%d 実時間比=%.2fx bytes=%d",
+            elapsed, duration, pts.count, elapsed / max(duration, 0.001), bytes))
+        XCTAssertEqual(duration, 2.5, accuracy: 0.2,
+                       "4K トランジションの出力尺が合成尺（1.5+1.5−0.5）と違う")
+        XCTAssertGreaterThan(pts.count, 30, "4K トランジション書き出しのフレームが少なすぎる")
+
+        let outTracks = try await AVURLAsset(url: outURL).loadTracks(withMediaType: .video)
+        let track = try XCTUnwrap(outTracks.first)
+        let size = try await track.load(.naturalSize)
+        XCTAssertEqual(size, CGSize(width: 3840, height: 2160),
+                       "4K で書き出したのに出力解像度が落ちている")
     }
 }
 
