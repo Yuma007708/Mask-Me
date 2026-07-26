@@ -12,11 +12,22 @@ extension FaceLandmarkSet {
         public static let minSpan: CGFloat = 0.02          // 遠距離・広角ショットの小さい顔を拾えるよう緩和
         /// …and no larger than this (a real face never exceeds the frame much).
         public static let maxSpan: CGFloat = 1.6
-        /// Face height / width must fall in this range. Wide lower/upper margins so
-        /// tilted (roll) and angled faces — whose axis-aligned box is squarer or
-        /// wider than an upright face — are not falsely rejected. Only clearly
-        /// body-like tall-thin shapes fall outside.
+        /// Face height / width (**正規化座標**) must fall in this range.
+        /// 画像サイズが分からない呼び出し（`isPlausibleFace` の引数なし版など）専用の
+        /// フォールバック。正規化比には動画・写真のアスペクト比がそのまま混入するので
+        /// （16:9 横長なら正方形の顔が h/w≈1.78、9:16 縦長なら h/w≈0.56 になる）、
+        /// 素材の向きを問わず通す必要があり、この幅では体誤フィットをほとんど弾けない。
+        /// **画像サイズが分かるなら必ず `pixelAspectRange` 側を使うこと。**
         public static let aspectRange: ClosedRange<CGFloat> = 0.4...3.0
+        /// Face height / width (**ピクセル換算**) の主ゲート。素材のアスペクト比が
+        /// 除かれるので、実顔の形そのものを判定できる。
+        /// 実測（probe 静止画 24 枚 + 実素材クリップ 12 本の全採用検出）では
+        /// ピクセル h/w は 0.80〜1.40 に収まった。roll した顔（軸平行 bbox が正方形〜
+        /// 横長になる）と横顔（幅が縮んで縦長になる）に十分な余裕を残しつつ、
+        /// 体・首・胸への縦長フィット（実測 2.5 以上）を弾ける値として 0.5...2.0 を採る。
+        /// `maxPixelAspect`(1.4) は低 confidence 救済経路専用のより厳しい体ゲートで、
+        /// 本レンジは全経路が通る主ゲートなので意図的に緩く取っている。
+        public static let pixelAspectRange: ClosedRange<CGFloat> = 0.5...2.0
         /// Inter-ocular distance / face width must fall in this range.
         public static let eyeWidthRatioRange: ClosedRange<CGFloat> = 0.10...0.95  // 斜め向きの顔を許容するよう緩和
         /// ピクセル換算の顔 bbox 縦横比 (h/w) の上限。実顔の oval はピクセル座標で
@@ -74,18 +85,36 @@ extension FaceLandmarkSet {
     /// user-configured `DetectionSettings` without coupling MosaicCore to the app layer.
     public func isPlausibleFace(
         minSpan: CGFloat,
-        eyeRatioRange: ClosedRange<CGFloat>
+        eyeRatioRange: ClosedRange<CGFloat>,
+        imageSize: CGSize? = nil
     ) -> Bool {
-        plausibilityScore(minSpan: minSpan, eyeRatioRange: eyeRatioRange) > 0
+        plausibilityScore(minSpan: minSpan,
+                          eyeRatioRange: eyeRatioRange,
+                          imageSize: imageSize) > 0
+    }
+
+    /// 縦横比ゲート。画像サイズが分かるならピクセル換算で判定する（正規化比には
+    /// 素材のアスペクト比が混入し、縦長素材と横長素材で同じ形の顔が別の値になるため）。
+    /// - Parameter normalizedAspect: 正規化座標での顔 oval bbox の h/w。
+    static func passesAspectGate(_ normalizedAspect: CGFloat, imageSize: CGSize?) -> Bool {
+        guard let imageSize, imageSize.width > 0, imageSize.height > 0 else {
+            return Plausibility.aspectRange.contains(normalizedAspect)
+        }
+        let pixelAspect = normalizedAspect * imageSize.height / imageSize.width
+        return Plausibility.pixelAspectRange.contains(pixelAspect)
     }
 
     /// 幾何学的妥当性を 0...1 の連続スコアで返す。0 は完全棄却、1 は正面 478点顔。
     /// `eyeRatioRange` の下限を下回った境界顔（横顔・小顔）は完全棄却ではなく低スコアで
     /// 残し、`LandmarkSmoother`/`DetectionBridge`/`TrackingEvaluator` の EMA が均せる。
     /// 完全に棄却する条件: 面数不足、span/aspect の物理的破綻、目が口より下（顔向き逆）。
+    /// - Parameter imageSize: 元画像のピクセルサイズ。渡すと縦横比ゲートを
+    ///   ピクセル換算（`Plausibility.pixelAspectRange`）で判定する。`nil` のときだけ
+    ///   素材アスペクト比が混入する正規化比（`Plausibility.aspectRange`）に退避する。
     public func plausibilityScore(
         minSpan: CGFloat,
-        eyeRatioRange: ClosedRange<CGFloat>
+        eyeRatioRange: ClosedRange<CGFloat>,
+        imageSize: CGSize? = nil
     ) -> Float {
         let unit = CGSize(width: 1, height: 1)
         let oval = polygon(for: .faceOval, in: unit)
@@ -105,8 +134,7 @@ extension FaceLandmarkSet {
         let span = max(width, height)
         guard span >= minSpan, span <= Plausibility.maxSpan else { return 0 }
 
-        let aspect = height / width
-        guard Plausibility.aspectRange.contains(aspect) else { return 0 }
+        guard Self.passesAspectGate(height / width, imageSize: imageSize) else { return 0 }
 
         let rightEye = points[Self.rightEyeOuterIndex].point(in: unit)
         let leftEye = points[Self.leftEyeOuterIndex].point(in: unit)

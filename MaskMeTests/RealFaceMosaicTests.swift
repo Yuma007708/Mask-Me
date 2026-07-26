@@ -322,10 +322,61 @@ final class RealFaceMosaicTests: XCTestCase {
                     dumped = true
                 }
             }
+            let stats = adapter.sourceStats
             print("[PROBE] \(name) frames=\(frames) detectedFrames=\(detectedFrames) "
-                  + "maxFaces=\(maxFaces) fullMesh=\(fullMesh)")
+                  + "maxFaces=\(maxFaces) fullMesh=\(fullMesh) "
+                  + "src(mp=\(stats.mpFrames) enh=\(stats.enhanceFrames) bbox=\(stats.bboxFrames) "
+                  + "roi=\(stats.roiFrames) low=\(stats.lowConfFrames) tile=\(stats.tiledFrames) "
+                  + "flow=\(stats.flowFrames))")
             for line in lines.prefix(8) { print("[PROBE]   \(line)") }
         }
+    }
+
+    /// 人も顔も一切写っていない素材で 1 件も検出しないこと。
+    ///
+    /// 既存の自動検証は「縦長の枠の数」（`DValidLivePathTests` の `bodyFP`）しか見ておらず、
+    /// **顔でない場所を顔と呼んだかを測っていない**。実測で波打ち際の砂と、壁に掛かった
+    /// 飾り皿 2 枚 + プランターの並びを顔と判定したため、その回帰ゲートとして置く。
+    ///
+    /// 誤検出はユーザーの操作なしでモザイクになる（写真は顔 1 つなら自動選択、動画の
+    /// 書き出しは全顔適用に倒れる、カメラは完全自動で焼き込み保存）ため、
+    /// 「検出漏れより誤検出の方が安全」という一般則がこのアプリでは成り立たない。
+    func test_noFalsePositiveOnPersonlessStills() throws {
+        guard let modelPath = FixtureLoader.modelPath() else {
+            throw XCTSkip("face_landmarker.task が見つかりません")
+        }
+        let bundle = Bundle(for: RealFaceMosaicTests.self)
+        // 人・動物・彫像・仮面など「顔らしい形」を一切含まない素材だけを名指しする。
+        // 顔に見える配置のもの（飾り皿の並び等）は含めてよい — それこそが回帰対象。
+        let names = ["living_room", "bridge-image-seg", "chairs-image-seg",
+                     "multi_objects", "multi_objects_rotated", "ocr_text", "stars-image-seg"]
+        var urls: [URL] = []
+        for directory in ["Fixtures/probe", "Fixtures/nonfaces"] {
+            for ext in ["jpg", "jpeg", "png"] {
+                urls += (bundle.urls(forResourcesWithExtension: ext, subdirectory: directory) ?? [])
+                    .filter { names.contains($0.deletingPathExtension().lastPathComponent) }
+            }
+        }
+        try XCTSkipIf(urls.isEmpty, "人が写っていない素材が配置されていません")
+
+        let adapter = try MediaPipeFaceLandmarkerAdapter(modelPath: modelPath, runningMode: .image)
+        var offenders: [String] = []
+        for url in urls.sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
+            guard let data = try? Data(contentsOf: url), let image = UIImage(data: data) else { continue }
+            let sets = adapter.allLandmarks(in: image)
+            guard !sets.isEmpty else { continue }
+            let name = url.deletingPathExtension().lastPathComponent
+            let rects = sets.map { set -> String in
+                let xs = set.points.map { Double($0.x) }
+                let ys = set.points.map { Double($0.y) }
+                return String(format: "(%.2f,%.2f)-(%.2f,%.2f)",
+                              xs.min() ?? 0, ys.min() ?? 0, xs.max() ?? 0, ys.max() ?? 0)
+            }
+            offenders.append("\(name) n=\(sets.count) \(rects.joined(separator: " "))")
+            dumpAnnotated(image, sets: sets, name: "fp-\(name)")
+        }
+        XCTAssertTrue(offenders.isEmpty,
+                      "人も顔も写っていない素材を顔と判定した: \(offenders.joined(separator: " / "))")
     }
 
     /// 静止画版。彫像・マネキン・仮面・動物など「顔に見えるが人ではないもの」を
