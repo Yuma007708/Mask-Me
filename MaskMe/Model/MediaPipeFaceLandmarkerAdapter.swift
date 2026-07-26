@@ -405,8 +405,20 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
     /// 最終採用直前の体誤フィット検証。棄却された候補に対応する track だけを外科的に
     /// 殺し（ROI 延命が体 track を引きずるのを防ぐ）、検証通過分を返す。
     /// 他 track の missCount 状態は保持する。
+    ///
+    /// **全候補を検証する（`verifyAll: true`）。** 以前は「疑わしい候補」＝画面下半分または
+    /// 縦長形状だけを検証していたが、実測（顔が写っていない胴体クリップ）では
+    /// MediaPipe 本体が胸に **conf 1.00 / 幾何スコア 1.00 / 478 点フルメッシュ**、しかも
+    /// ピクセル換算縦横比 0.7〜1.1（実顔と同じ形）・画面上半分（midY 0.2〜0.34）で
+    /// メッシュを貼る。位置も形も confidence も実顔と区別できないので、疑わしさの
+    /// 事前判定では検証に回せない。全候補を crop 再検証に通すと 71% → 29% まで落ちた。
+    /// 残り 29% はまぐれで検証を通った 1 フレームがフロー橋渡しで増幅した分だが、
+    /// これを抑える「棄却の記憶」は横顔の退行と引き換えになるため採らない
+    /// （不採用の経緯は `MARK: - 検討して不採用にした「棄却の記憶」` を参照）。
+    /// 顔の検出率側は `VideoDetectionTests` / `DetectionAccuracyTests` /
+    /// `RealFaceMosaicTests` / `LiveScenarioTests` で退行なしを確認済み。
     private func verifyAndPruneTracks(_ result: [FaceLandmarkSet], in image: UIImage) -> [FaceLandmarkSet] {
-        let verified = verifySuspiciousFaces(result, in: image)
+        let verified = verifySuspiciousFaces(result, in: image, verifyAll: true)
         guard verified.count != result.count else { return result }
         let droppedBoxes = result.map(\.boundingBox).filter { box in
             !verified.contains { $0.boundingBox == box }
@@ -706,7 +718,9 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
                   let cropped = cropImage(image, normalizedRect: roi),
                   let mpImage = try? MPImage(uiImage: upscaledIfSmall(cropped)),
                   let result = try? cropLandmarker.detect(image: mpImage),
-                  let first = result.faceLandmarks.first else { return false }
+                  let first = result.faceLandmarks.first else {
+                return false
+            }
             let points = first.map { FaceLandmark(x: $0.x, y: $0.y, z: $0.z) }
             let meshFraction = Float(min(1.0, Double(points.count) / Double(FaceLandmarkSet.fullMeshCount)))
             let redetected = FaceLandmarkSet(points: points, confidence: meshFraction)
@@ -720,10 +734,31 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
                                                eyeRatioRange: 0.45...1.0,
                                                imageSize: image.size),
                   vetted.confidence >= verifyMinConfidence,
-                  !vetted.isBodyLikeShape(in: image.size) else { return false }
-            return iou(vetted.boundingBox, box) > 0.3
+                  !vetted.isBodyLikeShape(in: image.size),
+                  iou(vetted.boundingBox, box) > 0.3 else {
+                return false
+            }
+            return true
         }
     }
+
+    // MARK: - 検討して不採用にした「棄却の記憶」
+
+    /// **不採用の記録（同じ実装を再度作らないため）。**
+    /// 体誤フィットは同じ場所で毎フレーム候補に挙がり、そのほとんどは crop 再検証で落ちるが、
+    /// 数十フレームに 1 度まぐれで通り抜け、その 1 フレームがオプティカルフロー橋渡し
+    /// （`advanceFlowBridge`。検出器が全滅したフレームを繋ぐ経路なので原理的に検証できない）の
+    /// 種になって十数フレームへ増幅される（実測: 通過 1 フレーム → フロー 13 フレーム）。
+    /// そこで「同じ場所で最近棄却された bbox」を数フレーム覚えてフロー出力から落とす実装を
+    /// 試した。誤検出は胴体クリップで 29% → 2% まで落ちたが、**横顔がモザイクから外れる退行**が
+    /// 出た（`RealFaceMosaicTests` の横顔区間。全経路に適用した版でもフロー出力だけに絞った版でも
+    /// 同じ）。横顔は crop 再検証（eyeRatio 0.45 以上を要求）に落ちる頻度が高く、
+    /// 体誤フィットと**同じゲートで同じように落ちる**ため、棄却理由では両者を区別できない。
+    /// **顔を見逃す退行は誤モザイクより重い**ので、この方向は捨てて全候補再検証
+    /// （`verifyAndPruneTracks`）だけを採る。
+    ///
+    /// 増幅を止めたければ、棄却の記憶ではなく「crop 再検証の横顔リコールを上げる」
+    /// （yaw 推定で eyeRatio ゲートを角度依存にする等）方向で攻めること。
 
     private func resetTracksIfNeeded(timestampMs: Int) {
         if lastVideoTimestampMs != .min,
