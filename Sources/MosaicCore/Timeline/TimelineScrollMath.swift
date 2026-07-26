@@ -183,14 +183,28 @@ public enum TimelineScrollMath {
                                     geometry: TimelineGeometry,
                                     visibleWidth: Double,
                                     totalDuration: Double) -> Double {
-        // 非有限のスクロール量は「位置が不明」なのでシークの入力にしない（0 を返す）。
-        // ここで `0` へ寄せる（= 先頭）のは、時刻としての安全側だからである。
-        guard totalDuration.isFinite, totalDuration > 0, scrollOffset.isFinite else { return 0 }
-        let offset = scrollOffset
+        guard totalDuration.isFinite, totalDuration > 0 else { return 0 }
+        let raw = rawCenteredTime(scrollOffset: scrollOffset, geometry: geometry,
+                                  visibleWidth: visibleWidth)
+        return min(max(raw, 0), totalDuration)
+    }
+
+    /// 同じ中央時刻の**クランプ前**の値（負にも、尺を超えた値にもなる）。
+    ///
+    /// 余白（クリップの外側）まで払った状態を見分けるために要る。`centeredTime` の
+    /// 丸めた値だけでは「先頭ぴったり」と「先頭より前まで払った」の区別が付かず、
+    /// **中央へ引き戻すべきかを判断できない**（引き戻すと、余白まで払っただけで
+    /// 画面が再生位置へ弾かれて戻る）。
+    ///
+    /// 非有限のスクロール量は「位置が不明」なのでシークの入力にしない（0 を返す。
+    /// 時刻としての安全側）。
+    public static func rawCenteredTime(scrollOffset: Double,
+                                       geometry: TimelineGeometry,
+                                       visibleWidth: Double) -> Double {
+        guard scrollOffset.isFinite else { return 0 }
         let visible = visibleWidth.isFinite ? max(0, visibleWidth) : 0
-        let time = geometry.time(forX: offset + visible / 2)
-        guard time.isFinite else { return 0 }
-        return min(max(time, 0), totalDuration)
+        let time = geometry.time(forX: scrollOffset + visible / 2)
+        return time.isFinite ? time : 0
     }
 
     // MARK: - ピンチズーム

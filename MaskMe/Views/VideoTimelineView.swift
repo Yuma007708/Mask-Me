@@ -219,9 +219,11 @@ struct VideoTimelineView: View {
                                    contentWidth: contentWidth)
             // 継ぎ目レーンとクリップ帯は 1 段として積む（`TimelineMetrics.stackHeight` と対応）。
             VStack(alignment: .leading, spacing: 0) {
+                // シークの操作面は目盛り帯とクリップ帯だけ（`blocksTimelinePan` の doc）。
                 TimelineJointLaneView(geometry: geometry, joints: jointLayouts,
                                       contentWidth: contentWidth,
                                       onJointTap: { transitionSheetClipID = $0 })
+                    .blocksTimelinePan()
                 clipBand
             }
             TimelineApplyTrackView(
@@ -229,6 +231,7 @@ struct VideoTimelineView: View {
                 layouts: clipLayouts, playheadTime: playheadTime,
                 trimPreviewRelay: trimPreviewRelay,
                 selectedRangeID: rangeSelection, onCommit: commit)
+                .blocksTimelinePan()
         }
     }
 

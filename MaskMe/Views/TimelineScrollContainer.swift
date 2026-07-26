@@ -69,6 +69,29 @@ struct TimelineScrollOffsetKey: PreferenceKey {
     }
 }
 
+/// 横スクロール（= 中央固定タイムラインではシーク）を**この範囲では起こさせない**当て板。
+///
+/// シークの操作面は**目盛り帯とクリップ帯だけ**にする（継ぎ目レーンと適用区間トラックの
+/// 上を払っても再生位置は動かない）。SwiftUI では子に `.gesture` で付けたドラッグが
+/// 囲みの `ScrollView` の pan より先に成立して pan を起こさなくする。これは
+/// 「クリップ帯の並べ替えが `.gesture` だったせいで、クリップの上を払っても横スクロール
+/// しなかった」実測済みの事故と同じ仕組みで、ここでは**意図して**使う。
+///
+/// `minimumDistance: 1` にしてタップ（区間・継ぎ目の選択）は下へ通す。子に付いた
+/// ドラッグ（適用区間の端ハンドル）は内側が優先されるのでそのまま効く。
+struct TimelinePanBlockerModifier: ViewModifier {
+    func body(content: Content) -> some View {
+        content.gesture(DragGesture(minimumDistance: 1).onChanged { _ in })
+    }
+}
+
+extension View {
+    /// この範囲の横ドラッグでタイムラインをスクロール（= シーク）させない。
+    func blocksTimelinePan() -> some View {
+        modifier(TimelinePanBlockerModifier())
+    }
+}
+
 /// タイムラインの横スクロール容器。**プレイヘッドは可視領域の中央に固定**する。
 ///
 /// ビューポート観測・ピンチズーム・ズーム時の位置保持・プレイヘッド追従・
@@ -197,6 +220,10 @@ struct TimelineScrollContainer<Content: View>: View {
                 // `TimelineViewport` の座標系契約）。`.background` はレイアウトを変えない。
                 .background(offsetProbe)
                 .padding(.horizontal, CGFloat(Self.leadingInset(visibleWidth: visibleWidth)))
+                // 左右の余白（先頭より前・終端より後の空白）とトラックの隙間も操作面から
+                // 外す。上に載っている目盛り帯・クリップ帯の方が先に当たるので、
+                // **払えるのはその 2 段だけ**になる。
+                .background(marginBlocker)
                 // **`.id` は余白の外側**。`anchorUnitPointX(leadingInset:)` は
                 // 「余白を含む全幅」を分母に分数を出すので、内側に付けると分母が食い違って
                 // 着地点が余白ぶんずれる（= プレイヘッドが中央から外れる）。
@@ -207,6 +234,11 @@ struct TimelineScrollContainer<Content: View>: View {
         // pan にも吸われ、`translationSeconds` の補正で打ち消されてクリップが動かない。
         // 画面端での自動スクロールは `stepAutoScroll` がプログラムから動かす。
         .scrollDisabled(autoScroll.isDragging)
+    }
+
+    /// 余白と隙間の当て板（`blocksTimelinePan` の doc）。
+    private var marginBlocker: some View {
+        Color.clear.contentShape(Rectangle()).blocksTimelinePan()
     }
 
     /// コンテンツ左右の余白。プレイヘッドを中央に固定するため可視幅の半分を取る。
@@ -329,6 +361,23 @@ struct TimelineScrollContainer<Content: View>: View {
         }
     }
 
+    /// 余白（先頭より前・終端より後）まで払って止まっている状態か。
+    ///
+    /// **この状態では中央へ引き戻さない。** 余白は「先頭・終端のクリップを画面中央まで
+    /// 運ぶ」ために必要な可動域だが、そこまで払うと中央の時刻は 0／尺へ丸められるので、
+    /// 引き戻すと画面が再生位置へ弾かれて戻る（ユーザー報告の「動かしても再生位置に
+    /// 戻される」）。丸めた先に再生位置が既に居るなら、線が空白の上に載るだけで
+    /// 矛盾は無いのでその場に留める（一般的な動画編集アプリも終端より後ろへ送れる）。
+    private func isRestingBeyondTimeline(currentOffset: Double, visibleWidth: Double,
+                                         playhead: Double) -> Bool {
+        guard totalDuration > 0 else { return false }
+        let raw = TimelineScrollMath.rawCenteredTime(scrollOffset: currentOffset, geometry: geometry,
+                                                     visibleWidth: visibleWidth)
+        if raw < 0 { return playhead <= 0 }
+        if raw > totalDuration { return playhead >= totalDuration }
+        return false
+    }
+
     /// ズーム変更の**唯一の入口**。プレイヘッド（= 中央）を留めたまま px/秒 を変える。
     ///
     /// 中央固定では見ている位置は常に再生位置なので、`TimelineScrollMath.zoomAnchor` の
@@ -363,6 +412,8 @@ struct TimelineScrollContainer<Content: View>: View {
         // 効かなかった原因はこれ**）。落ち着いた時点で `markUserScrolling` の再点検、
         // 指が離れた時点で `onChange(of: isTouchDragging)` が最終状態を保証する。
         guard visibleWidth > 0, !isUserScrolling, !isTouchDragging else { return }
+        guard !isRestingBeyondTimeline(currentOffset: currentOffset, visibleWidth: visibleWidth,
+                                       playhead: time) else { return }
         let width = Double(contentWidth)
         let target = TimelineScrollMath.centeredScrollOffset(time: time, geometry: geometry,
                                                             contentWidth: width,

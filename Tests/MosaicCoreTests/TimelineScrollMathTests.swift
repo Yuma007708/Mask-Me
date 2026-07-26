@@ -237,6 +237,41 @@ final class TimelineScrollMathTests: XCTestCase {
                                                        visibleWidth: 360, totalDuration: 30), 0)
     }
 
+    /// クランプ前の中央時刻は範囲外へ出る（余白まで払った状態の判定に使う）。
+    ///
+    /// **クランプ後の値だけでは「先頭ぴったり」と「先頭より前」を区別できない。**
+    /// 区別できないと、余白まで払っただけで画面が再生位置へ引き戻される。
+    func test_rawCenteredTime_goesOutsideTimeline() {
+        let totalDuration = 30.0
+        let contentWidth = geometry.width(forDuration: totalDuration)
+        // 先頭を中央に置いた状態から更に左へ払うと負になる。
+        let atStart = TimelineScrollMath.centeredScrollOffset(time: 0, geometry: geometry,
+                                                             contentWidth: contentWidth,
+                                                             visibleWidth: 360)
+        XCTAssertEqual(TimelineScrollMath.rawCenteredTime(scrollOffset: atStart, geometry: geometry,
+                                                          visibleWidth: 360), 0, accuracy: 1e-12)
+        XCTAssertLessThan(TimelineScrollMath.rawCenteredTime(scrollOffset: atStart - 40,
+                                                             geometry: geometry, visibleWidth: 360), 0)
+        // 終端より後ろへ払うと尺を超える。
+        let atEnd = TimelineScrollMath.centeredScrollOffset(time: totalDuration, geometry: geometry,
+                                                           contentWidth: contentWidth,
+                                                           visibleWidth: 360)
+        XCTAssertGreaterThan(TimelineScrollMath.rawCenteredTime(scrollOffset: atEnd + 40,
+                                                                geometry: geometry, visibleWidth: 360),
+                             totalDuration)
+        // `centeredTime` はこれを 0...totalDuration へ丸めたもの。
+        for offset in [atStart - 40, atStart, 200.0, atEnd, atEnd + 40] {
+            let raw = TimelineScrollMath.rawCenteredTime(scrollOffset: offset, geometry: geometry,
+                                                         visibleWidth: 360)
+            let clamped = TimelineScrollMath.centeredTime(scrollOffset: offset, geometry: geometry,
+                                                          visibleWidth: 360,
+                                                          totalDuration: totalDuration)
+            XCTAssertEqual(clamped, min(max(raw, 0), totalDuration), accuracy: 1e-12)
+        }
+        XCTAssertEqual(TimelineScrollMath.rawCenteredTime(scrollOffset: .nan, geometry: geometry,
+                                                          visibleWidth: 360), 0)
+    }
+
     /// 余白つきの `UnitPoint.x`。**分母は余白を含む全幅**（`.id` を余白の外に付ける前提）。
     func test_anchorUnitPointX_accountsForLeadingInset() {
         // 中央固定（inset = visibleWidth / 2）では分母がちょうど contentWidth になる。
