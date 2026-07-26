@@ -71,6 +71,9 @@ final class SampleFalsePositiveTests: XCTestCase {
         var tallCount = 0
         var largeCount = 0
         var multiCount = 0
+        /// 「検出あり → 1 フレームだけ抜け → 検出あり」で挟まれた孤立した抜けの数。
+        /// モザイクが一瞬外れて見える現象の直接指標（平均検出率では検出できない）。
+        var isolatedGaps = 0
 
         var detectionRate: Double { Double(framesWithDetection) / Double(max(1, totalFrames)) }
         var tallRate: Double { Double(tallCount) / Double(max(1, totalDetections)) }
@@ -101,6 +104,7 @@ final class SampleFalsePositiveTests: XCTestCase {
         let endTime = min(duration, maxSeconds)
 
         var stats = ScanStats()
+        var detected: [Bool] = []
 
         var t = 0.0
         while t <= endTime {
@@ -119,6 +123,7 @@ final class SampleFalsePositiveTests: XCTestCase {
                     ? scanner.allLandmarks(in: img)
                     : scanner.allLandmarks(in: img, timestampMs: Int(t * 1000))
                 if !faces.isEmpty { stats.framesWithDetection += 1 }
+                detected.append(!faces.isEmpty)
                 if faces.count > 1 { stats.multiCount += 1 }
                 stats.totalDetections += faces.count
                 for face in faces {
@@ -141,13 +146,17 @@ final class SampleFalsePositiveTests: XCTestCase {
             t += interval
         }
 
+        stats.isolatedGaps = detected.count < 3 ? 0 : (1..<(detected.count - 1)).filter {
+            !detected[$0] && detected[$0 - 1] && detected[$0 + 1]
+        }.count
+
         let summary = String(
             format: "[%@] file=%@ backend=%@ frames=%d hits=%d rate=%.2f "
-                    + "detections=%d tall=%d(%.2f) large=%d(%.2f) multi=%d",
+                    + "detections=%d tall=%d(%.2f) large=%d(%.2f) multi=%d gaps=%d",
             label, url.lastPathComponent, "\(settings.faceDetectorBackend)",
             stats.totalFrames, stats.framesWithDetection, stats.detectionRate,
             stats.totalDetections, stats.tallCount, stats.tallRate,
-            stats.largeCount, stats.largeRate, stats.multiCount
+            stats.largeCount, stats.largeRate, stats.multiCount, stats.isolatedGaps
         )
         fputs(summary + "\n", stderr)
         return stats

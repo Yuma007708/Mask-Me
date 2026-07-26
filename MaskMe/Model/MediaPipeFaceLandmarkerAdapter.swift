@@ -317,6 +317,7 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
     // swiftlint:disable:next cyclomatic_complexity
     public func allLandmarks(in image: UIImage, timestampMs: Int) -> [FaceLandmarkSet] {
         resetTracksIfNeeded(timestampMs: timestampMs)
+        ageVerifiedMemory()
         var result: [FaceLandmarkSet]
         var source: FaceDetectionSource
         #if DEBUG
@@ -417,8 +418,12 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
     /// （不採用の経緯は `MARK: - 検討して不採用にした「棄却の記憶」` を参照）。
     /// 顔の検出率側は `VideoDetectionTests` / `DetectionAccuracyTests` /
     /// `RealFaceMosaicTests` / `LiveScenarioTests` で退行なしを確認済み。
+    ///
+    /// ただし平均検出率が落ちなくても、実顔は動きブレ・角度・まばたきで**単発の検証失敗**を
+    /// 起こし、その 1〜2 フレームだけモザイクが外れて見える（実機で確認）。そのため
+    /// 検証通過の記憶（`verifiedMemory`）で単発失敗に猶予を与える。
     private func verifyAndPruneTracks(_ result: [FaceLandmarkSet], in image: UIImage) -> [FaceLandmarkSet] {
-        let verified = verifySuspiciousFaces(result, in: image, verifyAll: true)
+        let verified = verifySuspiciousFaces(result, in: image, verifyAll: true, temporalGrace: true)
         guard verified.count != result.count else { return result }
         let droppedBoxes = result.map(\.boundingBox).filter { box in
             !verified.contains { $0.boundingBox == box }
@@ -505,6 +510,7 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
     public func resetLiveTracking() {
         trackedFaces.removeAll()
         flowStates = []
+        verifiedMemory.removeAll()
         consecutiveFlowFrames = 0
         lastLiveSeconds = nil
         lastRealLiveDetectionSeconds = nil
@@ -526,6 +532,7 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
     // swiftlint:disable:next cyclomatic_complexity
     public func liveLandmarks(in image: UIImage, atMediaSeconds t: Double) -> LiveDetectionResult {
         resetLiveTracksIfNeeded(mediaSeconds: t)
+        ageVerifiedMemory()
         var result: [FaceLandmarkSet]
         var source: FaceDetectionSource
         #if DEBUG
@@ -699,19 +706,27 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
     ///   タップなしで即モザイクが確定する＝誤検出が最も高くつく経路なので、位置・形状で
     ///   絞らず全部確認する。動画・ライブは毎フレーム全候補を crop 再検出すると
     ///   実時間性が壊れるので従来どおり疑わしい候補のみ。
+    /// - Parameter temporalGrace: `true` なら「直近で検証を通った場所」の単発の検証失敗を
+    ///   数フレームだけ見逃す（`verifiedMemoryFrames`）。動画・ライブ経路で使う。
+    ///   静止画は 1 枚ずつ独立に扱うので `false`。
     private func verifySuspiciousFaces(_ faces: [FaceLandmarkSet],
                                        in image: UIImage,
-                                       verifyAll: Bool = false) -> [FaceLandmarkSet] {
+                                       verifyAll: Bool = false,
+                                       temporalGrace: Bool = false) -> [FaceLandmarkSet] {
         guard let cropLandmarker = landmarkerForCrop else { return faces }
         return faces.filter { face in
             let box = face.boundingBox
             guard verifyAll
                     || face.isSuspectBodyRegion(in: image.size, suspectMidY: verifySuspectCy)
             else { return true }
+            // 検証に落ちたときの共通後処理。直近で検証を通った顔なら猶予で残す。
+            func reject() -> Bool {
+                temporalGrace && isRecentlyVerified(box)
+            }
             guard face.isPlausibleFace(minSpan: plausibilityMinSpan,
                                        eyeRatioRange: 0.45...1.0,
                                        imageSize: image.size) else {
-                return false
+                return reject()
             }
             let roi = expandedClamped(box, factor: verifyCropExpansion)
             guard roi.width > 0, roi.height > 0,
@@ -719,7 +734,7 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
                   let mpImage = try? MPImage(uiImage: upscaledIfSmall(cropped)),
                   let result = try? cropLandmarker.detect(image: mpImage),
                   let first = result.faceLandmarks.first else {
-                return false
+                return reject()
             }
             let points = first.map { FaceLandmark(x: $0.x, y: $0.y, z: $0.z) }
             let meshFraction = Float(min(1.0, Double(points.count) / Double(FaceLandmarkSet.fullMeshCount)))
@@ -736,9 +751,63 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
                   vetted.confidence >= verifyMinConfidence,
                   !vetted.isBodyLikeShape(in: image.size),
                   iou(vetted.boundingBox, box) > 0.3 else {
-                return false
+                return reject()
             }
+            if temporalGrace { rememberVerified(box) }
             return true
+        }
+    }
+
+    // MARK: - 検証通過の記憶（実顔のモザイクちらつき止め）
+
+    /// 直近フレームで crop 再検証を**通った** bbox の記憶。
+    ///
+    /// 全候補を毎フレーム再検証するようにした結果（`verifyAndPruneTracks` の doc）、
+    /// 実顔でも動きブレ・角度・まばたきで単発の検証失敗が起き、その 1〜2 フレームだけ
+    /// モザイクが外れて見える（実機で確認）。検証は「その瞬間に crop からもう一度顔を
+    /// 起こせたか」を見ているだけで、外れたフレームに顔が無いわけではない。
+    ///
+    /// そこで直近で検証を通った場所は、単発の失敗を `verifiedMemoryFrames` だけ見逃す。
+    /// **この記憶は顔を増やす方向にしか働かない**ので、検出率（顔の見逃し）を悪化させる
+    /// ことは原理的にない。逆向きの「棄却の記憶」（下の不採用記録）とは非対称。
+    ///
+    /// **猶予は「連続 `minPassStreakForGrace` フレーム検証を通った」場所にだけ与える。**
+    /// 体誤フィットも数十フレームに 1 度はまぐれで検証を通るので、通過 1 回で猶予を
+    /// 与えると胴体クリップの誤検出が 29% → 42% に戻る（実測。猶予の長さを 1 フレームに
+    /// 縮めても変わらない＝増分はまぐれ通過の直後に集中している）。まぐれ通過は単発で、
+    /// 実顔はほぼ毎フレーム通るので、通過の連続数が両者を分ける唯一の実測可能な非対称。
+    private struct VerifiedBox {
+        let box: CGRect
+        let framesLeft: Int
+        let passStreak: Int
+    }
+    private var verifiedMemory: [VerifiedBox] = []
+    /// 猶予の長さ。`ageVerifiedMemory` が毎フレーム 1 減らし 1 以下で捨てるので、
+    /// 2 は「通過の次の 1 フレームだけ見逃す」= 実測されたちらつき（1 フレーム抜け）を
+    /// 埋める最小値。
+    private let verifiedMemoryFrames = 2
+    /// 猶予を与えるのに要求する連続通過フレーム数。
+    private let minPassStreakForGrace = 2
+    private let verifiedMemoryIoU: CGFloat = 0.3
+
+    private func ageVerifiedMemory() {
+        verifiedMemory = verifiedMemory.compactMap {
+            $0.framesLeft <= 1
+                ? nil
+                : VerifiedBox(box: $0.box, framesLeft: $0.framesLeft - 1, passStreak: $0.passStreak)
+        }
+    }
+
+    private func rememberVerified(_ box: CGRect) {
+        let streak = (verifiedMemory.first { iou($0.box, box) > verifiedMemoryIoU }?.passStreak ?? 0) + 1
+        verifiedMemory.removeAll { iou($0.box, box) > verifiedMemoryIoU }
+        verifiedMemory.append(
+            VerifiedBox(box: box, framesLeft: verifiedMemoryFrames, passStreak: streak))
+    }
+
+    private func isRecentlyVerified(_ box: CGRect) -> Bool {
+        verifiedMemory.contains {
+            iou($0.box, box) > verifiedMemoryIoU && $0.passStreak >= minPassStreakForGrace
         }
     }
 
@@ -766,6 +835,7 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
             trackedFaces.removeAll()
             flowStates = []
             consecutiveFlowFrames = 0
+            verifiedMemory.removeAll()
         }
         lastVideoTimestampMs = timestampMs
     }
