@@ -131,6 +131,13 @@ struct TimelineScrollContainer<Content: View>: View {
     /// ピンチ倍率。**`@GestureState` なのでキャンセルで必ず 1 に戻る**
     /// （`onEnded` だけに頼ると中断時に基準 px/秒 が取り残されて次のピンチが飛ぶ）。
     @GestureState private var pinch: CGFloat = 1
+    /// 指がタイムラインを払っている最中か。
+    ///
+    /// **これが無いと再生中のスワイプが効かない。** 再生中は再生位置の更新ごとに
+    /// 中央へ引き戻しているため、指が動かしたぶんが毎フレーム打ち消されて
+    /// 「指の操作」と判定できる差が永久に溜まらない。触っている間は引き戻しを止める。
+    /// `@GestureState` なのでキャンセル・中断でも必ず false へ戻る。
+    @GestureState private var isTouchDragging = false
     /// 並べ替え中の自動スクロールのループ。
     @State private var autoScrollTask: Task<Void, Never>?
     /// ユーザー由来のスクロールが続いているか（サムネイル抑止の通知用）。
@@ -158,12 +165,16 @@ struct TimelineScrollContainer<Content: View>: View {
                     // **`.gesture` ではなく `.simultaneousGesture`**。`.gesture` だと
                     // UIScrollView の pan と排他になり得て横スクロールが死ぬ。
                     .simultaneousGesture(pinchGesture)
+                    .simultaneousGesture(touchTracker)
                     .onPreferenceChange(TimelineScrollOffsetKey.self) {
                         update(scrollOffset: Double($0), visibleWidth: Double(outer.size.width),
                                proxy: proxy)
                     }
                     .onChange(of: geometry) { applyZoom($0, proxy: proxy) }
                     .onChange(of: playheadTime) { recenter(on: $0, proxy: proxy) }
+                    // 指が離れた時点で中央を再点検する。触っている間は引き戻しを止めて
+                    // いるので、その最中に起きた再生位置・全幅の変化はここで回収する。
+                    .onChange(of: isTouchDragging) { if !$0 { recenter(on: playheadTime, proxy: proxy) } }
                     // クリップ編集で全幅が変わると時刻→x が変わる。線は中央に固定なので
                     // ここで寄せ直さないと「線の位置と再生位置」がずれたままになる。
                     .onChange(of: contentWidth) { _ in recenter(on: playheadTime, proxy: proxy) }
@@ -191,6 +202,11 @@ struct TimelineScrollContainer<Content: View>: View {
                 // 着地点が余白ぶんずれる（= プレイヘッドが中央から外れる）。
                 .id(Self.contentID)
         }
+        // **並べ替えが始まったら横スクロールを止める。** クリップ帯の並べ替えは
+        // 同時認識（`TimelineClipBandView.reorderArea`）なので、止めないと指の移動が
+        // pan にも吸われ、`translationSeconds` の補正で打ち消されてクリップが動かない。
+        // 画面端での自動スクロールは `stepAutoScroll` がプログラムから動かす。
+        .scrollDisabled(autoScroll.isDragging)
     }
 
     /// コンテンツ左右の余白。プレイヘッドを中央に固定するため可視幅の半分を取る。
@@ -206,6 +222,16 @@ struct TimelineScrollContainer<Content: View>: View {
             Color.clear.preference(key: TimelineScrollOffsetKey.self,
                                    value: -proxy.frame(in: .named(Self.scrollSpace)).minX)
         }
+    }
+
+    /// 指の接触を知るだけのドラッグ（値は使わない）。
+    ///
+    /// **8pt 動いてから成立させる**ことで、タップ（クリップ選択・選択解除）や
+    /// 長押し（並べ替え）と競合しない。`.simultaneousGesture` で付けるので
+    /// 横スクロール自体を奪うこともない。
+    private var touchTracker: some Gesture {
+        DragGesture(minimumDistance: 8)
+            .updating($isTouchDragging) { _, state, _ in state = true }
     }
 
     /// ピンチズーム。iOS 16 には位置つきの `MagnifyGesture` が無いので倍率だけを受け、
@@ -267,11 +293,14 @@ struct TimelineScrollContainer<Content: View>: View {
                                                      visibleWidth: visibleWidth,
                                                      totalDuration: totalDuration)
         let deviation = abs(center - playheadTime)
-        if isPlaying {
-            // 再生中は追従アニメーションのぶん常に少し遅れている。指の操作と区別できる
-            // 大きさを超えたときだけシークする（呼び出し側が再生を止める）。
+        if isPlaying, !isTouchDragging {
+            // 指が触れていない再生中は、追従アニメーションのぶん常に少し遅れている。
+            // 指の操作と区別できる大きさを超えたときだけシークする（保険。
+            // 通常は下の `isTouchDragging` 側で拾う）。
             guard deviation > Self.playingSeekThresholdSeconds else { return }
         } else {
+            // 指が触れているなら、ずれはすべて指が作ったもの。再生中でも即座に
+            // シークへ倒す（呼び出し側が再生を止める）。
             guard deviation > geometry.duration(forWidth: Self.seekDeadZonePixels) else { return }
         }
         markUserScrolling(proxy: proxy)
@@ -330,9 +359,10 @@ struct TimelineScrollContainer<Content: View>: View {
     private func recenter(on time: Double, proxy: ScrollViewProxy,
                           visibleWidth: Double, currentOffset: Double) {
         // 指と慣性が動いている間はプログラムから動かさない（`scrollTo` を撃つと
-        // ドラッグ中の UIScrollView と押し合って引っかかる）。落ち着いた時点で
-        // `markUserScrolling` の再点検が最終状態を保証する。
-        guard visibleWidth > 0, !isUserScrolling else { return }
+        // ドラッグ中の UIScrollView と押し合って引っかかる。**再生中のスワイプが
+        // 効かなかった原因はこれ**）。落ち着いた時点で `markUserScrolling` の再点検、
+        // 指が離れた時点で `onChange(of: isTouchDragging)` が最終状態を保証する。
+        guard visibleWidth > 0, !isUserScrolling, !isTouchDragging else { return }
         let width = Double(contentWidth)
         let target = TimelineScrollMath.centeredScrollOffset(time: time, geometry: geometry,
                                                             contentWidth: width,

@@ -353,13 +353,18 @@ struct TimelineClipBandView: View {
         return Color.clear
             .frame(width: max(CGFloat(width) - inset, 1), height: TimelineMetrics.clipHeight)
             .contentShape(Rectangle())
-            .gesture(reorderGesture(layout))
+            // **`.gesture` ではなく `.simultaneousGesture`**。`.gesture` だと長押しの判定中
+            // （素のドラッグの段階）に ScrollView の pan を奪ってしまい、クリップの上を
+            // 払っても横スクロールしない = 中央固定のシークが効かない。
+            // 同時認識にすれば pan はそのまま生き、長押しが成立したときだけ並べ替えが乗る。
+            .simultaneousGesture(reorderGesture(layout))
             // 親（クリップ本体）のタップ到達性に依存せず選択できるようにする。
             .simultaneousGesture(TapGesture().onEnded { selectedClipID = layout.clipID })
     }
 
     /// 長押し（0.3 秒）してからのドラッグだけを並べ替えとして扱う。
-    /// 素のドラッグは ScrollView の横スクロールに残す。
+    /// 素のドラッグは ScrollView の横スクロールに残す（付け方は `reorderArea` を参照。
+    /// **同時認識にしないと素のドラッグの段階で pan を奪う**）。
     ///
     /// ドラッグ量はスクロールビューの座標系（`TimelineCoordinateSpace.scroll`）で受ける。
     /// `translation` は**指の移動量**なので、自動スクロールで動いたぶんを
