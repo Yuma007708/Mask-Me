@@ -38,9 +38,13 @@ struct TimelineClipBandView: View {
     let onCommit: (TimelineInteraction) -> Void
 
     @GestureState private var trimDraft: TrimDraft?
-    @GestureState private var reorderDraft: ReorderDraft?
-    /// 長押しが成立しているか（並べ替えの開始振動用）。
-    @GestureState private var isReorderPressing = false
+    /// 長押し並べ替えの下書き。
+    ///
+    /// **`@GestureState` ではなく `@State`。** 入力が SwiftUI のジェスチャではなく
+    /// UIKit の recognizer（`TimelineReorderRecognizer`）なので自動リセットに乗せられない。
+    /// 代わりに recognizer が終端 3 状態（終了・中断・失敗）を必ず 1 回通知するので、
+    /// `finishReorder` で確実に片付く。
+    @State private var reorderDraft: ReorderDraft?
     /// 吸着ハプティクスの前回値保持。**参照型を `@State` に入れる**
     /// （`TimelineSnapHaptics` の doc 参照）。
     @State private var haptics = TimelineSnapHaptics()
@@ -50,6 +54,11 @@ struct TimelineClipBandView: View {
     /// 走るとコンテンツと指の相対関係が崩れる。確定・プレビューには
     /// 「指の移動量 + （現在のスクロール量 − 開始時のスクロール量）」を使う。
     @State private var reorderStartScrollOffset: Double?
+
+    /// 長押しで並べ替えに入るまでの時間（秒）。
+    private static let reorderPressDuration: TimeInterval = 0.3
+    /// 長押し成立と見なす指のブレ幅（px）。**これより先に動いたら横スクロール（= シーク）**。
+    private static let reorderAllowableMovement: CGFloat = 10
 
     var body: some View {
         ZStack(alignment: .topLeading) {
@@ -63,6 +72,14 @@ struct TimelineClipBandView: View {
                 clipView(layout)
             }
             insertionIndicator
+            // 長押し並べ替えの入力。**帯全体に 1 個だけ**置く（`hitTest` 素通しなので
+            // 下のタップ・横スクロールを吸わない。`TimelineReorderRecognizer` の doc）。
+            TimelineReorderRecognizer(
+                minimumPressDuration: Self.reorderPressDuration,
+                allowableMovement: Self.reorderAllowableMovement,
+                onBegin: beginReorder,
+                onChange: updateReorder,
+                onFinish: finishReorder)
         }
         .frame(height: TimelineMetrics.clipHeight, alignment: .topLeading)
         // ジェスチャのキャンセル（横スクロールへの奪取など）でも必ず後始末する。
@@ -71,11 +88,6 @@ struct TimelineClipBandView: View {
             guard draft == nil else { return }
             reorderStartScrollOffset = nil
             autoScroll.endDrag()
-        }
-        // 長押し成立（並べ替え開始）で 1 回だけ振動させる。`@GestureState` 由来なので
-        // 中断でも false へ戻り、次の長押しでまた鳴る。
-        .onChange(of: isReorderPressing) { active in
-            if active { haptics.longPressImpact() } else { haptics.end() }
         }
         // トリム下書き（表示専用の派生値）を適用区間トラックへ中継する。
         //
@@ -119,11 +131,6 @@ struct TimelineClipBandView: View {
         )
         .overlay(alignment: .leading) { if isSelected { trimHandle(.start, layout) } }
         .overlay(alignment: .trailing) { if isSelected { trimHandle(.end, layout) } }
-        // 並べ替えの判定領域は**トリムハンドルを除いた中央**に限る。
-        // 親クリップ全体に長押しシークエンスを付けると、静止した長押しでは
-        // ハンドル側（`DragGesture(minimumDistance: 1)`）が認識対象にならず、
-        // ハンドルの真上でも並べ替えが成立し得る。
-        .overlay(alignment: .center) { reorderArea(layout, width: width) }
         .opacity(isReordering ? 0.75 : 1)
         .offset(x: geometry.x(forTime: band.start)
                 + geometry.x(forTime: reorderTranslation(layout) ?? 0))
@@ -337,77 +344,66 @@ struct TimelineClipBandView: View {
         return draft.translationSeconds
     }
 
-    /// 並べ替えジェスチャの判定領域（トリムハンドルぶんを左右から除く）。
+    // MARK: - 長押し並べ替え（UIKit recognizer 由来）
+
+    /// 長押し成立。掴んだクリップを決めて下書きを立てる。
     ///
-    /// **inset を選択状態に依存させない。** `reorderGesture.onChanged` が
-    /// `selectedClipID` を書くと同じ body 評価で `isSelected` が true になり、
-    /// 「ジェスチャ進行中に、そのジェスチャが乗っているビューの frame が縮む」という
-    /// 構造的に不安定な形になっていた（指がハンドル領域に入るとジェスチャが途切れ得る）。
-    /// 非選択時に両端 `reorderInset` が並べ替え領域から外れる副作用は、そこがトリム
-    /// ハンドルの位置であり、タップでの選択は下の `simultaneousGesture` が拾うので実害がない。
-    ///
-    /// **inset は `handleWidth` ではなく専用の `reorderInset` から引く。** ハンドルを
-    /// 太らせたときに一緒に育つと、短いクリップで並べ替え領域が消える（`reorderInset` の doc）。
-    private func reorderArea(_ layout: TimelineClipLayout, width: Double) -> some View {
-        let inset = TimelineMetrics.reorderInset * 2
-        return Color.clear
-            .frame(width: max(CGFloat(width) - inset, 1), height: TimelineMetrics.clipHeight)
-            .contentShape(Rectangle())
-            // **`.gesture` ではなく `.simultaneousGesture`**。`.gesture` だと長押しの判定中
-            // （素のドラッグの段階）に ScrollView の pan を奪ってしまい、クリップの上を
-            // 払っても横スクロールしない = 中央固定のシークが効かない。
-            // 同時認識にすれば pan はそのまま生き、長押しが成立したときだけ並べ替えが乗る。
-            .simultaneousGesture(reorderGesture(layout))
-            // 親（クリップ本体）のタップ到達性に依存せず選択できるようにする。
-            .simultaneousGesture(TapGesture().onEnded { selectedClipID = layout.clipID })
+    /// 対象を x から引くのは、recognizer を**帯全体に 1 個**にしたため
+    /// （クリップごとに当て板を置くと、短いクリップで領域が消える・進行中に frame が
+    /// 変わるといった旧実装の不安定さがそのまま残る）。
+    private func beginReorder(at location: CGPoint) {
+        guard let layout = reorderTarget(atContentX: Double(location.x)) else { return }
+        reorderStartScrollOffset = autoScroll.scrollOffset
+        reorderDraft = ReorderDraft(clipID: layout.clipID, translationSeconds: 0)
+        if selectedClipID != layout.clipID { selectedClipID = layout.clipID }
+        haptics.longPressImpact()
+        autoScroll.updateDrag(fingerX: Double(location.x) - autoScroll.scrollOffset)
     }
 
-    /// 長押し（0.3 秒）してからのドラッグだけを並べ替えとして扱う。
-    /// 素のドラッグは ScrollView の横スクロールに残す（付け方は `reorderArea` を参照。
-    /// **同時認識にしないと素のドラッグの段階で pan を奪う**）。
-    ///
-    /// ドラッグ量はスクロールビューの座標系（`TimelineCoordinateSpace.scroll`）で受ける。
-    /// `translation` は**指の移動量**なので、自動スクロールで動いたぶんを
-    /// `reorderStartScrollOffset` との差分で足し戻す。
-    private func reorderGesture(_ layout: TimelineClipLayout) -> some Gesture {
-        LongPressGesture(minimumDuration: 0.3)
-            .sequenced(before: DragGesture(minimumDistance: 0,
-                                           coordinateSpace: .named(TimelineCoordinateSpace.scroll)))
-            .updating($reorderDraft) { value, draft, _ in
-                guard case let .second(true, drag) = value else { return }
-                let snapped = snappedReorder(layout, drag)
-                haptics.report(snappedTo: snapped.snappedTo)
-                draft = ReorderDraft(clipID: layout.clipID,
-                                     translationSeconds: snapped.translation)
-            }
-            .updating($isReorderPressing) { value, pressing, _ in
-                switch value {
-                case .first(true), .second: pressing = true
-                default: break
-                }
-            }
-            .onChanged { value in
-                guard case let .second(true, drag) = value else { return }
-                if reorderStartScrollOffset == nil { reorderStartScrollOffset = autoScroll.scrollOffset }
-                // ドラッグ中に 60Hz で @State を書かないよう、未選択のときだけ書く。
-                if selectedClipID != layout.clipID { selectedClipID = layout.clipID }
-                guard let drag else { return }
-                autoScroll.updateDrag(fingerX: Double(drag.location.x))
-            }
-            .onEnded { value in
-                autoScroll.endDrag()
-                defer { reorderStartScrollOffset = nil }
-                guard case let .second(true, drag) = value, let drag else { return }
-                onCommit(.reorder(clipID: layout.clipID,
-                                  translationSeconds: snappedReorder(layout, drag).translation))
-            }
+    /// 成立後の移動。吸着を掛けた差分を下書きへ、指の x を自動スクロールへ渡す。
+    private func updateReorder(translation: CGSize, location: CGPoint) {
+        guard let draft = reorderDraft,
+              let layout = layouts.first(where: { $0.id == draft.clipID }) else { return }
+        let snapped = snappedReorder(layout, translationPixels: Double(translation.width))
+        haptics.report(snappedTo: snapped.snappedTo)
+        reorderDraft = ReorderDraft(clipID: layout.clipID, translationSeconds: snapped.translation)
+        // 自動スクロールの入力は**可視領域左端からの x**。帯の x はトラック内 x なので
+        // スクロール量を引く（`TimelineAutoScrollState.fingerX` の契約）。
+        autoScroll.updateDrag(fingerX: Double(location.x) - autoScroll.scrollOffset)
+    }
+
+    /// 終了・中断のどちらでも必ず片付ける（中断で下書きが残ると自動スクロールが走り続ける）。
+    private func finishReorder(translation: CGSize, committed: Bool) {
+        let draft = reorderDraft
+        reorderDraft = nil
+        autoScroll.endDrag()
+        haptics.end()
+        defer { reorderStartScrollOffset = nil }
+        guard committed, let draft,
+              let layout = layouts.first(where: { $0.id == draft.clipID }) else { return }
+        onCommit(.reorder(clipID: layout.clipID,
+                          translationSeconds: snappedReorder(
+                            layout, translationPixels: Double(translation.width)).translation))
+    }
+
+    /// 長押しが乗ったクリップ。**両端 `reorderInset` は対象から外す**
+    /// （選択時にトリムハンドルが載る場所。ここで並べ替えが成立すると、ハンドルの
+    /// 真上を掴んだつもりで並べ替えが始まる）。
+    private func reorderTarget(atContentX x: Double) -> TimelineClipLayout? {
+        let time = geometry.time(forX: x)
+        guard let layout = layouts.first(where: { time >= $0.bandStart && time < $0.bandEnd }) else {
+            return nil
+        }
+        let inset = geometry.duration(forWidth: Double(TimelineMetrics.reorderInset))
+        let band = displayBand(layout)
+        guard time >= band.start + inset, time < band.end - inset else { return nil }
+        return layout
     }
 
     /// 指の移動量（px）を、自動スクロールぶんを足し戻して合成時刻の差分にする。
-    private func translationSeconds(_ drag: DragGesture.Value?) -> Double {
-        guard let drag else { return 0 }
+    private func translationSeconds(_ pixels: Double) -> Double {
         let scrolled = autoScroll.scrollOffset - (reorderStartScrollOffset ?? autoScroll.scrollOffset)
-        return geometry.time(forX: Double(drag.translation.width) + scrolled)
+        return geometry.time(forX: pixels + scrolled)
     }
 
     // MARK: - 挿入位置インジケータ
@@ -456,8 +452,8 @@ private extension TimelineClipBandView {
     /// 並べ替えの移動量に吸着を掛ける（掴んだ帯の**左端**が候補に吸い付く）。
     /// 表示（ゴースト帯・挿入インジケータ）と確定は**同じ吸着後の値**を使う。
     func snappedReorder(_ layout: TimelineClipLayout,
-                        _ drag: DragGesture.Value?) -> (translation: Double, snappedTo: Double?) {
-        let snapped = snappedDelta(anchor: layout.bandStart, raw: translationSeconds(drag),
+                        translationPixels: Double) -> (translation: Double, snappedTo: Double?) {
+        let snapped = snappedDelta(anchor: layout.bandStart, raw: translationSeconds(translationPixels),
                                    layout: layout, neighbourIndex: layout.index - 1)
         return (snapped.delta, snapped.snappedTo)
     }

@@ -27,6 +27,12 @@ enum TimelineCoordinateSpace {
 final class TimelineAutoScrollState: ObservableObject {
     /// 並べ替えドラッグ中か。自動スクロールのループはこれだけを見て起動・停止する。
     @Published private(set) var isDragging = false
+    /// シークさせない段（継ぎ目レーン・適用区間トラック）を指が押さえているか。
+    ///
+    /// 段は同時に複数触られ得るので**数える**（片方の指が離れた瞬間に
+    /// もう片方ぶんまで下ろさないため）。
+    @Published private(set) var isBlockedRowTouch = false
+    private var blockedRowTouches = 0
     /// 可視領域左端からの指の x（px）。
     private(set) var fingerX: Double = 0
     /// 現在の横スクロール量（トラック内 x, px）。容器が毎フレーム書き込む。
@@ -39,6 +45,16 @@ final class TimelineAutoScrollState: ObservableObject {
 
     func endDrag() {
         if isDragging { isDragging = false }
+    }
+
+    func beginBlockedRowTouch() {
+        blockedRowTouches += 1
+        if !isBlockedRowTouch { isBlockedRowTouch = true }
+    }
+
+    func endBlockedRowTouch() {
+        blockedRowTouches = max(0, blockedRowTouches - 1)
+        if blockedRowTouches == 0, isBlockedRowTouch { isBlockedRowTouch = false }
     }
 }
 
@@ -58,37 +74,34 @@ enum TimelineAutoScrollTuning {
 
 /// 横スクロール量（トラック内 x = 合成時刻 0 が原点）の伝達。
 ///
-/// 計測子はコンテンツの `.padding(.horizontal, 16)` の**内側**に置くこと
+/// 計測子はコンテンツの左右余白の**内側**に置くこと
 /// （`TimelineViewport` の座標系契約。外側に置くと余白ぶん恒常的にずれる）。
-/// 値は複数の計測子を想定しないので、最後に流れてきた 1 個をそのまま採る。
+///
+/// **値は `Optional` でなければならない。** 非 Optional（既定値 0・`value = nextValue()`）
+/// にすると、計測子を持たない兄弟サブツリー（トラックの中身）が流す**既定値 0 で
+/// 上書きされ、スクロール量が常に 0 になる**。実測ではこの状態で
+/// 「払っても再生位置が動かない・サムネイルが横スクロールで積み直されない」が起きていた
+/// （UI テスト `TimelineGestureUITests` で検出。中身を無地に差し替えると再現しなくなる
+/// ことから、上書き元が中身であると特定した）。
+/// nil を無視して非 nil だけ採れば、計測子 1 個の値がそのまま上がる。
 struct TimelineScrollOffsetKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
+    static var defaultValue: CGFloat?
 
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-        value = nextValue()
+    static func reduce(value: inout CGFloat?, nextValue: () -> CGFloat?) {
+        if let next = nextValue() { value = next }
     }
 }
 
-/// 横スクロール（= 中央固定タイムラインではシーク）を**この範囲では起こさせない**当て板。
+/// シークの操作面を**目盛り帯とクリップ帯だけ**に絞るための当て板
+/// （継ぎ目レーンと適用区間トラックの上を払っても再生位置は動かない）。
 ///
-/// シークの操作面は**目盛り帯とクリップ帯だけ**にする（継ぎ目レーンと適用区間トラックの
-/// 上を払っても再生位置は動かない）。SwiftUI では子に `.gesture` で付けたドラッグが
-/// 囲みの `ScrollView` の pan より先に成立して pan を起こさなくする。これは
-/// 「クリップ帯の並べ替えが `.gesture` だったせいで、クリップの上を払っても横スクロール
-/// しなかった」実測済みの事故と同じ仕組みで、ここでは**意図して**使う。
-///
-/// `minimumDistance: 1` にしてタップ（区間・継ぎ目の選択）は下へ通す。子に付いた
-/// ドラッグ（適用区間の端ハンドル）は内側が優先されるのでそのまま効く。
-struct TimelinePanBlockerModifier: ViewModifier {
-    func body(content: Content) -> some View {
-        content.gesture(DragGesture(minimumDistance: 1).onChanged { _ in })
-    }
-}
-
+/// 判定は UIKit 側（`TimelinePanBlocker`）。SwiftUI の `.gesture` で pan を止める方式は
+/// 段の中身がヒットテストを取らないと届かず、コンテンツ全面に敷くと今度は目盛り帯まで
+/// 塞ぐ（どちらも実測。`TimelinePanBlocker` の doc 参照）。
 extension View {
-    /// この範囲の横ドラッグでタイムラインをスクロール（= シーク）させない。
-    func blocksTimelinePan() -> some View {
-        modifier(TimelinePanBlockerModifier())
+    /// この段の上で始まったドラッグではタイムラインをスクロール（= シーク）させない。
+    func blocksTimelinePan(_ autoScroll: TimelineAutoScrollState) -> some View {
+        background(TimelinePanBlocker(autoScroll: autoScroll))
     }
 }
 
@@ -189,8 +202,9 @@ struct TimelineScrollContainer<Content: View>: View {
                     // UIScrollView の pan と排他になり得て横スクロールが死ぬ。
                     .simultaneousGesture(pinchGesture)
                     .simultaneousGesture(touchTracker)
-                    .onPreferenceChange(TimelineScrollOffsetKey.self) {
-                        update(scrollOffset: Double($0), visibleWidth: Double(outer.size.width),
+                    .onPreferenceChange(TimelineScrollOffsetKey.self) { offset in
+                        guard let offset else { return }
+                        update(scrollOffset: Double(offset), visibleWidth: Double(outer.size.width),
                                proxy: proxy)
                     }
                     .onChange(of: geometry) { applyZoom($0, proxy: proxy) }
@@ -220,25 +234,18 @@ struct TimelineScrollContainer<Content: View>: View {
                 // `TimelineViewport` の座標系契約）。`.background` はレイアウトを変えない。
                 .background(offsetProbe)
                 .padding(.horizontal, CGFloat(Self.leadingInset(visibleWidth: visibleWidth)))
-                // 左右の余白（先頭より前・終端より後の空白）とトラックの隙間も操作面から
-                // 外す。上に載っている目盛り帯・クリップ帯の方が先に当たるので、
-                // **払えるのはその 2 段だけ**になる。
-                .background(marginBlocker)
                 // **`.id` は余白の外側**。`anchorUnitPointX(leadingInset:)` は
                 // 「余白を含む全幅」を分母に分数を出すので、内側に付けると分母が食い違って
                 // 着地点が余白ぶんずれる（= プレイヘッドが中央から外れる）。
                 .id(Self.contentID)
         }
-        // **並べ替えが始まったら横スクロールを止める。** クリップ帯の並べ替えは
-        // 同時認識（`TimelineClipBandView.reorderArea`）なので、止めないと指の移動が
-        // pan にも吸われ、`translationSeconds` の補正で打ち消されてクリップが動かない。
-        // 画面端での自動スクロールは `stepAutoScroll` がプログラムから動かす。
-        .scrollDisabled(autoScroll.isDragging)
-    }
-
-    /// 余白と隙間の当て板（`blocksTimelinePan` の doc）。
-    private var marginBlocker: some View {
-        Color.clear.contentShape(Rectangle()).blocksTimelinePan()
+        // 横スクロールを止める 2 つの条件。
+        // 1. 並べ替え中（`autoScroll.isDragging`）: 止めないと指の移動が pan にも吸われ、
+        //    座標補正がそれを打ち消してクリップが動かない。画面端の自動スクロールは
+        //    `stepAutoScroll` がプログラムから動かす。
+        // 2. シークさせない段を押している（`isBlockedRowTouch`）: 押下の時点で立てるので
+        //    pan がそもそも始まらない（`TimelinePanBlocker`）。
+        .scrollDisabled(autoScroll.isDragging || autoScroll.isBlockedRowTouch)
     }
 
     /// コンテンツ左右の余白。プレイヘッドを中央に固定するため可視幅の半分を取る。

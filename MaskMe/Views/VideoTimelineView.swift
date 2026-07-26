@@ -213,25 +213,38 @@ struct VideoTimelineView: View {
     }
 
     /// スクロールする中身（目盛り・継ぎ目・クリップ帯・適用区間を同じ x 座標系で積む）。
+    ///
+    /// 各段に `accessibilityIdentifier` を付けてあるのは、UI テストが**段ごとに座標を
+    /// 出して払う**ため（`MaskMeUITests/TimelineGestureUITests`。どの段でスクロール＝
+    /// シークが起きるかがこの UI の契約なので、段を特定できないと検証できない）。
+    /// `children: .contain` にして中身の要素（クリップ・区間）は畳まない。
     private var trackStack: some View {
         VStack(alignment: .leading, spacing: TimelineMetrics.trackSpacing) {
             TimelineRulerTrackView(geometry: geometry, totalDuration: totalDuration,
                                    contentWidth: contentWidth)
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("timeline.ruler")
             // 継ぎ目レーンとクリップ帯は 1 段として積む（`TimelineMetrics.stackHeight` と対応）。
             VStack(alignment: .leading, spacing: 0) {
                 // シークの操作面は目盛り帯とクリップ帯だけ（`blocksTimelinePan` の doc）。
                 TimelineJointLaneView(geometry: geometry, joints: jointLayouts,
                                       contentWidth: contentWidth,
                                       onJointTap: { transitionSheetClipID = $0 })
-                    .blocksTimelinePan()
+                    .blocksTimelinePan(autoScroll)
+                    .accessibilityElement(children: .contain)
+                    .accessibilityIdentifier("timeline.jointLane")
                 clipBand
+                    .accessibilityElement(children: .contain)
+                    .accessibilityIdentifier("timeline.clipBand")
             }
             TimelineApplyTrackView(
                 geometry: geometry, spans: applySpans, totalDuration: totalDuration,
                 layouts: clipLayouts, playheadTime: playheadTime,
                 trimPreviewRelay: trimPreviewRelay,
                 selectedRangeID: rangeSelection, onCommit: commit)
-                .blocksTimelinePan()
+                .blocksTimelinePan(autoScroll)
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("timeline.applyTrack")
         }
     }
 

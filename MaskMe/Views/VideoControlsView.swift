@@ -42,6 +42,12 @@ struct VideoControlsView: View {
                 .font(.caption2.monospacedDigit())
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
+                .accessibilityIdentifier("editor.currentTime")
+                // UI テストが払った量を 0.001 秒単位で突き合わせるための値。
+                // 表示は秒単位なので、これが無いと小さなシークを検出できない
+                // （`MaskMeUITests/TimelineGestureUITests.swift`）。
+                .accessibilityValue(String(format: "%.3f",
+                                           model.playbackPosition * model.videoDuration))
 
             Spacer(minLength: 4)
 

@@ -61,6 +61,19 @@ struct HomeView: View {
                            settings: settingsStore.settings)
             }
         }
+        .onAppear { seedForUITestsIfNeeded() }
+    }
+
+    /// UI テスト起動時だけ、合成した動画で編集画面へ直行する（`UITestBootstrap` の doc）。
+    /// 通常起動では `isSeedingVideo` が false なので何もしない。
+    private func seedForUITestsIfNeeded() {
+        guard UITestBootstrap.isSeedingVideo, pickedMedia == nil else { return }
+        Task {
+            guard let url = await UITestBootstrap.seedVideoURL() else { return }
+            pickedMedia = .video(url)
+            resumeContext = nil
+            showEditor = true
+        }
     }
 
     /// 動画の「編集中」下書きをタップしたら、元動画＋保存パラメータで再開する。
