@@ -199,17 +199,30 @@ struct VideoTimelineView: View {
     private var tracks: some View {
         TimelineScrollContainer(
             geometry: $geometry, viewport: $viewport,
-            contentWidth: contentWidth, totalDuration: totalDuration,
+            contentWidth: contentWidth, stackHeight: stackHeight,
+            totalDuration: totalDuration,
             playheadTime: playheadTime, isPlaying: model.isPlaying,
             autoScroll: autoScroll,
             onRefreshNeeded: scheduleThumbnailRefresh,
             onSeek: seekFromScroll,
-            onScrubbingChanged: { thumbnails.setScrubbing($0) },
+            // スクラブ中はサムネイル生成を止め（デコーダの取り合い）、
+            // 再生位置の所有者をタイムライン側にする（描画経路の書き戻しを止める。
+            // `MosaicEditorModel.isTimelineScrubbing`）。
+            onScrubbingChanged: {
+                thumbnails.setScrubbing($0)
+                model.isTimelineScrubbing = $0
+            },
             content: { trackStack })
         // プレイヘッドは**スクロールしない層**に置き、可視領域の中央へ固定する
         // （`TimelinePlayheadView` の doc）。中身の側に置くと、シークとスクロールの
         // 1 フレームのずれがそのまま線の震えになる。
-        .overlay(alignment: .top) { TimelinePlayheadView() }
+        .overlay(alignment: .top) { TimelinePlayheadView(stackHeight: stackHeight) }
+    }
+
+    /// 積んだトラックの高さ。継ぎ目が無いときは継ぎ目レーンが畳まれるので
+    /// 目盛り帯とクリップ帯が隣り合う（`TimelineMetrics.jointLaneHeight(hasJoints:)`）。
+    private var stackHeight: CGFloat {
+        TimelineMetrics.stackHeight(hasJoints: !jointLayouts.isEmpty)
     }
 
     /// スクロールする中身（目盛り・継ぎ目・クリップ帯・適用区間を同じ x 座標系で積む）。
@@ -224,7 +237,8 @@ struct VideoTimelineView: View {
                                    contentWidth: contentWidth)
                 .accessibilityElement(children: .contain)
                 .accessibilityIdentifier("timeline.ruler")
-            // 継ぎ目レーンとクリップ帯は 1 段として積む（`TimelineMetrics.stackHeight` と対応）。
+            // 継ぎ目レーンとクリップ帯は 1 段として積む
+            // （`TimelineMetrics.stackHeight(hasJoints:)` と対応）。
             VStack(alignment: .leading, spacing: 0) {
                 // シークの操作面は目盛り帯とクリップ帯だけ（`blocksTimelinePan` の doc）。
                 TimelineJointLaneView(geometry: geometry, joints: jointLayouts,

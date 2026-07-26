@@ -2,6 +2,12 @@ import SwiftUI
 
 /// プレビュー上に重ねるジェスチャーオーバーレイ。
 /// ドラッグで矩形を描き、完了時に model.detectInRegion() を呼ぶ。
+///
+/// **ドラッグ面を張るのは矩形ツールが ON のときだけ**
+/// （`MosaicEditorModel.isRectangleToolActive`）。常時張っていた頃は、プレビューを
+/// 少しなぞっただけで矩形ができてしまい「間違えて指定して使いづらい」状態だった。
+/// 既存の矩形（と削除ボタン）は OFF でも出す: 何が掛かっているかは常に見えていないと
+/// 消す手段が無くなる。
 struct RectangleDrawingOverlay: View {
     @ObservedObject var model: MosaicEditorModel
     /// ドラッグ中の矩形（画面座標）
@@ -49,37 +55,62 @@ struct RectangleDrawingOverlay: View {
                         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
                 }
 
-                // ドラッグジェスチャー（透明レイヤー）
-                Color.clear
-                    .contentShape(Rectangle())
-                    .gesture(
-                        DragGesture(minimumDistance: 4)
-                            .onChanged { value in
-                                let origin = CGPoint(
-                                    x: min(value.startLocation.x, value.location.x),
-                                    y: min(value.startLocation.y, value.location.y)
-                                )
-                                let size = CGSize(
-                                    width: abs(value.location.x - value.startLocation.x),
-                                    height: abs(value.location.y - value.startLocation.y)
-                                )
-                                dragging = CGRect(origin: origin, size: size)
-                            }
-                            .onEnded { _ in
-                                guard let rect = dragging, rect.width > 10, rect.height > 10 else {
-                                    dragging = nil
-                                    return
-                                }
-                                dragging = nil
-                                let normalized = normalizedRect(from: rect, in: geo.size)
-                                isDetecting = true
-                                Task {
-                                    await model.detectInRegion(normalized)
-                                    isDetecting = false
-                                }
-                            }
-                    )
+                // ドラッグジェスチャー（透明レイヤー）。**ツール ON のときだけ張る。**
+                if model.isRectangleToolActive {
+                    drawingSurface(in: geo.size)
+                }
             }
+        }
+    }
+
+    /// 矩形を描く面（ツール ON のときだけ張る）。
+    private func drawingSurface(in size: CGSize) -> some View {
+        ZStack {
+            Color.clear
+                .contentShape(Rectangle())
+                .gesture(
+                    DragGesture(minimumDistance: 4)
+                        .onChanged { value in
+                            let origin = CGPoint(
+                                x: min(value.startLocation.x, value.location.x),
+                                y: min(value.startLocation.y, value.location.y)
+                            )
+                            let extent = CGSize(
+                                width: abs(value.location.x - value.startLocation.x),
+                                height: abs(value.location.y - value.startLocation.y)
+                            )
+                            dragging = CGRect(origin: origin, size: extent)
+                        }
+                        .onEnded { _ in
+                            guard let rect = dragging, rect.width > 10, rect.height > 10 else {
+                                dragging = nil
+                                return
+                            }
+                            dragging = nil
+                            let normalized = normalizedRect(from: rect, in: size)
+                            isDetecting = true
+                            Task {
+                                await model.detectInRegion(normalized)
+                                isDetecting = false
+                            }
+                        }
+                )
+            // ツール ON を画面上でも示す（枠と一言）。押し間違いの再発防止に、
+            // 「いま指定モードである」ことが指を置く前に分かる状態を保つ。
+            RoundedRectangle(cornerRadius: 2)
+                .strokeBorder(Color.red.opacity(0.8), style: StrokeStyle(lineWidth: 2, dash: [6, 4]))
+                .allowsHitTesting(false)
+            VStack {
+                Spacer()
+                Text("ドラッグで範囲を指定")
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background(.black.opacity(0.6), in: Capsule())
+                    .padding(.bottom, 12)
+            }
+            .allowsHitTesting(false)
         }
     }
 

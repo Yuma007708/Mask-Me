@@ -35,6 +35,11 @@ struct VideoControlsView: View {
                     .frame(width: 40, height: 34)
                     .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
             }
+            // 読み込み中は押せないことを見た目でも示す。`togglePlayback` は
+            // previewController が未構築のあいだ**黙って no-op** になる契約なので
+            // （そちらの doc 参照）、押せる見た目のままだと「押しても何も起きない」に見える。
+            // 編集画面は読み込み完了を待たずに開くため、この窓は実際に存在する。
+            .disabled(model.isLoading)
             .accessibilityLabel(model.isPlaying ? "一時停止" : "再生")
 
             Text(timeString(from: model.playbackPosition * model.videoDuration)

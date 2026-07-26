@@ -40,6 +40,17 @@ final class TimelineGestureUITests: XCTestCase {
         XCTAssertTrue(app.otherElements[Track.clipBand].waitForExistence(timeout: 120),
                       "編集画面のクリップ帯が出てこない（種の動画の生成か読み込みで失敗）")
         XCTAssertTrue(currentTimeElement.waitForExistence(timeout: 30))
+        // **要素が出ただけでは足りない。** 編集画面は読み込み完了を待たずに開く
+        // （重い初期処理——先頭フレーム・背景マスク・顔シード探索——を同期で
+        // 走らせると遷移が止まるため、非同期にしてある）。この時点のクリップ帯は
+        // 幅 1px のプレースホルダで、再生も previewController 未構築で効かない。
+        // 再生ボタンが押せるようになった時点＝`model.isLoading` が下りた時点を待つ。
+        let play = app.buttons["再生"]
+        XCTAssertTrue(play.waitForExistence(timeout: 30), "再生ボタンが出てこない")
+        let ready = expectation(for: NSPredicate(format: "isEnabled == true"),
+                               evaluatedWith: play)
+        XCTAssertEqual(XCTWaiter.wait(for: [ready], timeout: 180), .completed,
+                       "読み込みが終わらない（再生ボタンが有効にならない）")
     }
 
     override func tearDownWithError() throws {
@@ -74,6 +85,61 @@ final class TimelineGestureUITests: XCTestCase {
         XCTAssertLessThan(currentTime() - before, -Self.movedThreshold)
     }
 
+    // MARK: - 払った後に止まること
+
+    /// 払って指を離したら**再生位置が静止する**。
+    ///
+    /// 追従（再生位置 → スクロール）と払ってシーク（スクロール → 再生位置）に不動点が
+    /// 無いと、`scrollTo` の着地誤差ぶんの往復が永久に続く
+    /// （ユーザー報告「シークの仕方によってクリップが左右に動いて止まらない」）。
+    /// シークの往復が恒等でない（実フレーム時刻でフレーム格子へ丸められる）ことが原因で、
+    /// 値の比較だけでは閉じない。`TimelineScrollContainer` の doc 参照。
+    func test_afterSwipe_positionSettles() {
+        swipeLeft(on: Track.clipBand)
+        assertPositionSettles()
+    }
+
+    /// ズームを上げても止まる。**不感帯は px 基準なので秒に直すとズームで縮み**、
+    /// 往復が起きるかどうかがズーム段に依存する（= 報告の「シークの仕方によって」）。
+    func test_afterSwipeWhenZoomedIn_positionSettles() {
+        app.otherElements[Track.clipBand].pinch(withScale: 3, velocity: 1)
+        Thread.sleep(forTimeInterval: 0.6)
+        swipeLeft(on: Track.clipBand)
+        assertPositionSettles()
+    }
+
+    /// 少しずつ何度も払っても止まる（1 回の払いでは着地誤差が不感帯に収まる位置に
+    /// 落ちることもあるため、位置を変えながら繰り返す）。
+    func test_afterRepeatedShortSwipes_positionSettles() {
+        for _ in 0..<4 {
+            drag(on: Track.clipBand, dx: -40)
+        }
+        assertPositionSettles()
+    }
+
+    /// 一定時間おいて 2 回読み、動いていないことを確かめる。
+    ///
+    /// **再生位置と帯の x の両方**を見る。往復が同じフレームの中で起きると
+    /// （追従が動かす → 着地誤差ぶんシーク → 実フレーム時刻が同じフレームへ丸められる）
+    /// 表示時刻は変わらないまま**クリップだけが左右に動き続ける**ので、
+    /// 時刻だけでは取り逃がす（ユーザーが見ているのはこちら）。
+    private func assertPositionSettles(file: StaticString = #filePath, line: UInt = #line) {
+        Thread.sleep(forTimeInterval: 0.8)
+        let firstTime = currentTime()
+        let firstX = app.otherElements[Track.clipBand].frame.minX
+        Thread.sleep(forTimeInterval: 0.8)
+        let secondTime = currentTime()
+        let secondX = app.otherElements[Track.clipBand].frame.minX
+        XCTAssertEqual(firstTime, secondTime, accuracy: 0.01,
+                       "指を離してから 1.6 秒後も再生位置が動き続けている"
+                       + "（追従とシークが押し合っている）: \(firstTime) → \(secondTime)",
+                       file: file, line: line)
+        XCTAssertEqual(firstX, secondX, accuracy: 0.5,
+                       "指を離してから 1.6 秒後もクリップ帯が動き続けている"
+                       + "（追従とシークが押し合っている）: \(firstX) → \(secondX)",
+                       file: file, line: line)
+    }
+
     // MARK: - 払ってもシークしない段
 
     /// モザイク適用区間トラックは操作面から外してある（当て板が効いていること）。
@@ -84,11 +150,22 @@ final class TimelineGestureUITests: XCTestCase {
                           "適用区間トラックを払って再生位置が動いた（当て板が効いていない）")
     }
 
-    /// 継ぎ目レーンも同じ扱い。
-    func test_swipeOnJointLane_doesNotSeek() {
-        let before = currentTime()
-        swipeLeft(on: Track.jointLane)
-        XCTAssertLessThan(abs(currentTime() - before), Self.stillThreshold)
+    /// 継ぎ目が無いあいだ、継ぎ目レーンは**高さ 0 に畳まれている**
+    /// （目盛り帯とクリップ帯が隣り合う。押せるボタンが 1 つも無いのに 28pt の空白が
+    /// 空いていた＝ユーザー報告「時間とクリップの間のスペースを埋めたい」）。
+    ///
+    /// 種の素材は 1 本なので継ぎ目は存在しない。レーンが生えている場合の
+    /// 「払ってもシークしない」は適用区間トラック側（`blocksTimelinePan` の当て板は
+    /// 両者で共通）で担保する。
+    func test_jointLaneIsCollapsedWithoutJoints() {
+        let lane = app.otherElements[Track.jointLane]
+        XCTAssertTrue(lane.waitForExistence(timeout: 10))
+        XCTAssertEqual(lane.frame.height, 0, accuracy: 0.5,
+                       "継ぎ目が無いのに継ぎ目レーンが高さを取っている")
+        let ruler = app.otherElements[Track.ruler]
+        let band = app.otherElements[Track.clipBand]
+        XCTAssertLessThan(band.frame.minY - ruler.frame.maxY, 8,
+                          "目盛り帯とクリップ帯のあいだに空白が残っている")
     }
 
     // MARK: - 再生中
@@ -127,6 +204,72 @@ final class TimelineGestureUITests: XCTestCase {
         swipeRight(on: Track.clipBand)
         swipeRight(on: Track.clipBand)
         XCTAssertEqual(currentTime(), 0, accuracy: Self.stillThreshold)
+    }
+
+    /// 終端まで払うと**末尾が画面中央（プレイヘッド）で止まる**。
+    ///
+    /// 中央固定の可動域はコンテンツの左右に付けた可視幅/2 の余白ぶんで、
+    /// 上限はちょうど「終端が中央」になる（`TimelineScrollMath.scrollOffsetBounds`）。
+    /// ここで止まらず往復すると、端はラバーバンドと追従が押し合う最悪の場所になる。
+    func test_swipeLeftToEnd_settlesWithEndAtCenter() {
+        // 10 秒 × 既定 40px/秒 = 400px。上限へ確実に届くよう多めに払う。
+        for _ in 0..<6 { swipeLeft(on: Track.clipBand) }
+        let center = app.windows.firstMatch.frame.midX
+        let bandEnd = app.otherElements[Track.clipBand].frame.maxX
+        XCTAssertEqual(bandEnd, center, accuracy: 4,
+                       "終端まで払ってもクリップ帯の末尾が中央に来ない")
+        assertPositionSettles()
+    }
+
+    // MARK: - 手動矩形ツール
+    //
+    // タイムラインのジェスチャではないが、**同じ「指の操作の取り合い」の話**であり、
+    // 検証には同じ起動（`-uiTestSeedVideo` で編集画面へ直行）が要る。
+    // 新しいテストファイルの追加には `xcodegen generate`（= CocoaPods 統合の再構築）が
+    // 必要なため、この節としてここへ置いている。
+
+    /// **ツールが OFF のあいだ、プレビューを払っても矩形はできない。**
+    /// 常時有効だった頃は、プレビューを少しなぞるだけで矩形ができて
+    /// 「間違えて指定して使いづらい」状態だった（ユーザー報告）。
+    func test_dragOnPreview_withoutRectangleTool_createsNothing() {
+        openFaceTab()
+        XCTAssertEqual(app.buttons.matching(identifier: "editor.manualRegion").count, 0,
+                       "前提: 矩形がまだ無いこと")
+        dragOnPreview()
+        XCTAssertEqual(app.buttons.matching(identifier: "editor.manualRegion").count, 0,
+                       "ツール OFF なのにプレビューのドラッグで矩形ができた")
+    }
+
+    /// ツールを ON にすればこれまでどおり矩形を指定できる（入口を塞いでいないこと）。
+    func test_dragOnPreview_withRectangleTool_createsRegion() {
+        openFaceTab()
+        let tool = app.buttons["editor.rectangleTool"]
+        XCTAssertTrue(tool.waitForExistence(timeout: 10), "矩形ツールのボタンが無い")
+        tool.tap()
+        dragOnPreview()
+        let region = app.buttons.matching(identifier: "editor.manualRegion").firstMatch
+        XCTAssertTrue(region.waitForExistence(timeout: 15),
+                      "ツール ON でドラッグしたのに矩形ができない")
+    }
+
+    /// 動画モードのドックで「モザイク」→「顔」へ降りる（矩形ツールは顔の道具）。
+    private func openFaceTab() {
+        let mosaic = app.buttons["モザイク"]
+        XCTAssertTrue(mosaic.waitForExistence(timeout: 15), "ドックに「モザイク」が無い")
+        mosaic.tap()
+        let face = app.buttons["顔"]
+        XCTAssertTrue(face.waitForExistence(timeout: 10), "ドックに「顔」が無い")
+        face.tap()
+    }
+
+    /// プレビュー中央を斜めに払う（矩形を描く操作）。
+    private func dragOnPreview() {
+        let screen = app.windows.firstMatch.frame
+        let start = point(x: screen.midX - 60, y: screen.height * 0.3)
+        let end = point(x: screen.midX + 60, y: screen.height * 0.3 + 120)
+        start.press(forDuration: 0.05, thenDragTo: end,
+                    withVelocity: .default, thenHoldForDuration: 0.2)
+        Thread.sleep(forTimeInterval: 1.0)
     }
 
     // MARK: - 補助

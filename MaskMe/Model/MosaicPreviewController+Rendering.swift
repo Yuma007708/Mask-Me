@@ -122,7 +122,15 @@ extension MosaicPreviewController {
         let uiImage = UIImage(cgImage: cgImage)
 
         model.previewImage = uiImage
-        if duration > 0 {
+        // 再生位置の書き戻しは**タイムラインを指で操作していないときだけ**。
+        //
+        // `timeSec` は要求した時刻ではなく**実際に描けたフレームの時刻**なので、
+        // フレーム格子へ量子化され 1〜3 コマ遅れることもある（上の doc 参照）。
+        // スクラブ中に書き戻すと、タイムラインが「中央 = 再生位置」へ寄せ直す →
+        // `scrollTo` の着地誤差ぶんシークが走る → また丸められる、が閉じずに回り続け、
+        // クリップが左右に動いて止まらなくなる（ユーザー報告）。
+        // 操作中の所有者はタイムライン側（`MosaicEditorModel.isTimelineScrubbing`）。
+        if duration > 0, !model.isTimelineScrubbing {
             model.playbackPosition = max(0, min(timeSec / duration, 1))
         }
         return true

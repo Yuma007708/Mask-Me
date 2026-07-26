@@ -119,7 +119,7 @@ extension MosaicEditorModel {
         }
         let sourceID = UUID()
         sources[sourceID] = asset
-        seedVideoDetection(asset: asset, sourceID: sourceID)
+        await seedVideoDetection(asset: asset, sourceID: sourceID)
         let clip = TimelineClip(sourceID: sourceID, sourceStart: 0, sourceEnd: rawSeconds)
         applyTimelineEdit {
             $0.appending(clip: clip, source: TimelineSource(id: sourceID, kind: .video))
@@ -144,9 +144,9 @@ extension MosaicEditorModel {
     /// 新素材の顔が 1 つも選択されていないと**その追加クリップの区間だけモザイクが
     /// 乗らない**。写真追加が即選択している理由がそのまま当てはまるため、同じ扱いにする
     /// （掛けたくない顔はサムネのタップで外せる。逆は「気づかず素顔が残る」になる）。
-    private func seedVideoDetection(asset: AVAsset, sourceID: UUID) {
+    private func seedVideoDetection(asset: AVAsset, sourceID: UUID) async {
         guard let firstFrame = MosaicEditorModel.firstFrame(of: asset) else { return }
-        let scan = scanSeedFaces(of: asset, firstFrame: firstFrame)
+        let scan = await scanSeedFaces(of: asset, firstFrame: firstFrame)
         guard !scan.faces.isEmpty else { return }
         // 実際に顔が写っていた素材時刻のバケットへ入れる（load と同じ理由。
         // seedTime>0 の結果を t=0 に入れると、顔がまだ無い冒頭フレームの体や背景に

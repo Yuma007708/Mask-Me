@@ -34,12 +34,20 @@ enum TimelineMetrics {
     static let reorderInset: CGFloat = 14
     /// サムネイル 1 枚が占める幅。
     static let thumbnailSlotWidth: CGFloat = 44
-    /// 継ぎ目ボタンの一辺。`jointLaneHeight` と必ず揃えること
+    /// 継ぎ目ボタンの一辺。レーンの高さ（`jointLaneHeight(hasJoints:)`）と必ず揃えること
     /// （ボタンがレーンからはみ出すとクリップ帯のトリムハンドルを覆う。
     /// `TimelineJointLaneView` の doc 参照）。
     static let jointButtonSize: CGFloat = 28
     /// 継ぎ目ボタン専用レーンの高さ（クリップ帯の直上。`TimelineJointLaneView` の doc 参照）。
-    static let jointLaneHeight: CGFloat = 28
+    ///
+    /// **継ぎ目が無いときは 0。** クリップが 1 本のときは押せるボタンが 1 つも無いのに
+    /// 目盛り帯とクリップ帯の間へ 28pt の空白が残っていた
+    /// （ユーザー報告「時間とクリップの間のスペースを埋めたい」）。
+    /// 継ぎ目が生まれた時点でレーンが生え、タイムライン全体の高さも
+    /// `stackHeight(hasJoints:)` 経由で連動して伸びる。
+    static func jointLaneHeight(hasJoints: Bool) -> CGFloat {
+        hasJoints ? jointButtonSize : 0
+    }
     /// タイムライン直下の 1 段（編集ツールバー／粗さ調整バー）の高さ。
     ///
     /// **どちらが出ていても同じ高さにする。** 効果タブを開いた瞬間に段が生えると
@@ -54,8 +62,13 @@ enum TimelineMetrics {
     /// **継ぎ目レーンとクリップ帯は `spacing: 0` の内側 VStack で 1 段として積む**
     /// （継ぎ目ボタンは帯の継ぎ目に付くので離さない）。したがって段間の余白は
     /// 目盛り／[継ぎ目+帯]／適用区間の 2 箇所ぶんのままになる。
-    static var stackHeight: CGFloat {
-        rulerHeight + jointLaneHeight + clipHeight + applyTrackHeight + trackSpacing * 2
+    ///
+    /// 継ぎ目レーンが可変（`jointLaneHeight(hasJoints:)`）なので、**プレイヘッドの縦線と
+    /// スクロール容器へ渡す高さは必ずこの関数から採る**（別々に計算すると線が
+    /// トラックからはみ出す／足りなくなる）。
+    static func stackHeight(hasJoints: Bool) -> CGFloat {
+        rulerHeight + jointLaneHeight(hasJoints: hasJoints) + clipHeight + applyTrackHeight
+            + trackSpacing * 2
     }
 }
 
@@ -346,16 +359,21 @@ struct TimelineJointLaneView: View {
     /// 継ぎ目ボタンのタップ（引数は先行クリップの id）。
     let onJointTap: (UUID) -> Void
 
+    private var laneHeight: CGFloat {
+        TimelineMetrics.jointLaneHeight(hasJoints: !joints.isEmpty)
+    }
+
     var body: some View {
         ZStack(alignment: .topLeading) {
-            // 継ぎ目が無くてもレーンの高さは保つ（`TimelineMetrics.stackHeight` と一致させる）。
+            // 高さは `TimelineMetrics.stackHeight(hasJoints:)` と必ず一致させる
+            // （継ぎ目が無ければ 0 = 目盛り帯とクリップ帯が隣り合う）。
             Color.clear
-                .frame(width: max(contentWidth, 1), height: TimelineMetrics.jointLaneHeight)
+                .frame(width: max(contentWidth, 1), height: laneHeight)
             ForEach(joints) { joint in
                 jointButton(joint)
             }
         }
-        .frame(height: TimelineMetrics.jointLaneHeight, alignment: .topLeading)
+        .frame(height: laneHeight, alignment: .topLeading)
     }
 
     private func jointButton(_ joint: TimelineJointLayout) -> some View {

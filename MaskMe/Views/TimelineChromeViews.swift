@@ -211,10 +211,14 @@ struct TimelineMediaAppendPicker: View {
 /// スクロールしているか」だけが表す（`TimelineScrollContainer` の中央固定）。
 /// そのためこの View は**スクロールする中身の外側**（呼び出し側の `.overlay`）に置く。
 struct TimelinePlayheadView: View {
+    /// 貫くトラックの高さ。継ぎ目レーンの有無で変わるので受け取る
+    /// （`TimelineMetrics.stackHeight(hasJoints:)` から採ること）。
+    let stackHeight: CGFloat
+
     var body: some View {
         Rectangle()
             .fill(Color.white)
-            .frame(width: 2, height: TimelineMetrics.stackHeight)
+            .frame(width: 2, height: stackHeight)
             // 中央固定のプレイヘッドは動かないので、「ここが再生位置」と読ませる
             // 目印を上端に付ける（線だけだと目盛りの一本と区別しにくい）。
             .overlay(alignment: .top) {

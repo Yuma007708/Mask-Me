@@ -1,6 +1,112 @@
 import SwiftUI
 import UIKit
 
+// タイムラインの**ジェスチャとスクロールの受け渡し**（UIKit の recognizer 2 種）と、
+// 容器・段・ジェスチャで共有する語彙（座標空間名・`TimelineAutoScrollState`・
+// 自動スクロールの調整値・スクロール量の PreferenceKey・`blocksTimelinePan`）。
+// 語彙をここに置いているのは `TimelineScrollContainer.swift` が file_length に
+// 張り付いたため（新規ファイルの追加には `xcodegen generate` = CocoaPods 統合の
+// 再構築が要る）。受け渡す相手がこのファイルの recognizer なので同居の筋は通る。
+
+/// タイムラインの座標空間名。
+///
+/// スクロールビュー自身に付ける名前。ここで受けたジェスチャの `location.x` は
+/// **可視領域左端からの px**（= 自動スクロールの入力）になり、`translation` は
+/// コンテンツの移動に影響されない純粋な指の移動量になる。
+enum TimelineCoordinateSpace {
+    static let scroll = "timelineScroll"
+}
+
+/// 並べ替えドラッグと横スクロール容器のあいだで、**再描画を伴わずに**受け渡す値。
+///
+/// 指の x とスクロール量は 60Hz で書き換わる。`@Published` にするとタイムライン全体が
+/// 毎フレーム再評価されるため、**変化を通知するのは `isDragging` だけ**にしてある
+/// （自動スクロールのループを起こす／止めるのに必要な 1 ビット。ジェスチャ 1 回につき
+/// 2 回しか変わらない）。ループ側は毎ティック `fingerX` をポーリングする。
+///
+/// `scrollOffset` を View の `let` プロパティで渡さないのは、進行中のジェスチャが
+/// 掴んでいるクロージャが body 再評価前の古い値を握り得るため（参照型なら常に最新）。
+final class TimelineAutoScrollState: ObservableObject {
+    /// 並べ替えドラッグ中か。自動スクロールのループはこれだけを見て起動・停止する。
+    @Published private(set) var isDragging = false
+    /// シークさせない段（継ぎ目レーン・適用区間トラック）を指が押さえているか。
+    ///
+    /// 段は同時に複数触られ得るので**数える**（片方の指が離れた瞬間に
+    /// もう片方ぶんまで下ろさないため）。
+    @Published private(set) var isBlockedRowTouch = false
+    private var blockedRowTouches = 0
+    /// 可視領域左端からの指の x（px）。
+    private(set) var fingerX: Double = 0
+    /// 現在の横スクロール量（トラック内 x, px）。容器が毎フレーム書き込む。
+    var scrollOffset: Double = 0
+
+    func updateDrag(fingerX: Double) {
+        self.fingerX = fingerX
+        if !isDragging { isDragging = true }
+    }
+
+    func endDrag() {
+        if isDragging { isDragging = false }
+    }
+
+    func beginBlockedRowTouch() {
+        blockedRowTouches += 1
+        if !isBlockedRowTouch { isBlockedRowTouch = true }
+    }
+
+    func endBlockedRowTouch() {
+        blockedRowTouches = max(0, blockedRowTouches - 1)
+        if blockedRowTouches == 0, isBlockedRowTouch { isBlockedRowTouch = false }
+    }
+}
+
+/// 自動スクロールの調整値。
+///
+/// **`TimelineScrollContainer` の static にはできない**（ジェネリック型に格納型の
+/// static プロパティは置けない）。
+enum TimelineAutoScrollTuning {
+    /// 自動スクロールが立ち上がる端の帯（px）。
+    static let edgeInset: Double = 44
+    /// 端での最大速度（px/秒）。
+    static let maximumSpeed: Double = 600
+    /// 1 ティック（秒 / ナノ秒）。
+    static let tick: Double = 1.0 / 60
+    static let tickNanoseconds: UInt64 = 16_666_667
+}
+
+/// 横スクロール量（トラック内 x = 合成時刻 0 が原点）の伝達。
+///
+/// 計測子はコンテンツの左右余白の**内側**に置くこと
+/// （`TimelineViewport` の座標系契約。外側に置くと余白ぶん恒常的にずれる）。
+///
+/// **値は `Optional` でなければならない。** 非 Optional（既定値 0・`value = nextValue()`）
+/// にすると、計測子を持たない兄弟サブツリー（トラックの中身）が流す**既定値 0 で
+/// 上書きされ、スクロール量が常に 0 になる**。実測ではこの状態で
+/// 「払っても再生位置が動かない・サムネイルが横スクロールで積み直されない」が起きていた
+/// （UI テスト `TimelineGestureUITests` で検出。中身を無地に差し替えると再現しなくなる
+/// ことから、上書き元が中身であると特定した）。
+/// nil を無視して非 nil だけ採れば、計測子 1 個の値がそのまま上がる。
+struct TimelineScrollOffsetKey: PreferenceKey {
+    static var defaultValue: CGFloat?
+
+    static func reduce(value: inout CGFloat?, nextValue: () -> CGFloat?) {
+        if let next = nextValue() { value = next }
+    }
+}
+
+/// シークの操作面を**目盛り帯とクリップ帯だけ**に絞るための当て板
+/// （継ぎ目レーンと適用区間トラックの上を払っても再生位置は動かない）。
+///
+/// 判定は UIKit 側（`TimelinePanBlocker`）。SwiftUI の `.gesture` で pan を止める方式は
+/// 段の中身がヒットテストを取らないと届かず、コンテンツ全面に敷くと今度は目盛り帯まで
+/// 塞ぐ（どちらも実測。`TimelinePanBlocker` の doc 参照）。
+extension View {
+    /// この段の上で始まったドラッグではタイムラインをスクロール（= シーク）させない。
+    func blocksTimelinePan(_ autoScroll: TimelineAutoScrollState) -> some View {
+        background(TimelinePanBlocker(autoScroll: autoScroll))
+    }
+}
+
 /// 長押し → そのままドラッグ（クリップの並べ替え）を **UIKit の recognizer** で受ける当て板。
 ///
 /// ## なぜ SwiftUI のジェスチャではないのか

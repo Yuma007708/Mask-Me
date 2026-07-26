@@ -64,6 +64,15 @@ public final class MosaicEditorModel: ObservableObject {
 
     // 動画再生
     @Published public var playbackPosition: Double = 0
+    /// タイムラインを指で操作している最中か（`VideoTimelineView` の
+    /// `onScrubbingChanged` が立てる）。
+    ///
+    /// **この間は再生位置の所有者がタイムライン側**であり、描画経路は
+    /// `playbackPosition` を書き戻してはならない
+    /// （理由は `MosaicPreviewController.renderCurrentFrame` の doc）。
+    /// `@Published` にしないのは、毎スクロールで画面全体を再評価させないため
+    /// （読むのは描画経路だけ）。
+    public var isTimelineScrubbing = false
     @Published public private(set) var videoDuration: Double = 0
     @Published public var isPlaying = false
 
@@ -102,7 +111,21 @@ public final class MosaicEditorModel: ObservableObject {
     @Published public var faceBlockSize: Float = 28
     @Published public var backgroundBlockSize: Float = 28
     /// 選択中タブ（nil＝未選択：調整バーは非表示）。
-    @Published public var activeTab: EffectTab?
+    @Published public var activeTab: EffectTab? {
+        didSet {
+            // 顔タブを離れたら矩形ツールは必ず下ろす（モードが残っていると、
+            // 別の作業をしている最中のプレビューのドラッグが矩形作成に化ける）。
+            if activeTab != .face { isRectangleToolActive = false }
+        }
+    }
+
+    /// 手動矩形ツール（プレビューをドラッグして範囲を指定するモード）が ON か。
+    ///
+    /// **既定は OFF。** 常時有効だった頃は、プレビューを少しなぞっただけで矩形が
+    /// できてしまい「間違えて指定して使いづらい」状態だった
+    /// （`RectangleDrawingOverlay` はこれが true のときだけドラッグ面を張る）。
+    /// 顔タブ専用の道具なので、タブを離れると `activeTab` の didSet が下ろす。
+    @Published public var isRectangleToolActive = false
 
     // Undo / Redo（スタックの空判定から導出。スタックは @Published なので
     // 変化時に objectWillChange が発火し、UI は最新の値を読み直す）
@@ -477,39 +500,38 @@ public final class MosaicEditorModel: ObservableObject {
         let asset = AVAsset(url: url)
         videoAsset = asset
 
-        if let frame = Self.firstFrame(of: asset) {
-            sourceImage = frame
-            sourceTexture = makeTexture(from: frame)
-            updateBackgroundMask(from: frame)
-
-            let scan = scanSeedFaces(of: asset, firstFrame: frame)
-            let faces = scan.faces
-            let seedFrame = scan.frame
-            let seedTime = scan.time
-
-            // 初期スキャン結果を「実際に顔が写っていた時刻」のバケットにシードして、
-            // 再生開始・スクラブ前でも MosaicPreviewController がランドマークを引ける
-            // ようにする。seedTime>0（先頭に顔なし）のとき t=0 に入れてはいけない:
-            // 未来の顔位置を冒頭フレームに描くことになり、顔がまだ無い場所（体や背景）
-            // にモザイクが乗る。t=0 に顔が無い事実はライブ検出が空エントリとして
-            // 記録し、ホールドフォールバックはそれを尊重して描かない。
-            if !faces.isEmpty {
-                cacheStore.store(faces, sourceID: currentSourceID, time: seedTime)
-            }
-            detectedFaces = faces.enumerated().map { idx, lm in
-                // 顔が1つだけならユーザーの意図として自動選択する（サムネを
-                // タップさせないと何も起きない不親切な挙動を避ける）。複数顔なら
-                // 「どれをモザイクするか」の選択余地を残す。
-                let autoSelect = faces.count == 1 && idx == 0
-                return FaceTarget(id: UUID(), landmarks: lm,
-                           thumbnail: generateThumbnail(for: lm, from: seedFrame),
-                           isSelected: autoSelect,
-                           sourceID: currentSourceID)
-            }
-        }
         manualRegions = []
+        // 新しい素材を読み込むので顔は一旦空にする。**初期スキャンが非同期になった**
+        // （下の Task）ため、ここで空にしないと「前の素材の顔が残ったまま復元が走る」
+        // 窓ができる。スキャン結果はこの空の列へ**追記**される（`loadSeedFaces` の doc）。
+        detectedFaces = []
+
+        // 読み込みの所要時間を段ごとに出す（`[MMEXPORT]` / `[MMLIVE]` と同じ流儀の
+        // DEBUG 計測。「編集画面に遷移するのに時間がかかる」の再発を実機で測るため）。
+        #if DEBUG
+        let loadStart = Date()
+        print("[MMLOAD] sync done (main thread released)")
+        #endif
 
         Task {
+            // **先頭フレーム取り出し・背景マスク（Vision）・顔シード探索は
+            // ここから先で行う（同期部では行わない）。** どれも主スレッドで数百ms〜
+            // 数秒かかり、`.task { loadMedia() }` から同期で走らせると画面遷移
+            // そのものが止まる（ユーザー報告「動画選択後、編集画面に遷移するのに
+            // 時間がかかる（最近のプロジェクトを開くときも）」）。順序は同期部に
+            // あった頃と同じ——先頭フレーム → 顔シード → 尺 → タイムライン →
+            // composition → 初期フレーム描画——に保つ:
+            // `installInitialTimeline` 末尾の `resetHistory()` が履歴の基準を
+            // 取り直すので、初期スキャンの自動選択を含んだ状態が起点になる。
+            // 下書きの顔選択は `detectedFaces` が空のあいだ
+            // `pendingFaceSelectionAnchors` に保留され、埋まった時点で didSet が適用する
+            // （`restoreFaceSelection` の doc）。
+            await Task.yield()
+            await loadSeedFaces(from: asset)
+            #if DEBUG
+            print(String(format: "[MMLOAD] seed scan done %.2fs faces=%d",
+                         Date().timeIntervalSince(loadStart), detectedFaces.count))
+            #endif
             let seconds = (try? await asset.load(.duration))?.seconds ?? 0
             videoDuration = seconds
 
@@ -565,6 +587,10 @@ public final class MosaicEditorModel: ObservableObject {
             // （実測: 復元後 2 秒放置で `renderCurrentFrame` 実行 0 回、previewImage の中央画素は
             // 適用区間外なのに [127,127,127]＝モザイクのまま。シークして初めて素の映像になる）。
             await previewController?.renderInitialFrame(at: playbackPosition)
+            #if DEBUG
+            print(String(format: "[MMLOAD] first frame done %.2fs",
+                         Date().timeIntervalSince(loadStart)))
+            #endif
             // 成功・失敗どちらの経路でも必ず解除する。ここより前に解除すると
             // 「読み込み完了表示なのに previewController がまだ nil」の窓ができ、
             // 再生ボタンの表示と実挙動がずれる（togglePlayback 側でも二重に防ぐ）。
@@ -580,6 +606,55 @@ public final class MosaicEditorModel: ObservableObject {
         // 事前スキャンは廃止。再生しながらプレビューのフレームに検出を相乗りさせて
         // detectionCache を埋める（ライブ検出）。詳細は「ライブ検出」セクション参照。
         resetLiveDetection()
+    }
+
+    /// 先頭フレームの用意（表示・背景マスク）と初期スキャン（顔シード）。
+    ///
+    /// `load(videoURL:)` の**非同期**部から呼ぶ。同期部でやると画面遷移が止まる
+    /// （呼び出し元のコメント参照）。検出条件・シード時刻・自動選択規則は
+    /// 同期部にあった頃と同一。
+    ///
+    /// **`detectedFaces` は置き換えず追記する**（`seedVideoDetection` と同じ規則）。
+    /// 非同期になった結果、`load` が返ってから結果が届くまでのあいだに
+    /// 顔が入りうる——下書き復元（`applyRestoredParameters` は `load` の直後に走る）や
+    /// ライブ検出の安全網——ため、置き換えるとそれらを黙って消す
+    /// （実測: 復元した顔選択が丸ごと失われ、`detectedFaces` が空になった）。
+    /// 列は `load` の同期部で空にしてあるので、通常経路では追記＝置き換えと同じ結果になる。
+    private func loadSeedFaces(from asset: AVAsset) async {
+        guard let frame = Self.firstFrame(of: asset) else { return }
+        sourceImage = frame
+        sourceTexture = makeTexture(from: frame)
+        updateBackgroundMask(from: frame)
+
+        let scan = await scanSeedFaces(of: asset, firstFrame: frame)
+        let faces = scan.faces
+        let seedFrame = scan.frame
+        let seedTime = scan.time
+
+        // 初期スキャン結果を「実際に顔が写っていた時刻」のバケットにシードして、
+        // 再生開始・スクラブ前でも MosaicPreviewController がランドマークを引ける
+        // ようにする。seedTime>0（先頭に顔なし）のとき t=0 に入れてはいけない:
+        // 未来の顔位置を冒頭フレームに描くことになり、顔がまだ無い場所（体や背景）
+        // にモザイクが乗る。t=0 に顔が無い事実はライブ検出が空エントリとして
+        // 記録し、ホールドフォールバックはそれを尊重して描かない。
+        if !faces.isEmpty {
+            cacheStore.store(faces, sourceID: currentSourceID, time: seedTime)
+        }
+        detectedFaces += faces.enumerated().map { idx, lm in
+            // 顔が1つだけならユーザーの意図として自動選択する（サムネを
+            // タップさせないと何も起きない不親切な挙動を避ける）。複数顔なら
+            // 「どれをモザイクするか」の選択余地を残す。
+            let autoSelect = faces.count == 1 && idx == 0
+            return FaceTarget(id: UUID(), landmarks: lm,
+                              thumbnail: generateThumbnail(for: lm, from: seedFrame),
+                              isSelected: autoSelect,
+                              sourceID: currentSourceID)
+        }
+        // 素材の生フレームでの暫定表示（この後 composition が揃った時点で
+        // `renderInitialFrame` が合成・適用区間まで反映した絵へ差し替える）。
+        // **顔を反映した後に描くこと。** 先に描くと、初期スキャンが終わるまでの
+        // あいだ素の顔がプレビューに出る（モザイクの不足は事故、という原則に反する）。
+        renderPreview()
     }
 
     /// 動画素材の初期スキャン（検出シード用の「顔が写っているフレーム」探し）。
@@ -603,21 +678,31 @@ public final class MosaicEditorModel: ObservableObject {
     /// 続くライブ検出では拾えない」という条件差が生まれ、ホールドフォールバック
     /// が古い顔位置を体に貼り続ける原因になる。ライブと同じ 480px で判定する。
     ///
+    /// **`async` である理由**: probe は最大 24 コマぶんのデコード + 検出になり、
+    /// 同期で回すと画面遷移が丸ごと止まる（ユーザー報告「動画選択後、編集画面に
+    /// 遷移するのに時間がかかる」の主因）。1 コマごとに `Task.yield()` を挟んで
+    /// 実行の機会を返し、`isLoading` の表示と遷移アニメーションを動かし続ける。
+    /// 検出条件（IMAGE モード・480px 縮小・probe 範囲）は変えていない。
+    ///
     /// - Returns: 検出できた顔（空あり）と、それが写っていたフレーム・素材時刻。
-    func scanSeedFaces(of asset: AVAsset, firstFrame frame: UIImage) -> SeedScan {
+    func scanSeedFaces(of asset: AVAsset, firstFrame frame: UIImage) async -> SeedScan {
         let initialScanner = makeFaceLandmarker(forVideo: false, settings: detectionSettings)
         let faces = initialScanner.allLandmarks(in: Self.downscaleForDetection(frame))
         guard faces.isEmpty else { return SeedScan(faces: faces, frame: frame, time: 0) }
         // 短尺動画（リール等）は顔が終盤にしか写らないことがある。3s 固定 probe だと
         // 例えば 4s 動画で顔を逃す → シードなし → 再生開始でモザイクが掛からない。
         // 動画長に合わせて probe 範囲を可変にする（上限 6s、下限は動画全長）。
-        // 同期取得（load(videoURL:) は同期）。CMTime.seconds が nan の動画があるので
+        // 同期取得（asset.duration の直読み）。CMTime.seconds が nan の動画があるので
         // isFinite/正数チェックで守る。
         let rawDur = CMTimeGetSeconds(asset.duration)
         let dur = (rawDur.isFinite && rawDur > 0) ? rawDur : 3.0
         let probeEnd = min(max(dur - 0.1, 0.25), 6.0)
+        // **generator は 1 個を使い回す。** probe ごとに作り直すとコマ数ぶん
+        // デコーダを立ち上げ直すことになり、探索が丸ごと遅くなる。
+        let generator = Self.makeFrameGenerator(for: asset)
         for probeTime in stride(from: 0.25, through: probeEnd, by: 0.25) {
-            guard let probeFrame = Self.frame(of: asset, at: probeTime) else { continue }
+            await Task.yield()
+            guard let probeFrame = Self.frame(from: generator, at: probeTime) else { continue }
             let probeFaces = initialScanner.allLandmarks(in: Self.downscaleForDetection(probeFrame))
             if !probeFaces.isEmpty {
                 return SeedScan(faces: probeFaces, frame: probeFrame, time: probeTime)
@@ -1737,11 +1822,17 @@ public final class MosaicEditorModel: ObservableObject {
         return UIImage(cgImage: cg)
     }
 
-    private static func frame(of asset: AVAsset, at time: Double) -> UIImage? {
+    /// probe 用の generator（顔シード探索で**使い回す**。作り直すとコマ数ぶん
+    /// デコーダの立ち上げ直しになる）。
+    static func makeFrameGenerator(for asset: AVAsset) -> AVAssetImageGenerator {
         let gen = AVAssetImageGenerator(asset: asset)
         gen.appliesPreferredTrackTransform = true
         gen.requestedTimeToleranceBefore = CMTime(seconds: 0.1, preferredTimescale: 600)
         gen.requestedTimeToleranceAfter = CMTime(seconds: 0.1, preferredTimescale: 600)
+        return gen
+    }
+
+    static func frame(from gen: AVAssetImageGenerator, at time: Double) -> UIImage? {
         let t = CMTime(seconds: time, preferredTimescale: 600)
         guard let cg = try? gen.copyCGImage(at: t, actualTime: nil) else { return nil }
         return UIImage(cgImage: cg)
@@ -1781,7 +1872,7 @@ public final class MosaicEditorModel: ObservableObject {
     func frameAtCompositionTime(_ compositionTime: Double) -> UIImage? {
         let (sourceID, sourceTime) = resolveSourceTime(atComposition: compositionTime)
         guard let asset = sources[sourceID] ?? videoAsset else { return nil }
-        return Self.frame(of: asset, at: sourceTime)
+        return Self.frame(from: Self.makeFrameGenerator(for: asset), at: sourceTime)
     }
 
     /// ライブ検出・初期スキャンで使う検出入力の目標幅（px）。

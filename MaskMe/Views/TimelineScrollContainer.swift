@@ -1,109 +1,13 @@
 import MosaicCore
 import SwiftUI
 
-// タイムラインの横スクロール容器と、その周辺（座標空間名・自動スクロールの
-// 受け渡し口と調整値・スクロール量の PreferenceKey）。
+// タイムラインの横スクロール容器。
 // `TimelineChromeViews.swift` から切り出したのは、スクロール／ズーム／自動スクロールが
 // 互いに前提を共有する 1 つのまとまりで、ツールバーや帯とは変更理由が別なため。
-
-/// タイムラインの座標空間名。
-///
-/// スクロールビュー自身に付ける名前。ここで受けたジェスチャの `location.x` は
-/// **可視領域左端からの px**（= 自動スクロールの入力）になり、`translation` は
-/// コンテンツの移動に影響されない純粋な指の移動量になる。
-enum TimelineCoordinateSpace {
-    static let scroll = "timelineScroll"
-}
-
-/// 並べ替えドラッグと横スクロール容器のあいだで、**再描画を伴わずに**受け渡す値。
-///
-/// 指の x とスクロール量は 60Hz で書き換わる。`@Published` にするとタイムライン全体が
-/// 毎フレーム再評価されるため、**変化を通知するのは `isDragging` だけ**にしてある
-/// （自動スクロールのループを起こす／止めるのに必要な 1 ビット。ジェスチャ 1 回につき
-/// 2 回しか変わらない）。ループ側は毎ティック `fingerX` をポーリングする。
-///
-/// `scrollOffset` を View の `let` プロパティで渡さないのは、進行中のジェスチャが
-/// 掴んでいるクロージャが body 再評価前の古い値を握り得るため（参照型なら常に最新）。
-final class TimelineAutoScrollState: ObservableObject {
-    /// 並べ替えドラッグ中か。自動スクロールのループはこれだけを見て起動・停止する。
-    @Published private(set) var isDragging = false
-    /// シークさせない段（継ぎ目レーン・適用区間トラック）を指が押さえているか。
-    ///
-    /// 段は同時に複数触られ得るので**数える**（片方の指が離れた瞬間に
-    /// もう片方ぶんまで下ろさないため）。
-    @Published private(set) var isBlockedRowTouch = false
-    private var blockedRowTouches = 0
-    /// 可視領域左端からの指の x（px）。
-    private(set) var fingerX: Double = 0
-    /// 現在の横スクロール量（トラック内 x, px）。容器が毎フレーム書き込む。
-    var scrollOffset: Double = 0
-
-    func updateDrag(fingerX: Double) {
-        self.fingerX = fingerX
-        if !isDragging { isDragging = true }
-    }
-
-    func endDrag() {
-        if isDragging { isDragging = false }
-    }
-
-    func beginBlockedRowTouch() {
-        blockedRowTouches += 1
-        if !isBlockedRowTouch { isBlockedRowTouch = true }
-    }
-
-    func endBlockedRowTouch() {
-        blockedRowTouches = max(0, blockedRowTouches - 1)
-        if blockedRowTouches == 0, isBlockedRowTouch { isBlockedRowTouch = false }
-    }
-}
-
-/// 自動スクロールの調整値。
-///
-/// **`TimelineScrollContainer` の static にはできない**（ジェネリック型に格納型の
-/// static プロパティは置けない）。
-enum TimelineAutoScrollTuning {
-    /// 自動スクロールが立ち上がる端の帯（px）。
-    static let edgeInset: Double = 44
-    /// 端での最大速度（px/秒）。
-    static let maximumSpeed: Double = 600
-    /// 1 ティック（秒 / ナノ秒）。
-    static let tick: Double = 1.0 / 60
-    static let tickNanoseconds: UInt64 = 16_666_667
-}
-
-/// 横スクロール量（トラック内 x = 合成時刻 0 が原点）の伝達。
-///
-/// 計測子はコンテンツの左右余白の**内側**に置くこと
-/// （`TimelineViewport` の座標系契約。外側に置くと余白ぶん恒常的にずれる）。
-///
-/// **値は `Optional` でなければならない。** 非 Optional（既定値 0・`value = nextValue()`）
-/// にすると、計測子を持たない兄弟サブツリー（トラックの中身）が流す**既定値 0 で
-/// 上書きされ、スクロール量が常に 0 になる**。実測ではこの状態で
-/// 「払っても再生位置が動かない・サムネイルが横スクロールで積み直されない」が起きていた
-/// （UI テスト `TimelineGestureUITests` で検出。中身を無地に差し替えると再現しなくなる
-/// ことから、上書き元が中身であると特定した）。
-/// nil を無視して非 nil だけ採れば、計測子 1 個の値がそのまま上がる。
-struct TimelineScrollOffsetKey: PreferenceKey {
-    static var defaultValue: CGFloat?
-
-    static func reduce(value: inout CGFloat?, nextValue: () -> CGFloat?) {
-        if let next = nextValue() { value = next }
-    }
-}
-
-/// シークの操作面を**目盛り帯とクリップ帯だけ**に絞るための当て板
-/// （継ぎ目レーンと適用区間トラックの上を払っても再生位置は動かない）。
-///
-/// 判定は UIKit 側（`TimelinePanBlocker`）。SwiftUI の `.gesture` で pan を止める方式は
-/// 段の中身がヒットテストを取らないと届かず、コンテンツ全面に敷くと今度は目盛り帯まで
-/// 塞ぐ（どちらも実測。`TimelinePanBlocker` の doc 参照）。
-extension View {
-    /// この段の上で始まったドラッグではタイムラインをスクロール（= シーク）させない。
-    func blocksTimelinePan(_ autoScroll: TimelineAutoScrollState) -> some View {
-        background(TimelinePanBlocker(autoScroll: autoScroll))
-    }
-}
+// 容器とジェスチャ側で共有する語彙（座標空間名・`TimelineAutoScrollState`・
+// 自動スクロールの調整値・スクロール量の PreferenceKey・`blocksTimelinePan`）は
+// `TimelineReorderRecognizer.swift` にある（file_length のため逃がした。
+// 新規ファイルの追加には `xcodegen generate` = CocoaPods 統合の再構築が要る）。
 
 /// タイムラインの横スクロール容器。**プレイヘッドは可視領域の中央に固定**する。
 ///
@@ -119,14 +23,24 @@ extension View {
 ///
 /// ## 押し合いを起こさない理由（ここが壊れると画面が震える）
 ///
-/// 「スクロール → シーク」と「再生位置 → スクロール」の 2 方向があるが、
-/// **プログラム由来のスクロールは着地点が必ず `x(playheadTime) - 可視幅/2`** なので、
-/// 着地後に中央が指す時刻は現在の再生位置と一致する（`centeredTime` は
-/// `centeredScrollOffset` の逆写像で、端でもクランプされずに往復する）。
-/// したがって
-/// - 中央の時刻が再生位置と一致していれば「プログラム由来 or 落ち着いた状態」→ シークしない
-/// - 追従側も「目標 == 現在のスクロール量」なら撃たない
-/// の 2 つの不動点判定だけでループが閉じる。ユーザー由来かを見分けるフラグは要らない。
+/// 「スクロール → シーク」と「再生位置 → スクロール」の 2 方向がある。値の一致だけで
+/// ループを閉じようとすると**止まらない往復になる**（実測。ユーザー報告
+/// 「シークの仕方によってクリップが左右に動いて止まらない」）。理由は 2 つ:
+///
+/// - シークの往復が**恒等写像ではない**。`MosaicPreviewController.seek(to:)` は描画後に
+///   `playbackPosition` を「実際に返ってきたフレームの時刻」で上書きするので
+///   （フレーム格子へ量子化され、1〜3 コマ遅れることもある）、中央の時刻へシークしても
+///   再生位置はその値に戻ってこない。
+/// - `scrollTo(anchor:)` には**着地誤差**がある。誤差が不感帯（`seekDeadZonePixels`）を
+///   超えると、追従の着地がそのままシーク要求に化ける。
+///
+/// この 2 つが噛み合うと「追従 → 着地誤差 → シーク → 量子化で元のフレーム → 追従」が
+/// 閉じず回り続ける。そこで**プログラム由来のスクロールを明示的に印付けする**
+/// （`programmaticScrollDeadline`）: 追従・ズーム保持が撃ったスクロールの着地は
+/// シークに変換しない。指が触れている間はこの印を無視するので、ユーザーの払いは
+/// 1px も取りこぼさない（`recenter` 自身が指と慣性の間は撃たないため、
+/// 操作中にこの印が立つことはない）。
+/// あわせて追従側も「目標 == 現在のスクロール量」なら撃たない。
 /// 例外は並べ替え中の自動スクロール（中央の時刻を意図的に動かす）で、これは明示的に除外する。
 ///
 /// **iOS 16 でスクロール位置を作れるのは `scrollTo(id:anchor:)` だけ**
@@ -141,6 +55,10 @@ struct TimelineScrollContainer<Content: View>: View {
     /// 観測したビューポート（トラック内 x 座標系）。
     @Binding var viewport: TimelineViewport
     let contentWidth: CGFloat
+    /// 積んだトラックの高さ。継ぎ目レーンの有無で変わるので受け取る
+    /// （`TimelineMetrics.stackHeight(hasJoints:)` から採ること。プレイヘッドの縦線と
+    /// 同じ値でなければ線がはみ出す）。
+    let stackHeight: CGFloat
     let totalDuration: Double
     let playheadTime: Double
     /// 再生中か。**追従は停止中も行う**（中央固定なので、外部シークでも中身を動かさないと
@@ -182,6 +100,9 @@ struct TimelineScrollContainer<Content: View>: View {
     @State private var scrollSettleTask: Task<Void, Never>?
     /// 直近に見た可視幅。変わると余白（可視幅/2）も変わるので中央へ寄せ直す。
     @State private var lastVisibleWidth: Double = 0
+    /// プログラム由来のスクロール（追従・ズーム保持）が落ち着くまでの猶予の終わり。
+    /// この間に届いたスクロール量はシーク要求に変換しない（型の doc 参照）。
+    @State private var programmaticScrollDeadline: Date?
 
     private static var scrollSpace: String { TimelineCoordinateSpace.scroll }
     private static var contentID: String { "timelineContent" }
@@ -192,6 +113,14 @@ struct TimelineScrollContainer<Content: View>: View {
     private static var playingSeekThresholdSeconds: Double { 0.5 }
     /// スクロールが止まったと見なすまでの猶予（ナノ秒）。慣性が続く間は伸び続ける。
     private static var scrollSettleDelay: UInt64 { 160_000_000 }
+    /// プログラム由来スクロールの着地を待つ猶予（秒）。追従アニメーション（0.15 秒）が
+    /// 吐く途中の位置まで覆える長さにする（途中位置をシークと読むと押し合う）。
+    private static var programmaticScrollWindow: TimeInterval { 0.2 }
+    /// 「もう端に居る」と見なす許容（秒）。**px ではなく秒で持つこと**:
+    /// ずれの正体は実フレーム時刻への丸め（1〜3 コマ）なのでフレーム間隔＝時間で決まり、
+    /// ズームには依存しない。px 換算にするとズームを上げた瞬間に許容が足りなくなる。
+    /// 30fps の 4 コマぶんを見込む（`isRestingBeyondTimeline` の doc 参照）。
+    private static var edgeRestToleranceSeconds: Double { 0.15 }
 
     var body: some View {
         GeometryReader { outer in
@@ -212,6 +141,10 @@ struct TimelineScrollContainer<Content: View>: View {
                     // 指が離れた時点で中央を再点検する。触っている間は引き戻しを止めて
                     // いるので、その最中に起きた再生位置・全幅の変化はここで回収する。
                     .onChange(of: isTouchDragging) { if !$0 { recenter(on: playheadTime, proxy: proxy) } }
+                    // 慣性が止まった時点でも同じ再点検を入れる（外部シークで線と絵が
+                    // ずれたまま残るのを自己修復する）。`markUserScrolling` の Task から
+                    // 直接呼べない理由はそちらの doc 参照。
+                    .onChange(of: isUserScrolling) { if !$0 { recenter(on: playheadTime, proxy: proxy) } }
                     // クリップ編集で全幅が変わると時刻→x が変わる。線は中央に固定なので
                     // ここで寄せ直さないと「線の位置と再生位置」がずれたままになる。
                     .onChange(of: contentWidth) { _ in recenter(on: playheadTime, proxy: proxy) }
@@ -220,16 +153,24 @@ struct TimelineScrollContainer<Content: View>: View {
                     .onDisappear {
                         autoScrollTask?.cancel()
                         scrollSettleTask?.cancel()
+                        // 落ち着き待ちを打ち切るので、**下ろす通知は自分で出す**。
+                        // 出さないと呼び出し側の「スクラブ中」が立ったまま残り、
+                        // サムネイル生成と再生位置の書き戻しが復帰しない
+                        // （= 再生しても時刻表示が止まったままになる）。
+                        if isUserScrolling {
+                            isUserScrolling = false
+                            onScrubbingChanged(false)
+                        }
                     }
             }
         }
-        .frame(height: TimelineMetrics.stackHeight)
+        .frame(height: stackHeight)
     }
 
     private func scrollView(visibleWidth: Double) -> some View {
         ScrollView(.horizontal, showsIndicators: false) {
             ZStack(alignment: .topLeading) { content() }
-                .frame(width: contentWidth, height: TimelineMetrics.stackHeight, alignment: .topLeading)
+                .frame(width: contentWidth, height: stackHeight, alignment: .topLeading)
                 // 計測は余白の**内側**に付ける（トラック内 x = 合成時刻 0 が原点。
                 // `TimelineViewport` の座標系契約）。`.background` はレイアウトを変えない。
                 .background(offsetProbe)
@@ -307,7 +248,7 @@ struct TimelineScrollContainer<Content: View>: View {
                      visibleWidth: visibleWidth, currentOffset: scrollOffset)
             return
         }
-        seekIfCenterMoved(scrollOffset: scrollOffset, visibleWidth: visibleWidth, proxy: proxy)
+        seekIfCenterMoved(scrollOffset: scrollOffset, visibleWidth: visibleWidth)
     }
 
     /// 横スクロールでもサムネイルを積み直す。ただし**枠半分以上動いたときだけ**
@@ -322,12 +263,12 @@ struct TimelineScrollContainer<Content: View>: View {
 
     /// スクロール量から「中央が指す合成時刻」を出し、再生位置と違えばシークする。
     ///
-    /// **プログラム由来かを見分けるフラグは持たない**（型の doc 参照）。追従・ズーム保持の
-    /// 着地点はどちらも中央 = 再生位置なので、一致しない差分だけが指（と慣性）による移動。
     /// 並べ替え中の自動スクロールは中央の時刻を意図的に動かすため、ここでは除外する。
-    private func seekIfCenterMoved(scrollOffset: Double, visibleWidth: Double,
-                                   proxy: ScrollViewProxy) {
+    /// プログラム由来のスクロール（追従・ズーム保持）の着地も除外する: 値の一致だけで
+    /// 判定すると着地誤差がシークに化けて往復が止まらない（型の doc 参照）。
+    private func seekIfCenterMoved(scrollOffset: Double, visibleWidth: Double) {
         guard totalDuration > 0, visibleWidth > 0, !autoScroll.isDragging else { return }
+        guard !consumeProgrammaticScrollMark() else { return }
         let center = TimelineScrollMath.centeredTime(scrollOffset: scrollOffset, geometry: geometry,
                                                      visibleWidth: visibleWidth,
                                                      totalDuration: totalDuration)
@@ -342,18 +283,33 @@ struct TimelineScrollContainer<Content: View>: View {
             // シークへ倒す（呼び出し側が再生を止める）。
             guard deviation > geometry.duration(forWidth: Self.seekDeadZonePixels) else { return }
         }
-        markUserScrolling(proxy: proxy)
+        markUserScrolling()
         onSeek(center)
+    }
+
+    /// このスクロール更新がプログラム由来の着地かを判定し、印を消費する。
+    ///
+    /// 指が触れている間は印を無視する（`recenter` は指と慣性の間は撃たないので、
+    /// 操作中に印が立つことはない = ユーザーの払いを取りこぼさない）。
+    private func consumeProgrammaticScrollMark() -> Bool {
+        guard let deadline = programmaticScrollDeadline else { return false }
+        guard !isTouchDragging, Date() < deadline else {
+            programmaticScrollDeadline = nil
+            return false
+        }
+        return true
     }
 
     /// スクロール中フラグを立て、止まったら下ろす（デバウンス）。
     ///
-    /// 下ろすときに**中央の再点検を 1 回だけ入れる**。指と慣性が動いている間は
-    /// `recenter` を撃たない（押し返さないため）ので、その最中に外部シーク
-    /// （undo による尺クランプなど）が来ると線の位置と再生位置がずれたまま残る。
-    /// 止まった直後に再点検すれば、通常は目標 == 現在位置で no-op のまま、
-    /// ずれた場合だけ自己修復する。
-    private func markUserScrolling(proxy: ScrollViewProxy) {
+    /// 下ろすのは**フラグだけ**にして、中央の再点検は
+    /// `.onChange(of: isUserScrolling)` に任せる。この `Task` が捕まえている
+    /// `playheadTime` は struct の `let`（値コピー）なので、ここで `recenter` を呼ぶと
+    /// **160ms 前の再生位置**へ寄せてしまい、直後にその古い時刻へシークが撃たれて
+    /// 位置が巻き戻る（`@State` / `@Binding` は参照なので生きているが、
+    /// 素の `let` は生きていない）。`onChange` のクロージャは最新の body 評価のものなので
+    /// 現在値が読める。
+    private func markUserScrolling() {
         if !isUserScrolling {
             isUserScrolling = true
             onScrubbingChanged(true)
@@ -364,7 +320,6 @@ struct TimelineScrollContainer<Content: View>: View {
             guard !Task.isCancelled else { return }
             isUserScrolling = false
             onScrubbingChanged(false)
-            recenter(on: playheadTime, proxy: proxy)
         }
     }
 
@@ -375,13 +330,22 @@ struct TimelineScrollContainer<Content: View>: View {
     /// 引き戻すと画面が再生位置へ弾かれて戻る（ユーザー報告の「動かしても再生位置に
     /// 戻される」）。丸めた先に再生位置が既に居るなら、線が空白の上に載るだけで
     /// 矛盾は無いのでその場に留める（一般的な動画編集アプリも終端より後ろへ送れる）。
+    ///
+    /// **端の判定には許容を持たせること。** 再生位置は「シークで要求した時刻」ではなく
+    /// `MosaicPreviewController` が**実際に描けたフレームの時刻**で上書きされ
+    /// （フレーム格子へ量子化され 1〜3 コマ遅延しうる）、さらに呼び出し側の `scrub` が
+    /// `totalDuration.nextDown` へ丸める。そのため終端まで払っても
+    /// `playhead == totalDuration` には決してならない。厳密比較にすると**終端側だけ
+    /// 引き戻しが止まらなくなり**、慣性が残っているあいだ指と押し合う
+    /// （実測: 終端を越えて払っても帯の末尾が画面中央へ吸い付いて離れない。
+    /// UI テスト `test_swipeLeftBeyondEnd_staysPastEnd`）。
     private func isRestingBeyondTimeline(currentOffset: Double, visibleWidth: Double,
                                          playhead: Double) -> Bool {
         guard totalDuration > 0 else { return false }
         let raw = TimelineScrollMath.rawCenteredTime(scrollOffset: currentOffset, geometry: geometry,
                                                      visibleWidth: visibleWidth)
-        if raw < 0 { return playhead <= 0 }
-        if raw > totalDuration { return playhead >= totalDuration }
+        if raw < 0 { return playhead <= Self.edgeRestToleranceSeconds }
+        if raw > totalDuration { return playhead >= totalDuration - Self.edgeRestToleranceSeconds }
         return false
     }
 
@@ -482,8 +446,12 @@ struct TimelineScrollContainer<Content: View>: View {
         scroll(proxy: proxy, to: target, contentWidth: width, visibleWidth: visible)
     }
 
+    /// **プログラム由来スクロールの唯一の出口**（追従・ズーム保持・並べ替えの自動送り）。
+    /// ここを通る移動は着地誤差ぶんの差が残るので、印を立ててシーク判定から外す
+    /// （型の doc「押し合いを起こさない理由」）。
     private func scroll(proxy: ScrollViewProxy, to offset: Double,
                         contentWidth width: Double, visibleWidth: Double) {
+        programmaticScrollDeadline = Date().addingTimeInterval(Self.programmaticScrollWindow)
         let unit = TimelineScrollMath.anchorUnitPointX(
             scrollOffset: offset, contentWidth: width, visibleWidth: visibleWidth,
             leadingInset: Self.leadingInset(visibleWidth: visibleWidth))
