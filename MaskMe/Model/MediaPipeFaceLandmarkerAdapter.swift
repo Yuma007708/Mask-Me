@@ -299,7 +299,10 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
             if !result.isEmpty { source = .lowConf }
         }
         recordSource(source)
-        return result
+        // 同一顔の重複を最終段で間引く。MP 本体（numFaces=5）が曖昧な被写体に対して
+        // 同じ顔へ複数のメッシュを返すことがあり、augment の early return 経路では
+        // 補助検出器側の除去も効かないため、全経路が通る return 直前で潰す。
+        return deduplicated(result)
     }
 
     // フェーズ2でこのファイルに本格的に手を入れる際に解消する予定の構造的負債
@@ -327,6 +330,10 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
                 result = mp
                 source = mp.isEmpty ? .none : mpSource
             }
+            // track 再構築・体誤フィット検証より前に重複を潰す。重複を残したまま
+            // rebuildTracks に渡すと同じ顔に track が二重に立ち、以降の ROI 再検出でも
+            // 重複が再生産されるため。
+            result = deduplicated(result)
             if result.isEmpty {
                 // 全画面パイプライン全滅 → 前フレームの顔位置周辺だけを再走査する。
                 result = redetectFromTrackedBoxes(image: image)
@@ -375,7 +382,8 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
             reseedFlow(from: result, image: image)
         }
         recordSource(source)
-        return result
+        // ROI / lowConf / tiled / flow 経路の合流後にもう一度だけ重複を潰す。
+        return deduplicated(result)
     }
 
     /// 最終採用直前の体誤フィット検証。棄却された候補に対応する track だけを外科的に
@@ -509,6 +517,8 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
                 result = mp
                 source = mp.isEmpty ? .none : mpSource
             }
+            // VIDEO 経路と同じく、track 再構築より前に同一顔の重複を潰す。
+            result = deduplicated(result)
             if result.isEmpty {
                 // 全画面パイプライン全滅 → 前フレームの顔位置周辺だけを再走査する。
                 // 全画面 640px 縮小では潰れる横顔・小顔も、拡大 crop + upscaledIfSmall
@@ -550,7 +560,8 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
             reseedFlow(from: result, image: image)
         }
         recordSource(source)
-        return LiveDetectionResult(faces: result, bridgedByFlow: bridgedByFlow)
+        // ROI / lowConf / flow 経路の合流後にもう一度だけ重複を潰す。
+        return LiveDetectionResult(faces: deduplicated(result), bridgedByFlow: bridgedByFlow)
     }
 
     /// トラックの正規化bboxが、フローブリッジしてよい「顔として妥当な」範囲か。
@@ -882,7 +893,63 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
             // 体にモザイクが乗る誤検知になる。横顔・逆光の穴埋めは Kalman ROI 予測 (A-1)
             // + lookupFaces の直近ホールドフォールバックで拾う。
         }
-        return mpResults + extras
+        return deduplicated(mpResults + extras)
+    }
+
+    // MARK: - 重複検出の間引き（NMS）
+
+    /// 同一顔の重複を間引く IoU 閾値。別人の顔同士がここまで重なることは実質ないため、
+    /// 「ほぼ同じ位置・同じ大きさ」だけを重複とみなす保守的な値。
+    private let duplicateIoUThreshold: CGFloat = 0.5
+    /// 同一顔の重複を間引く包含率閾値（交差 ÷ 小さい方の面積）。
+    private let duplicateContainmentThreshold: CGFloat = 0.85
+
+    /// MP 本体の結果と補助 bbox 由来の crop 再検出結果を重複排除して返す。
+    ///
+    /// `:843` の前段フィルタは「補助検出器の生 bbox」対「478 点メッシュの外接矩形」を
+    /// 比べており矩形の定義が違うため、同じ顔でも IoU が閾値を割って素通りする。
+    /// また extras 同士（BlazeFace と YuNet が同じ顔を返した場合）の重複も見ていない。
+    /// そこで最終的に **メッシュ外接矩形同士** で判定し直す。
+    ///
+    /// 判定は 2 条件の OR:
+    /// - IoU > 0.5: 大きさが揃った重複（ずれただけの同一顔）を拾う。
+    /// - 包含率 > 0.85: 実測の重複ペアは IoU 0.49〜0.76 とばらついた一方、包含率は
+    ///   すべて 0.90 以上だった（大小の違う同一顔で、小さい方が大きい方にほぼ収まる）。
+    ///   IoU だけで拾おうとすると閾値を 0.45 以下まで下げる必要があり、そちらの方が
+    ///   隣り合う別人の顔を潰すリスクが高い。
+    ///
+    /// 隣接する別人の顔は互いにほぼ収まることも 5 割超重なることもないため、
+    /// 複数人シーンの検出数は落とさない。
+    /// 残す優先度は confidence 降順（同値なら元の並び順＝MP 本体が先）。
+    /// 返り値の並びは元の順序を保つ（下流の追跡・選択が index の安定を前提にするため）。
+    private func deduplicated(_ faces: [FaceLandmarkSet]) -> [FaceLandmarkSet] {
+        guard faces.count > 1 else { return faces }
+        let ranked = faces.enumerated().sorted { lhs, rhs in
+            lhs.element.confidence == rhs.element.confidence
+                ? lhs.offset < rhs.offset
+                : lhs.element.confidence > rhs.element.confidence
+        }
+        var keptIndices: [Int] = []
+        var keptBoxes: [CGRect] = []
+        for (index, face) in ranked {
+            let box = face.boundingBox
+            let duplicated = keptBoxes.contains { kept in
+                iou(kept, box) > duplicateIoUThreshold
+                    || containmentRatio(kept, box) > duplicateContainmentThreshold
+            }
+            guard !duplicated else { continue }
+            keptIndices.append(index)
+            keptBoxes.append(box)
+        }
+        return keptIndices.sorted().map { faces[$0] }
+    }
+
+    /// 交差面積 ÷ 小さい方の面積。片方がもう片方に収まっているほど 1.0 に近づく。
+    private func containmentRatio(_ a: CGRect, _ b: CGRect) -> CGFloat {
+        let inter = a.intersection(b)
+        guard !inter.isNull, inter.width > 0, inter.height > 0 else { return 0 }
+        let minArea = min(a.width * a.height, b.width * b.height)
+        return minArea > 0 ? (inter.width * inter.height) / minArea : 0
     }
 
     /// UIImage のピクセル寸法（UIImage.size はポイント単位で scale 依存のため CGImage を使う）。

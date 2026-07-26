@@ -9,8 +9,14 @@ import XCTest
 /// XCTSkip` rather than fail, so the suite stays green on machines without them.
 enum FixtureLoader {
     /// Path to the bundled `face_landmarker.task`, or `nil` if absent.
+    ///
+    /// The README asks for the model under `Fixtures/`, which the folder reference
+    /// preserves as a subdirectory inside the test bundle — a bare
+    /// `path(forResource:ofType:)` only searches the bundle root and would miss it.
     static func modelPath() -> String? {
-        Bundle(for: BundleToken.self).path(forResource: "face_landmarker", ofType: "task")
+        let bundle = Bundle(for: BundleToken.self)
+        return bundle.path(forResource: "face_landmarker", ofType: "task", inDirectory: "Fixtures")
+            ?? bundle.path(forResource: "face_landmarker", ofType: "task")
     }
 
     /// Images under `Fixtures/<subdirectory>` (e.g. "faces", "nonfaces").
