@@ -2684,6 +2684,101 @@ final class MultiClipExportTests: XCTestCase {
         XCTAssertEqual(size, CGSize(width: 3840, height: 2160),
                        "4K で書き出したのに出力解像度が落ちている")
     }
+    // MARK: - トランジションの見た目（書き出し画素）
+
+    /// 出力動画の各フレームの平均輝度。
+    private func meanLuminances(of url: URL) async throws -> [(pts: Double, mean: Double)] {
+        let asset = AVURLAsset(url: url)
+        let tracks = try await asset.loadTracks(withMediaType: .video)
+        let track = try XCTUnwrap(tracks.first)
+        let reader = try AVAssetReader(asset: asset)
+        let output = AVAssetReaderTrackOutput(track: track, outputSettings: [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
+        ])
+        reader.add(output)
+        reader.startReading()
+
+        var result: [(pts: Double, mean: Double)] = []
+        while let sample = output.copyNextSampleBuffer() {
+            let pts = CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sample))
+            guard pts.isFinite, let buffer = CMSampleBufferGetImageBuffer(sample) else { continue }
+            CVPixelBufferLockBaseAddress(buffer, .readOnly)
+            let bufferWidth = CVPixelBufferGetWidth(buffer)
+            let bufferHeight = CVPixelBufferGetHeight(buffer)
+            let bytesPerRow = CVPixelBufferGetBytesPerRow(buffer)
+            var sum = 0.0
+            if let base = CVPixelBufferGetBaseAddress(buffer)?.assumingMemoryBound(to: UInt8.self) {
+                for y in 0..<bufferHeight {
+                    for x in 0..<bufferWidth { sum += Double(base[y * bytesPerRow + x * 4]) }
+                }
+            }
+            CVPixelBufferUnlockBaseAddress(buffer, .readOnly)
+            result.append((pts, sum / Double(bufferWidth * bufferHeight)))
+        }
+        return result
+    }
+
+    /// `fadeToBlack` が書き出し結果で**実際に黒を挟む**こと。
+    ///
+    /// S11 の E2E で画素まで確認したのは crossfade と wipeLeft だけで、fadeToBlack は
+    /// コアの純ロジック単体テストしか通っていなかった。実機で「黒フェードを設定したのに
+    /// 見た目が変わらない」という報告が出たため、書き出しの画素で固定する。
+    ///
+    /// あわせて**黒がどれだけ続くか**も出す。ランプは三角波（進行度 0.5 の 1 点でのみ
+    /// 両側が不透明度 0）なので、黒の底は原理的に一瞬しかない。体感の評価に使う。
+    func test_fadeToBlack_actuallyGoesBlackInExportedFrames() async throws {
+        guard MTLCreateSystemDefaultDevice() != nil else {
+            throw XCTSkip("Metal デバイスが無い環境ではスキップ")
+        }
+        // 市松（平均輝度 ≈127）。単色だと「黒に落ちた」のか元からその色なのか分からない。
+        let url = try await makeCheckerboardVideo(seconds: 4.0)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let sourceID = UUID()
+        let first = TimelineClip(sourceID: sourceID, sourceStart: 0, sourceEnd: 2)
+        let second = TimelineClip(sourceID: sourceID, sourceStart: 2, sourceEnd: 4)
+        let duration = 0.5
+        let transitions = [first.id: TransitionSpec(kind: .fadeToBlack, duration: duration)]
+        let built = try await TimelineCompositionBuilder().build(
+            clips: [first, second], transitions: transitions,
+            sources: [sourceID: AVURLAsset(url: url)])
+        XCTAssertNotNil(built.videoComposition, "fadeToBlack なのに videoComposition が無い")
+
+        let exporter = try makeExporter()
+        let outURL = try await exporter.export(
+            asset: built.composition,
+            mapping: TimelineMapping(clips: [first, second], transitions: transitions),
+            videoComposition: built.videoComposition,
+            audioMix: built.audioMix,
+            renderLayout: built.layout) { _ in }
+        defer { try? FileManager.default.removeItem(at: outURL) }
+
+        let frames = try await meanLuminances(of: outURL)
+        XCTAssertGreaterThan(frames.count, 0)
+
+        // 重なり区間は合成時刻 [先行尺 - duration, 先行尺) = [1.5, 2.0)。
+        let overlapStart = 2.0 - duration
+        let overlap = frames.filter { $0.pts >= overlapStart - 0.01 && $0.pts < 2.0 + 0.01 }
+        let outside = frames.filter { $0.pts < overlapStart - 0.05 }
+        XCTAssertGreaterThan(overlap.count, 0, "重なり区間のフレームが取れていない")
+        XCTAssertGreaterThan(outside.count, 0)
+
+        let baseline = outside.map { $0.mean }.reduce(0, +) / Double(outside.count)
+        let darkest = overlap.min { $0.mean < $1.mean }
+        let minMean = darkest?.mean ?? .nan
+        // 「黒に近い」の目安をベースラインの 15% とし、その滞在フレーム数を数える。
+        let darkThreshold = baseline * 0.15
+        let darkFrames = overlap.filter { $0.mean <= darkThreshold }
+        print(String(format: "[FADE] baseline=%.1f min=%.1f (pts=%.3f) darkFrames=%d/%d thr=%.1f",
+                     baseline, minMean, darkest?.pts ?? Double.nan,
+                     darkFrames.count, overlap.count, darkThreshold))
+        for frame in overlap {
+            print(String(format: "[FADE]   pts=%.3f mean=%.1f", frame.pts, frame.mean))
+        }
+
+        XCTAssertLessThan(minMean, baseline * 0.35,
+                          "fadeToBlack なのに重なり区間が暗くならない: min=\(minMean) base=\(baseline)")
+    }
 }
 
 /// S10b: 出力解像度の可視化（`Built.outputSize` / `hasDownscaledClips`）の回帰ガード。
@@ -2859,6 +2954,7 @@ final class OutputResolutionTests: XCTestCase {
         XCTAssertTrue(model.hasDownscaledClips,
                       "2560x1440 の動画が 1920x1080 枠へ縮小されるのに注意フラグが立たない")
     }
+
 }
 
 #endif

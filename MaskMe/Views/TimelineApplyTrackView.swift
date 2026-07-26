@@ -13,21 +13,38 @@ import UIKit
 /// タイムラインの寸法（全トラックで共有。x 座標系を揃えるため 1 箇所に置く）。
 enum TimelineMetrics {
     static let rulerHeight: CGFloat = 16
-    static let clipHeight: CGFloat = 52
+    /// クリップ帯の高さ。一般的な動画編集アプリのサムネ帯（56〜64pt）に合わせてある。
+    static let clipHeight: CGFloat = 60
     /// モザイク適用区間トラックの高さ。18pt では端ハンドル（8×18）が HIG の最小タップ目標
     /// 44×44pt を大きく下回っていた。28pt へ広げたうえで、ハンドルの**当たり判定だけ**を
     /// 44×44 へ拡張して補う（`TimelineApplyTrackView.edgeHandle`）。
     static let applyTrackHeight: CGFloat = 28
     static let trackSpacing: CGFloat = 4
-    /// トリムハンドルの幅（ドラッグ判定領域も兼ねる）。適用区間の端ハンドルとも共通
-    /// （操作感を揃えるため）。
-    static let handleWidth: CGFloat = 14
+    /// トリムハンドルの**見た目の幅**。適用区間の端ハンドルとも共通（操作感を揃えるため）。
+    ///
+    /// **当たり判定はこの幅ではなく `minimumTapTarget`（44pt）**。見た目を 44 まで太らせると
+    /// 短いクリップが端ハンドルだけで埋まるので、描画は 20pt・判定だけ 44pt に広げてある。
+    static let handleWidth: CGFloat = 20
+    /// 並べ替えジェスチャの判定領域を左右から削る量（片側）。
+    ///
+    /// **`handleWidth` と共用しないこと。** ハンドルを太らせるとこの inset も一緒に育ち、
+    /// 短いクリップでは並べ替え領域（幅 − inset×2）が消えて長押し並べ替えができなくなる。
+    /// 端ハンドルはトリムを優先させたいぶんだけ除ければよく、ハンドルの見た目の幅とは
+    /// 変更理由が別なので独立した定数にしてある。
+    static let reorderInset: CGFloat = 14
     /// サムネイル 1 枚が占める幅。
     static let thumbnailSlotWidth: CGFloat = 44
-    /// 継ぎ目ボタンの一辺。
-    static let jointButtonSize: CGFloat = 22
+    /// 継ぎ目ボタンの一辺。`jointLaneHeight` と必ず揃えること
+    /// （ボタンがレーンからはみ出すとクリップ帯のトリムハンドルを覆う。
+    /// `TimelineJointLaneView` の doc 参照）。
+    static let jointButtonSize: CGFloat = 28
     /// 継ぎ目ボタン専用レーンの高さ（クリップ帯の直上。`TimelineJointLaneView` の doc 参照）。
-    static let jointLaneHeight: CGFloat = 22
+    static let jointLaneHeight: CGFloat = 28
+    /// タイムライン直下の 1 段（編集ツールバー／粗さ調整バー）の高さ。
+    ///
+    /// **どちらが出ていても同じ高さにする。** 効果タブを開いた瞬間に段が生えると
+    /// プレビューが縮む（旧 UI がまさにそれで 46% → 30% まで潰れていた）。
+    static let toolbarHeight: CGFloat = 40
     static let cornerRadius: CGFloat = 4
     /// HIG の最小タップ目標。端ハンドルの**当たり判定だけ**をこの一辺へ広げる。
     static let minimumTapTarget: CGFloat = 44
@@ -235,7 +252,7 @@ struct TimelineApplyTrackView: View {
             .onTapGesture { selectedRangeID = span.rangeID }
     }
 
-    /// 端ハンドル。見た目は 14×28 のまま、**当たり判定だけ**を HIG の 44×44 へ広げる
+    /// 端ハンドル。見た目は `handleWidth`×28 のまま、**当たり判定だけ**を HIG の 44×44 へ広げる
     /// （トラック高 28pt + 上下 8pt ずつ）。
     ///
     /// 親に `.clipped()` / `.clipShape` が無いことが前提（無いことは確認済み。
@@ -314,10 +331,10 @@ struct TimelineApplyTrackView: View {
 
 /// 継ぎ目（トランジション）ボタン専用のレーン。クリップ帯の**直上**に置く。
 ///
-/// **クリップ帯の中にボタンを置いてはいけない。** 継ぎ目ボタン（22×22）は
+/// **クリップ帯の中にボタンを置いてはいけない。** 継ぎ目ボタン（`jointButtonSize` 角）は
 /// トランジション未設定の継ぎ目では `joint.time == 先行クリップの bandEnd ==
-/// 後続クリップの bandStart` なのでトリムハンドル（14×52）と x が一致し、
-/// ハンドル中央の 11×22 を覆う。`Button` はドラッグを下位ビューへ転送しないため、
+/// 後続クリップの bandStart` なのでトリムハンドルと x が一致し、ハンドル上半分を覆う。
+/// `Button` はドラッグを下位ビューへ転送しないため、
 /// ハンドル中央から始めたトリムが無反応になっていた（先行クリップの trailing 側と
 /// 後続クリップの leading 側の**両方**が食われる）。
 /// y をずらす・ボタンを小さくする案はハンドルが帯の全高 52pt を占める以上、

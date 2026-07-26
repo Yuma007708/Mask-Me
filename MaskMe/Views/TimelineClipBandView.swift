@@ -109,9 +109,12 @@ struct TimelineClipBandView: View {
         }
         .frame(width: max(width, 2), height: TimelineMetrics.clipHeight, alignment: .topLeading)
         .clipShape(RoundedRectangle(cornerRadius: TimelineMetrics.cornerRadius))
+        // 選択の表現は**白 2pt 枠 + 両端の縦グリップ**（一般的な動画編集アプリの流儀）。
+        // 黄色の枠は「速度バッジ・継ぎ目ボタン・挿入インジケータ」と同じ色で、
+        // 選択されているのか属性が付いているのかが読めなかった。
         .overlay(
             RoundedRectangle(cornerRadius: TimelineMetrics.cornerRadius)
-                .strokeBorder(isSelected ? Color.yellow : Color.white.opacity(0.25),
+                .strokeBorder(isSelected ? Color.white : Color.white.opacity(0.25),
                               lineWidth: isSelected ? 2 : 0.5)
         )
         .overlay(alignment: .leading) { if isSelected { trimHandle(.start, layout) } }
@@ -240,16 +243,31 @@ struct TimelineClipBandView: View {
 
     // MARK: - トリム
 
+    /// 端の縦グリップ（＝トリムハンドル）。**見た目は `handleWidth`、当たり判定は 44pt**。
+    ///
+    /// 判定だけを広げるのは、見た目まで 44pt にすると短いクリップが両端のハンドルで
+    /// 埋まってサムネイルが見えなくなるため（適用区間の `edgeHandle` と同じ手当て）。
+    /// 親に `.clipped()` が無いので、はみ出したぶんもヒットテストに載る。
     private func trimHandle(_ edge: TimelineTrimEdge, _ layout: TimelineClipLayout) -> some View {
         RoundedRectangle(cornerRadius: 3)
-            .fill(Color.yellow)
+            .fill(Color.white)
             .frame(width: TimelineMetrics.handleWidth, height: TimelineMetrics.clipHeight)
             .overlay(
-                Capsule()
-                    .fill(Color.black.opacity(0.45))
-                    .frame(width: 2, height: 16)
+                HStack(spacing: 3) {
+                    ForEach(0..<2, id: \.self) { _ in
+                        Capsule()
+                            .fill(Color.black.opacity(0.45))
+                            .frame(width: 2, height: 18)
+                    }
+                }
             )
             .contentShape(Rectangle())
+            .overlay(
+                Color.clear
+                    .frame(width: TimelineMetrics.minimumTapTarget,
+                           height: TimelineMetrics.clipHeight)
+                    .contentShape(Rectangle())
+            )
             .highPriorityGesture(
                 DragGesture(minimumDistance: 1)
                     .updating($trimDraft) { value, draft, _ in
@@ -325,10 +343,13 @@ struct TimelineClipBandView: View {
     /// `selectedClipID` を書くと同じ body 評価で `isSelected` が true になり、
     /// 「ジェスチャ進行中に、そのジェスチャが乗っているビューの frame が縮む」という
     /// 構造的に不安定な形になっていた（指がハンドル領域に入るとジェスチャが途切れ得る）。
-    /// 非選択時に両端 14pt が並べ替え領域から外れる副作用は、そこがトリムハンドルの
-    /// 位置であり、タップでの選択は下の `simultaneousGesture` が拾うので実害がない。
+    /// 非選択時に両端 `reorderInset` が並べ替え領域から外れる副作用は、そこがトリム
+    /// ハンドルの位置であり、タップでの選択は下の `simultaneousGesture` が拾うので実害がない。
+    ///
+    /// **inset は `handleWidth` ではなく専用の `reorderInset` から引く。** ハンドルを
+    /// 太らせたときに一緒に育つと、短いクリップで並べ替え領域が消える（`reorderInset` の doc）。
     private func reorderArea(_ layout: TimelineClipLayout, width: Double) -> some View {
-        let inset = TimelineMetrics.handleWidth * 2
+        let inset = TimelineMetrics.reorderInset * 2
         return Color.clear
             .frame(width: max(CGFloat(width) - inset, 1), height: TimelineMetrics.clipHeight)
             .contentShape(Rectangle())

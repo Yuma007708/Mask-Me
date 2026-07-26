@@ -166,7 +166,25 @@ struct EditorView: View {
 
     // MARK: - Dock（下段：顔サムネ / 調整バー / タブバー）
 
+    /// 下段。**動画モードだけ 1 段固定の階層ドックへ置き換えてある**。
+    ///
+    /// 写真モードは従来のまま（顔サムネ列・調整バー・タブバーを積む）。写真モードの
+    /// UI 契約が `adjustmentBar` の構成に依存しているため、そちらは 1 行も変えない。
+    /// 動画モードでは粗さ調整バーがタイムライン直下の段（`TimelineAdjustmentBarView`）へ
+    /// 移り、ここは常に `VideoEffectDockView.height` の 1 段になる。
+    @ViewBuilder
     private var dock: some View {
+        if model.mode == .video {
+            VideoEffectDockView(model: model)
+                .frame(maxWidth: .infinity)
+                .background(Color(uiColor: .systemBackground))
+                .clipped()
+        } else {
+            photoDock
+        }
+    }
+
+    private var photoDock: some View {
         VStack(spacing: 0) {
             // 顔タブ選択時のみ、対象の顔サムネイル列を表示。
             if model.activeTab == .face {

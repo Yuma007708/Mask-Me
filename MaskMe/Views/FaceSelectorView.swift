@@ -4,6 +4,12 @@ import SwiftUI
 /// 動画モードでは右下に検出率バッジを表示する。
 struct FaceSelectorView: View {
     @ObservedObject var model: MosaicEditorModel
+    /// 動画モードの 1 段ドック（`VideoEffectDockView`）に収める縮小版。
+    /// 写真モードは既定（`false`）のまま＝従来の見た目を変えない。
+    var compact = false
+
+    /// サムネイルの一辺。
+    private var chipSize: CGFloat { compact ? 40 : 60 }
 
     var body: some View {
         Group {
@@ -12,10 +18,10 @@ struct FaceSelectorView: View {
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity)
-                    .padding(.vertical, 10)
+                    .padding(.vertical, compact ? 0 : 10)
             } else {
                 ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 10) {
+                    HStack(spacing: compact ? 6 : 10) {
                         ForEach(model.detectedFaces) { face in
                             faceChip(face)
                         }
@@ -24,8 +30,8 @@ struct FaceSelectorView: View {
                             manualRegionChip(region)
                         }
                     }
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 8)
+                    .padding(.horizontal, compact ? 0 : 16)
+                    .padding(.vertical, compact ? 0 : 8)
                 }
             }
         }
@@ -41,7 +47,7 @@ struct FaceSelectorView: View {
                 Image(uiImage: face.thumbnail)
                     .resizable()
                     .scaledToFill()
-                    .frame(width: 60, height: 60)
+                    .frame(width: chipSize, height: chipSize)
                     .clipShape(RoundedRectangle(cornerRadius: 10))
                     .overlay(
                         RoundedRectangle(cornerRadius: 10)
@@ -87,7 +93,7 @@ struct FaceSelectorView: View {
             ZStack {
                 RoundedRectangle(cornerRadius: 10)
                     .fill(Color.orange.opacity(0.2))
-                    .frame(width: 60, height: 60)
+                    .frame(width: chipSize, height: chipSize)
                     .overlay(
                         RoundedRectangle(cornerRadius: 10)
                             .stroke(Color.orange, lineWidth: 2)

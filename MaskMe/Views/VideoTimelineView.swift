@@ -85,10 +85,21 @@ struct VideoTimelineView: View {
         return model.timeline.clips.first { $0.id == selectedClipID }
     }
 
+    /// プレイヘッドが乗っているクリップ。**選択なしでも分割できるようにするための導出値**
+    /// （一般的な動画編集アプリは「再生位置で切る」が既定で、事前の選択を要求しない）。
+    ///
+    /// 判定は帯（`bandStart..<bandEnd`）で行う。帯はトランジションの重なりを先行クリップが
+    /// 占有する形で**隙間なく連続**しているので、どの時刻でも高々 1 本に決まる
+    /// （`TimelineBandLayout.clipLayouts` の契約）。終端ちょうど（`playheadTime ==
+    /// totalDuration`）はどの帯にも入らないが、そこは `canSplit` が false なので実害はない。
+    var playheadClipID: UUID? {
+        clipLayouts.first { playheadTime >= $0.bandStart && playheadTime < $0.bandEnd }?.clipID
+    }
+
     var body: some View {
         VStack(spacing: 6) {
-            TimelineToolbarView(items: toolItems, pinnedItems: zoomItems)
             tracks
+            bottomBar
         }
         .padding(.vertical, 6)
         .onAppear {
@@ -158,6 +169,23 @@ struct VideoTimelineView: View {
         let store = thumbnails
         model.onPreviewDecodeBusyChanged = { busy in store.setPreviewBusy(busy) }
         thumbnails.setPreviewBusy(model.isPreviewDecodeBusy)
+    }
+
+    // MARK: - タイムライン直下の 1 段
+
+    /// タイムラインの**下**に置く 1 段。編集ツールバーと粗さ調整バーが**入れ替わる**
+    /// （積み上げない。`TimelineMetrics.toolbarHeight` で高さは常に一定）。
+    ///
+    /// ツールバーをタイムラインの下へ置くのは一般的な動画編集アプリの並びに合わせるため。
+    /// 粗さ調整バーをここへ同居させているのは、効果タブを開いたときに段が増えて
+    /// プレビューが潰れるのを防ぐため（旧 UI は 46% → 30% まで縮んでいた）。
+    @ViewBuilder
+    private var bottomBar: some View {
+        if model.activeTab != nil {
+            TimelineAdjustmentBarView(model: model)
+        } else {
+            TimelineToolbarView(items: toolItems)
+        }
     }
 
     // MARK: - トラック
