@@ -108,27 +108,20 @@ struct TimelineAdjustmentBarView: View {
     }
 }
 
-/// 目盛り + スクラブ帯。
+/// 目盛り帯（表示専用）。
 ///
-/// スクラブ（横ドラッグでシーク）を**この帯だけ**に持たせることで、クリップ帯の
-/// 素のドラッグを ScrollView の横スクロールに残せる（両方に付けると取り合いになる）。
+/// **シークのジェスチャは持たない。** プレイヘッドを可視領域の中央に固定した後は
+/// 「タイムラインを払う = シーク」であり、指の位置の絶対時刻へ飛ばす操作は矛盾する
+/// （線は中央にあるまま別の時刻を指す状態が作れてしまう）。そのため目盛り帯の上の
+/// 素のドラッグは横スクロールへ通し、シークは `TimelineScrollContainer` が
+/// スクロール量から逆算する。
+///
 /// 目盛り間隔は `TimelineGeometry.effectiveTickInterval(totalDuration:)`
 /// （ズーム段から決まり、本数が多すぎる長尺では倍々に粗くなる純関数）。
 struct TimelineRulerTrackView: View {
     let geometry: TimelineGeometry
     let totalDuration: Double
     let contentWidth: CGFloat
-    /// 合成時刻（秒）でのシーク要求。
-    let onScrub: (Double) -> Void
-    /// スクラブ中かどうかの通知。
-    ///
-    /// スクラブは `onChanged` ごとに zero-tolerance seek を撃つ（= プレビューが
-    /// デコーダを握り続ける）ため、この間はサムネイル生成を止める必要がある。
-    /// `@GestureState` で持つことで**ジェスチャがキャンセルされても必ず false へ戻る**
-    /// （`onEnded` は中断で呼ばれないので、そこだけに頼ると生成が永久に止まる）。
-    let onScrubbingChanged: (Bool) -> Void
-
-    @GestureState private var isScrubbing = false
 
     var body: some View {
         ZStack(alignment: .topLeading) {
@@ -140,13 +133,6 @@ struct TimelineRulerTrackView: View {
             }
         }
         .frame(height: TimelineMetrics.rulerHeight, alignment: .topLeading)
-        .contentShape(Rectangle())
-        .gesture(
-            DragGesture(minimumDistance: 0)
-                .updating($isScrubbing) { _, state, _ in state = true }
-                .onChanged { value in onScrub(geometry.time(forX: Double(value.location.x))) }
-        )
-        .onChange(of: isScrubbing) { scrubbing in onScrubbingChanged(scrubbing) }
     }
 
     /// 実効間隔（本数上限で粗くしたもの）。目盛りは `ZStack` + `.offset` で
@@ -220,16 +206,24 @@ struct TimelineMediaAppendPicker: View {
 }
 
 /// プレイヘッド（全トラックを貫く縦線）。ヒットテストしない（下の帯の操作を邪魔しない）。
+///
+/// **時刻を受け取らない。** 位置は常に可視領域の中央で、時刻は「中身がどれだけ
+/// スクロールしているか」だけが表す（`TimelineScrollContainer` の中央固定）。
+/// そのためこの View は**スクロールする中身の外側**（呼び出し側の `.overlay`）に置く。
 struct TimelinePlayheadView: View {
-    let geometry: TimelineGeometry
-    let time: Double
-
     var body: some View {
         Rectangle()
             .fill(Color.white)
             .frame(width: 2, height: TimelineMetrics.stackHeight)
+            // 中央固定のプレイヘッドは動かないので、「ここが再生位置」と読ませる
+            // 目印を上端に付ける（線だけだと目盛りの一本と区別しにくい）。
+            .overlay(alignment: .top) {
+                Image(systemName: "arrowtriangle.down.fill")
+                    .font(.system(size: 9))
+                    .foregroundStyle(.white)
+                    .offset(y: -4)
+            }
             .shadow(color: .black.opacity(0.6), radius: 2)
-            .offset(x: geometry.x(forTime: time) - 1)
             .allowsHitTesting(false)
     }
 }

@@ -5,10 +5,14 @@ import SwiftUI
 /// CapCut 風のマルチクリップタイムライン（S9）。
 ///
 /// 構成（すべて同じ横スクロール内・同じ x 座標系）:
-/// - 目盛り + スクラブ帯（`TimelineRulerTrackView`。ドラッグでシーク）
+/// - 目盛り帯（`TimelineRulerTrackView`。表示専用）
 /// - クリップ帯（`TimelineClipBandView`。選択・トリム・長押し並べ替え・継ぎ目ボタン）
 /// - モザイク適用区間トラック（`TimelineApplyTrackView`）
-/// - プレイヘッド（縦線）
+///
+/// プレイヘッドだけは**スクロールしない層**に置き、可視領域の中央に固定する
+/// （`TimelineScrollContainer` / `TimelinePlayheadView`）。つまり
+/// **タイムラインを横に払う操作がそのままシーク**であり、目盛りを掴んで
+/// 絶対時刻へ飛ばす操作は無い。
 ///
 /// **時間表現の扱い**: この View が扱う時間は**合成時刻（秒）**に統一してある。
 /// `model.playbackPosition`（0〜1）との往復は `compositionTime(forPosition:)` と
@@ -190,34 +194,41 @@ struct VideoTimelineView: View {
 
     // MARK: - トラック
 
-    /// 横スクロール容器。ビューポート観測・ピンチズーム・アンカー保持・プレイヘッド追従は
+    /// 横スクロール容器。ビューポート観測・ピンチズーム・中央固定・払ってシークは
     /// すべて `TimelineScrollContainer` が持つ（この View は中身を組むだけ）。
     private var tracks: some View {
         TimelineScrollContainer(
             geometry: $geometry, viewport: $viewport,
             contentWidth: contentWidth, totalDuration: totalDuration,
-            playheadTime: playheadTime, isFollowingPlayhead: model.isPlaying,
+            playheadTime: playheadTime, isPlaying: model.isPlaying,
             autoScroll: autoScroll,
-            onRefreshNeeded: scheduleThumbnailRefresh
-        ) {
-            VStack(alignment: .leading, spacing: TimelineMetrics.trackSpacing) {
-                TimelineRulerTrackView(geometry: geometry, totalDuration: totalDuration,
-                                       contentWidth: contentWidth, onScrub: scrub,
-                                       onScrubbingChanged: { thumbnails.setScrubbing($0) })
-                // 継ぎ目レーンとクリップ帯は 1 段として積む（`TimelineMetrics.stackHeight` と対応）。
-                VStack(alignment: .leading, spacing: 0) {
-                    TimelineJointLaneView(geometry: geometry, joints: jointLayouts,
-                                          contentWidth: contentWidth,
-                                          onJointTap: { transitionSheetClipID = $0 })
-                    clipBand
-                }
-                TimelineApplyTrackView(
-                    geometry: geometry, spans: applySpans, totalDuration: totalDuration,
-                    layouts: clipLayouts, playheadTime: playheadTime,
-                    trimPreviewRelay: trimPreviewRelay,
-                    selectedRangeID: rangeSelection, onCommit: commit)
+            onRefreshNeeded: scheduleThumbnailRefresh,
+            onSeek: seekFromScroll,
+            onScrubbingChanged: { thumbnails.setScrubbing($0) },
+            content: { trackStack })
+        // プレイヘッドは**スクロールしない層**に置き、可視領域の中央へ固定する
+        // （`TimelinePlayheadView` の doc）。中身の側に置くと、シークとスクロールの
+        // 1 フレームのずれがそのまま線の震えになる。
+        .overlay(alignment: .top) { TimelinePlayheadView() }
+    }
+
+    /// スクロールする中身（目盛り・継ぎ目・クリップ帯・適用区間を同じ x 座標系で積む）。
+    private var trackStack: some View {
+        VStack(alignment: .leading, spacing: TimelineMetrics.trackSpacing) {
+            TimelineRulerTrackView(geometry: geometry, totalDuration: totalDuration,
+                                   contentWidth: contentWidth)
+            // 継ぎ目レーンとクリップ帯は 1 段として積む（`TimelineMetrics.stackHeight` と対応）。
+            VStack(alignment: .leading, spacing: 0) {
+                TimelineJointLaneView(geometry: geometry, joints: jointLayouts,
+                                      contentWidth: contentWidth,
+                                      onJointTap: { transitionSheetClipID = $0 })
+                clipBand
             }
-            TimelinePlayheadView(geometry: geometry, time: playheadTime)
+            TimelineApplyTrackView(
+                geometry: geometry, spans: applySpans, totalDuration: totalDuration,
+                layouts: clipLayouts, playheadTime: playheadTime,
+                trimPreviewRelay: trimPreviewRelay,
+                selectedRangeID: rangeSelection, onCommit: commit)
         }
     }
 
@@ -306,6 +317,15 @@ struct VideoTimelineView: View {
         guard totalDuration > 0 else { return }
         let clamped = min(max(seconds, 0), totalDuration.nextDown)
         model.seekToLatest(position: clamped / totalDuration)
+    }
+
+    /// タイムラインを払ったときのシーク（中央のプレイヘッドが指す時刻へ移す）。
+    ///
+    /// 再生中に指で動かされたときは**再生を止める**。止めないと追従スクロールが指を
+    /// 押し返し続ける（一般的な動画編集アプリでも、再生中のスクラブは再生を止める）。
+    private func seekFromScroll(to seconds: Double) {
+        if model.isPlaying { model.togglePlayback() }
+        scrub(toCompositionTime: seconds)
     }
 
     /// 消えたクリップ・区間を選択したままにしない（削除・undo 後）。

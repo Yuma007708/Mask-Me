@@ -2,7 +2,7 @@ import Foundation
 
 /// スクロールビューの現在の見え方（px 単位）。
 ///
-/// **座標系は「トラック内 x」で統一する（`.padding(.horizontal, 16)` の内側）。**
+/// **座標系は「トラック内 x」で統一する（左右の余白の内側）。**
 /// つまり合成時刻 0 の位置が x = 0 であり、`TimelineGeometry.x(forTime:)` と同じ原点。
 /// アプリ層は `scrollOffset = contentOffset.x - leadingInset`、
 /// `contentWidth = トラック本体の幅（余白を含めない）` を渡すこと。
@@ -34,9 +34,11 @@ public struct TimelineViewport: Equatable, Sendable {
 /// **「スクロール位置と可視範囲」**を扱う。View 側に散らすと、ピンチ中の
 /// アンカー保持やサムネイル予算の判断が毎回書き直されて壊れるため純ロジックへ寄せる。
 ///
-/// ## 余白（`.padding(.horizontal, 16)`）の扱い
+/// ## 余白（コンテンツ左右の `.padding`）の扱い
 ///
-/// `zoomAnchor` → `scrollOffset` の往復では、先頭余白ぶんの定数は
+/// アプリ層はプレイヘッドを中央へ固定するため `visibleWidth / 2` の余白を付ける。
+/// 余白量に依存するのは `scrollOffsetBounds` と `anchorUnitPointX`（どちらも
+/// `leadingInset` で受ける）だけで、アンカー保持の往復では先頭余白ぶんの定数は
 /// `x(forTime:)` 側と `viewportX` 側の**両辺に等しく乗るので相殺される**
 /// （アンカー保持だけなら余白を無視しても結果は変わらない）。
 /// 一方 `visibleTimeRange` は `scrollOffset` を直接秒へ換算するため相殺されない。
@@ -66,6 +68,11 @@ public enum TimelineScrollMath {
 
     /// ズーム変更で保つアンカー。プレイヘッドが可視ならそれ、外なら可視中心。
     ///
+    /// **プレイヘッド中央固定のタイムラインはこれを使わない**（見ている位置が常に
+    /// 再生位置なので `centeredScrollOffset` で足りる。「可視外なら可視中心」の分岐を
+    /// 入れると、線が中央にあるまま別の時刻を指す状態が作れてしまう）。
+    /// 中央固定でない配置でズームの見え方を保ちたい場合のための汎用関数。
+    ///
     /// プレイヘッドを優先するのは「いま見ている再生位置を中心に拡大したい」が
     /// 支配的な操作だから。可視外のときに使うと画面が飛ぶので中心へ落とす。
     ///
@@ -85,27 +92,45 @@ public enum TimelineScrollMath {
 
     /// アンカーを保つために必要な新スクロール位置（px）。
     ///
-    /// `0...max(0, contentWidth - visibleWidth)` へクランプする
-    /// （余白の中まで戻す必要はないので下限は 0 でよい）。
+    /// `scrollOffsetBounds(contentWidth:visibleWidth:leadingInset:)` へクランプする。
     /// 非有限値はすべて 0 とみなす（NaN をスクロール位置に流すと
     /// `ScrollViewReader` が黙って無反応になる）。
     ///
     /// - Parameters:
     ///   - geometry: **ズーム変更後**の geometry を渡すこと（変更前を渡すと当然ずれる）。
-    ///   - contentWidth: 変更後のコンテンツ全幅。
+    ///   - contentWidth: 変更後のコンテンツ全幅（余白を含めないトラック本体の幅）。
+    ///   - leadingInset: コンテンツ左右に付く余白（px）。0 なら従来どおり
+    ///     `0...contentWidth - visibleWidth` にクランプされる。
     public static func scrollOffset(anchorTime: Double,
                                     anchorViewportX: Double,
                                     geometry: TimelineGeometry,
                                     contentWidth: Double,
-                                    visibleWidth: Double) -> Double {
+                                    visibleWidth: Double,
+                                    leadingInset: Double = 0) -> Double {
         let anchorX = geometry.x(forTime: anchorTime)
         let viewportX = anchorViewportX.isFinite ? anchorViewportX : 0
+        let bounds = scrollOffsetBounds(contentWidth: contentWidth, visibleWidth: visibleWidth,
+                                        leadingInset: leadingInset)
+        let raw = anchorX - viewportX
+        guard raw.isFinite else { return min(max(0, bounds.lowerBound), bounds.upperBound) }
+        return min(max(raw, bounds.lowerBound), bounds.upperBound)
+    }
+
+    /// スクロール量（トラック内 x）の可動域。
+    ///
+    /// `leadingInset` はコンテンツの**左右に対称で付く余白**（px）。余白が無ければ
+    /// `0...contentWidth - visibleWidth`。プレイヘッドを可視領域の中央へ固定する構成では
+    /// 合成時刻 0 を中央へ持ってくるために `-visibleWidth / 2` まで戻れる必要があるので、
+    /// 呼び出し側は `visibleWidth / 2` を渡す（これが必要十分な余白量。
+    /// 終端側も対称に `contentWidth - visibleWidth / 2` まで進める）。
+    public static func scrollOffsetBounds(contentWidth: Double,
+                                          visibleWidth: Double,
+                                          leadingInset: Double = 0) -> ClosedRange<Double> {
         let content = contentWidth.isFinite ? max(0, contentWidth) : 0
         let visible = visibleWidth.isFinite ? max(0, visibleWidth) : 0
-        let upperBound = max(0, content - visible)
-        let raw = anchorX - viewportX
-        guard raw.isFinite else { return 0 }
-        return min(max(raw, 0), upperBound)
+        let inset = leadingInset.isFinite ? max(0, leadingInset) : 0
+        let lower = -inset
+        return lower...max(lower, content + inset - visible)
     }
 
     /// `ScrollViewReader.scrollTo(id, anchor:)` に渡す `UnitPoint.x`。
@@ -114,17 +139,58 @@ public enum TimelineScrollMath {
     /// スクロール位置を作れるのは「id + anchor」だけ。コンテンツ全体を 1 要素として
     /// 掴んでいる場合、スクロール量の割合がそのまま anchor の x になる。
     ///
-    /// `f = scrollOffset / (contentWidth - visibleWidth)` を `0...1` へクランプ。
-    /// スクロール不要（`contentWidth <= visibleWidth`）・非有限は 0。
+    /// `f = (scrollOffset + leadingInset) / (contentWidth + 2 * leadingInset - visibleWidth)`
+    /// を `0...1` へクランプ。**`leadingInset` を渡すときは `.id` を余白の外側に付けること**
+    /// （分数の分母は id を付けた View の幅。余白の内側に付けると分母が
+    /// `contentWidth - visibleWidth` になり、着地点が余白ぶんずれる）。
+    /// スクロール不要・非有限は 0。
     public static func anchorUnitPointX(scrollOffset: Double,
                                         contentWidth: Double,
-                                        visibleWidth: Double) -> Double {
-        guard scrollOffset.isFinite, contentWidth.isFinite, visibleWidth.isFinite else { return 0 }
-        let scrollable = contentWidth - visibleWidth
+                                        visibleWidth: Double,
+                                        leadingInset: Double = 0) -> Double {
+        guard scrollOffset.isFinite, contentWidth.isFinite, visibleWidth.isFinite,
+              leadingInset.isFinite else { return 0 }
+        let inset = max(0, leadingInset)
+        let scrollable = contentWidth + inset * 2 - visibleWidth
         guard scrollable > 0 else { return 0 }
-        let fraction = scrollOffset / scrollable
+        let fraction = (scrollOffset + inset) / scrollable
         guard fraction.isFinite else { return 0 }
         return min(max(fraction, 0), 1)
+    }
+
+    // MARK: - プレイヘッド中央固定
+
+    /// プレイヘッドを可視領域の中央に固定する構成での、合成時刻 → スクロール量。
+    ///
+    /// 余白は `visibleWidth / 2`（`scrollOffsetBounds` の doc 参照）。`0...totalDuration`
+    /// の範囲の時刻はクランプされずに往復する（`centeredTime` が逆写像）。
+    public static func centeredScrollOffset(time: Double,
+                                            geometry: TimelineGeometry,
+                                            contentWidth: Double,
+                                            visibleWidth: Double) -> Double {
+        let visible = visibleWidth.isFinite ? max(0, visibleWidth) : 0
+        return scrollOffset(anchorTime: time, anchorViewportX: visible / 2, geometry: geometry,
+                            contentWidth: contentWidth, visibleWidth: visible,
+                            leadingInset: visible / 2)
+    }
+
+    /// 同構成での逆写像。スクロール量 → 可視領域中央が指す合成時刻（`0...totalDuration`）。
+    ///
+    /// **これが「タイムラインを払う = シークする」の唯一の変換**。View 側で
+    /// `scrollOffset + visibleWidth / 2` を組み立て直さないこと（中央の定義が
+    /// `centeredScrollOffset` と分かれると往復が閉じなくなる）。
+    public static func centeredTime(scrollOffset: Double,
+                                    geometry: TimelineGeometry,
+                                    visibleWidth: Double,
+                                    totalDuration: Double) -> Double {
+        // 非有限のスクロール量は「位置が不明」なのでシークの入力にしない（0 を返す）。
+        // ここで `0` へ寄せる（= 先頭）のは、時刻としての安全側だからである。
+        guard totalDuration.isFinite, totalDuration > 0, scrollOffset.isFinite else { return 0 }
+        let offset = scrollOffset
+        let visible = visibleWidth.isFinite ? max(0, visibleWidth) : 0
+        let time = geometry.time(forX: offset + visible / 2)
+        guard time.isFinite else { return 0 }
+        return min(max(time, 0), totalDuration)
     }
 
     // MARK: - ピンチズーム
@@ -132,7 +198,8 @@ public enum TimelineScrollMath {
     /// ピンチ倍率 → 新 px/秒（連続値）。
     ///
     /// **iOS 16 では `MagnifyGesture`（`startLocation` 付き）が使えない**ため、
-    /// ジェスチャからは倍率しか取れない。位置は呼び出し側が `zoomAnchor` で補う。
+    /// ジェスチャからは倍率しか取れない。位置は呼び出し側が補う
+    /// （中央固定のタイムラインは `centeredScrollOffset`）。
     ///
     /// 量子化は「倍率」に対して掛ける（絶対 px/秒 のグリッドへ吸着させると、
     /// ジェスチャ開始時 `magnification == 1` でも値が跳ぶ）。

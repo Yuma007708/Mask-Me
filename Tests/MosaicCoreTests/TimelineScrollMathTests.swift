@@ -172,6 +172,93 @@ final class TimelineScrollMathTests: XCTestCase {
                                                            visibleWidth: 200), 0)
     }
 
+    // MARK: - プレイヘッド中央固定
+
+    /// 可動域は左右に `visibleWidth / 2` の余白ぶん広がる。
+    ///
+    /// これが「合成時刻 0 も終端も画面中央へ持ってこられる」ための必要十分条件。
+    func test_scrollOffsetBounds_openUpByLeadingInset() {
+        let plain = TimelineScrollMath.scrollOffsetBounds(contentWidth: 1200, visibleWidth: 360)
+        XCTAssertEqual(plain.lowerBound, 0)
+        XCTAssertEqual(plain.upperBound, 840)
+
+        let centered = TimelineScrollMath.scrollOffsetBounds(contentWidth: 1200, visibleWidth: 360,
+                                                             leadingInset: 180)
+        XCTAssertEqual(centered.lowerBound, -180)
+        XCTAssertEqual(centered.upperBound, 1020)
+
+        // 可視幅より短いコンテンツでも下限は必ず上限以下（`ClosedRange` の前提）。
+        let short = TimelineScrollMath.scrollOffsetBounds(contentWidth: 10, visibleWidth: 360,
+                                                          leadingInset: 180)
+        XCTAssertLessThanOrEqual(short.lowerBound, short.upperBound)
+        XCTAssertEqual(short.lowerBound, -180)
+    }
+
+    /// 中央固定の往復（時刻 → スクロール量 → 時刻）が閉じる。端も含めてクランプされない。
+    ///
+    /// **これが崩れると「払ってシーク」が自分の着地点を別の時刻と読み、
+    /// 追従スクロールと押し合うループになる。**
+    func test_centeredOffset_roundTripsAtBothEnds() {
+        let totalDuration = 30.0
+        let contentWidth = geometry.width(forDuration: totalDuration)
+        let visibleWidth = 360.0
+
+        for time in [0.0, 0.4, 7.5, 15.0, 29.6, totalDuration] {
+            let offset = TimelineScrollMath.centeredScrollOffset(time: time, geometry: geometry,
+                                                                 contentWidth: contentWidth,
+                                                                 visibleWidth: visibleWidth)
+            let back = TimelineScrollMath.centeredTime(scrollOffset: offset, geometry: geometry,
+                                                       visibleWidth: visibleWidth,
+                                                       totalDuration: totalDuration)
+            XCTAssertEqual(back, time, accuracy: 1e-9, "time=\(time)")
+        }
+
+        // 先頭では余白の半分ぶん戻り、終端では全幅から半分ぶん進む。
+        XCTAssertEqual(TimelineScrollMath.centeredScrollOffset(time: 0, geometry: geometry,
+                                                               contentWidth: contentWidth,
+                                                               visibleWidth: visibleWidth),
+                       -180, accuracy: 1e-12)
+        XCTAssertEqual(TimelineScrollMath.centeredScrollOffset(time: totalDuration, geometry: geometry,
+                                                               contentWidth: contentWidth,
+                                                               visibleWidth: visibleWidth),
+                       contentWidth - 180, accuracy: 1e-12)
+    }
+
+    /// 中央の時刻は `0...totalDuration` に収まる（余白まで払っても範囲外へ出ない）。
+    func test_centeredTime_clampsToTimeline() {
+        XCTAssertEqual(TimelineScrollMath.centeredTime(scrollOffset: -1000, geometry: geometry,
+                                                       visibleWidth: 360, totalDuration: 30), 0)
+        XCTAssertEqual(TimelineScrollMath.centeredTime(scrollOffset: 99_999, geometry: geometry,
+                                                       visibleWidth: 360, totalDuration: 30), 30)
+        // 尺が無い（クリップ 0 本）ときは 0。
+        XCTAssertEqual(TimelineScrollMath.centeredTime(scrollOffset: 400, geometry: geometry,
+                                                       visibleWidth: 360, totalDuration: 0), 0)
+        XCTAssertEqual(TimelineScrollMath.centeredTime(scrollOffset: .nan, geometry: geometry,
+                                                       visibleWidth: 360, totalDuration: 30), 0)
+    }
+
+    /// 余白つきの `UnitPoint.x`。**分母は余白を含む全幅**（`.id` を余白の外に付ける前提）。
+    func test_anchorUnitPointX_accountsForLeadingInset() {
+        // 中央固定（inset = visibleWidth / 2）では分母がちょうど contentWidth になる。
+        XCTAssertEqual(TimelineScrollMath.anchorUnitPointX(scrollOffset: -180, contentWidth: 1200,
+                                                           visibleWidth: 360, leadingInset: 180),
+                       0, accuracy: 1e-12)
+        XCTAssertEqual(TimelineScrollMath.anchorUnitPointX(scrollOffset: 420, contentWidth: 1200,
+                                                           visibleWidth: 360, leadingInset: 180),
+                       0.5, accuracy: 1e-12)
+        XCTAssertEqual(TimelineScrollMath.anchorUnitPointX(scrollOffset: 1020, contentWidth: 1200,
+                                                           visibleWidth: 360, leadingInset: 180),
+                       1, accuracy: 1e-12)
+        // コンテンツが可視幅より短くても、余白のぶんだけスクロールできる
+        // （可動域は -180...-140 で、その全体が 0...1 に写る）。
+        XCTAssertEqual(TimelineScrollMath.anchorUnitPointX(scrollOffset: -180, contentWidth: 40,
+                                                           visibleWidth: 360, leadingInset: 180),
+                       0, accuracy: 1e-12)
+        XCTAssertEqual(TimelineScrollMath.anchorUnitPointX(scrollOffset: -140, contentWidth: 40,
+                                                           visibleWidth: 360, leadingInset: 180),
+                       1, accuracy: 1e-12)
+    }
+
     // MARK: - ピンチ倍率 → px/秒
 
     /// 等倍は base そのまま（ジェスチャ開始で値が跳ばない）。
