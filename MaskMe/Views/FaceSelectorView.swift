@@ -4,31 +4,63 @@ import SwiftUI
 /// 動画モードでは右下に検出率バッジを表示する。
 struct FaceSelectorView: View {
     @ObservedObject var model: MosaicEditorModel
+    /// 動画モードの 1 段ドック（`VideoEffectDockView`）に収める縮小版。
+    /// 写真モードは既定（`false`）のまま＝従来の見た目を変えない。
+    var compact = false
+
+    /// サムネイルの一辺。
+    private var chipSize: CGFloat { compact ? 40 : 60 }
 
     var body: some View {
-        Group {
-            if model.detectedFaces.isEmpty && model.manualRegions.isEmpty {
-                Text("顔を検出できませんでした")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 10)
-            } else {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 10) {
-                        ForEach(model.detectedFaces) { face in
-                            faceChip(face)
-                        }
-                        // 手動矩形は顔ではなく「領域」として別表示
-                        ForEach(model.manualRegions) { region in
-                            manualRegionChip(region)
-                        }
-                    }
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 8)
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: compact ? 6 : 10) {
+                // 矩形ツールの入口。**顔が 1 つも見つからないときこそ必要**なので、
+                // 「検出できませんでした」の場合も必ず並べる（旧実装はこの分岐で
+                // 行ごと差し替えていたため、検出ゼロだと手動指定へ辿り着けなかった）。
+                rectangleToolChip
+                ForEach(model.detectedFaces) { face in
+                    faceChip(face)
+                }
+                // 手動矩形は顔ではなく「領域」として別表示
+                ForEach(model.manualRegions) { region in
+                    manualRegionChip(region)
+                }
+                if model.detectedFaces.isEmpty && model.manualRegions.isEmpty {
+                    Text("顔を検出できませんでした")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .fixedSize()
                 }
             }
+            .padding(.horizontal, compact ? 0 : 16)
+            .padding(.vertical, compact ? 0 : 8)
         }
+    }
+
+    // MARK: - 矩形ツール
+
+    /// 手動矩形ツールの ON/OFF。**既定は OFF**（常時有効だと誤って矩形ができる）。
+    private var rectangleToolChip: some View {
+        Button {
+            model.isRectangleToolActive.toggle()
+        } label: {
+            let isOn = model.isRectangleToolActive
+            VStack(spacing: 2) {
+                Image(systemName: "rectangle.dashed")
+                    .font(.system(size: compact ? 17 : 22, weight: .semibold))
+                Text("矩形")
+                    .font(.system(size: 10, weight: .semibold))
+            }
+            .foregroundStyle(isOn ? Color.white : Color.accentColor)
+            .frame(width: chipSize, height: chipSize)
+            .background(
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(isOn ? Color.accentColor : Color.accentColor.opacity(0.12))
+            )
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("editor.rectangleTool")
+        .accessibilityLabel(model.isRectangleToolActive ? "矩形の指定を終える" : "矩形で範囲を指定")
     }
 
     // MARK: - Face chip
@@ -41,7 +73,7 @@ struct FaceSelectorView: View {
                 Image(uiImage: face.thumbnail)
                     .resizable()
                     .scaledToFill()
-                    .frame(width: 60, height: 60)
+                    .frame(width: chipSize, height: chipSize)
                     .clipShape(RoundedRectangle(cornerRadius: 10))
                     .overlay(
                         RoundedRectangle(cornerRadius: 10)
@@ -87,7 +119,7 @@ struct FaceSelectorView: View {
             ZStack {
                 RoundedRectangle(cornerRadius: 10)
                     .fill(Color.orange.opacity(0.2))
-                    .frame(width: 60, height: 60)
+                    .frame(width: chipSize, height: chipSize)
                     .overlay(
                         RoundedRectangle(cornerRadius: 10)
                             .stroke(Color.orange, lineWidth: 2)
@@ -103,5 +135,7 @@ struct FaceSelectorView: View {
             }
         }
         .buttonStyle(.plain)
+        .accessibilityIdentifier("editor.manualRegion")
+        .accessibilityLabel("指定した矩形を削除")
     }
 }

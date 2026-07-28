@@ -6,11 +6,21 @@ import MosaicCore
 #if canImport(Metal)
 import Metal
 
-/// Composition 経由に切り替えたことで「元素材と見分けがつく差」が出ていないことを固定する。
+/// **無変換タイムライン限定**の忠実度契約（S7 で範囲を再定義）。
 ///
-/// フェーズ1の合格条件は「着手前と見分けがつかないこと」なので、
-/// 合成トラックから読む値（ビットレート・音声フォーマット）が
-/// 元素材のトラックと一致することを実測で担保する。
+/// フェーズ2 で編集機能（複数クリップ・速度変更・トリム・写真クリップ）が入った以上、
+/// 「Composition 経由なら常に元素材と bit 同一」はもう成立しない。速度変更や
+/// empty edit は編集そのものであり、音声は AAC 再エンコードへ落ちるのが正しい。
+///
+/// そこでこのテストが守る契約を次に限定する:
+///
+/// > **無変換タイムライン**（全クリップ rate=1・トランジションなし・単一フォーマット・
+/// > トリムなし）で書き出したときだけ、フェーズ1 と同じ忠実度
+/// > （映像ビットレートが変わらない／音声は再エンコードされないパススルー）を保つ。
+///
+/// 変換ありの構成（rate≠1・empty edit・フォーマット混在・トリム）の音声挙動は
+/// `MultiClipExportTests` 側で固定する。ここでは「変換が無いなら何もしない」の一点だけを
+/// 見張る（`AudioExportPipeline.decide` が `.passthrough` を返す入口条件も含む）。
 final class CompositionFidelityTests: XCTestCase {
     private let width = 320
     private let height = 240
@@ -145,7 +155,7 @@ final class CompositionFidelityTests: XCTestCase {
         let sourceID = UUID()
         let clip = TimelineClip(sourceID: sourceID, sourceStart: 0, sourceEnd: seconds)
         return try await TimelineCompositionBuilder()
-            .build(clips: [clip], sources: [sourceID: asset])
+            .build(clips: [clip], sources: [sourceID: asset]).composition
     }
 
     // MARK: - Critical 1: ビットレートが合成で変わらないこと
@@ -186,11 +196,41 @@ final class CompositionFidelityTests: XCTestCase {
         let composition = try await TimelineCompositionBuilder().build(
             clips: [TimelineClip(sourceID: sourceID, sourceStart: 0, sourceEnd: 1),
                     TimelineClip(sourceID: sourceID, sourceStart: 2, sourceEnd: 3)],
-            sources: [sourceID: asset])
+            sources: [sourceID: asset]).composition
         let rate = try await composition.loadTracks(withMediaType: .video)[0]
             .load(.estimatedDataRate)
         print("[FIDELITY] multiClipDataRate=\(rate)")
         XCTAssertGreaterThan(rate, 0, "複数クリップの合成トラックがデータレート 0 を返した")
+    }
+
+    // MARK: - 無変換タイムラインの契約（S7）
+
+    /// **契約の入口**: 無変換タイムライン（rate=1・トリムなし・単一素材・
+    /// 音声 empty edit なし）の composition から読んだ実データが、
+    /// `AudioExportPipeline` に `.passthrough` を選ばせること。
+    ///
+    /// `test_exportFromCompositionPreservesAudio` は「結果として再エンコードされて
+    /// いない」ことを見るが、経路そのものがどちらだったかは分からない。判定の入口を
+    /// ここで固定しておくと、条件追加（S7 の rate≠1・フォーマット混在など）で
+    /// 無変換構成が巻き添えになった瞬間に落ちる。
+    func test_noTransformTimelineSelectsPassthroughPipeline() async throws {
+        let url = try await makeTestVideo(seconds: 1.0, withAudio: true)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let composition = try await buildComposition(from: AVURLAsset(url: url), seconds: 1.0)
+        let audioTracks = try await composition.loadTracks(withMediaType: .audio)
+        XCTAssertFalse(audioTracks.isEmpty, "合成に音声トラックが無い")
+        // 判定材料は**全トラック分**から組む（1 本しか見ないと A/B 交互配置の
+        // B 側を取りこぼす）。無変換タイムラインではそもそも 1 本しか無い。
+        let conditions = AudioTrackConditions.from(
+            tracks: await AudioTrackData.load(from: audioTracks))
+        print("[FIDELITY] noTransform conditions=\(conditions)")
+        XCTAssertEqual(conditions, AudioTrackConditions(),
+                       "無変換タイムラインなのに変換条件が立っている")
+        XCTAssertEqual(AudioExportPipeline.decide(isTrimming: false, hasAudioMix: false,
+                                                  conditions: conditions),
+                       .passthrough,
+                       "無変換タイムラインがパススルーに乗らない（bit 同一の忠実度が壊れる）")
     }
 
     // MARK: - Important 4: 音声パススルー
@@ -222,8 +262,10 @@ final class CompositionFidelityTests: XCTestCase {
                        "合成でチャンネル数が変わっている")
     }
 
-    /// Composition を実際に書き出して、音声が消えず・再エンコードもされないこと。
-    /// 「例外は出ないが音が無い」という表面化のしかたを直接踏みにいく。
+    /// **無変換タイムライン**の Composition を実際に書き出して、音声が消えず・
+    /// 再エンコードもされないこと。「例外は出ないが音が無い」という表面化のしかたを
+    /// 直接踏みにいく。rate≠1 やトリムを含む構成はこの契約の対象外
+    /// （それらは再エンコードされるのが正しい。`MultiClipExportTests` 参照）。
     func test_exportFromCompositionPreservesAudio() async throws {
         guard MTLCreateSystemDefaultDevice() != nil else {
             throw XCTSkip("Metal デバイスが無い環境ではスキップ")
@@ -238,13 +280,15 @@ final class CompositionFidelityTests: XCTestCase {
         let srcFormat = try XCTUnwrap(compAudioFormats?.first)
         let srcASBD = try XCTUnwrap(
             CMAudioFormatDescriptionGetStreamBasicDescription(srcFormat)?.pointee)
+        let srcAudioRate = try await XCTUnwrap(compAudioTrack, "合成に音声トラックが無い")
+            .load(.estimatedDataRate)
 
         let renderer = try MosaicRenderer(evaluator: TrackingEvaluator(smoothing: 1.0))
         let exporter = VideoMosaicExporter(renderer: renderer,
                                            landmarker: NullFaceLandmarker())
         let outURL = try await exporter.export(
             asset: composition, selectedFaceTargets: [], manualRegions: [],
-            detectionCache: [:], faceEnabled: true, backgroundEnabled: false,
+            detectionCaches: [:], faceEnabled: true, backgroundEnabled: false,
             backgroundBlock: 28, speed: .fast) { _ in }
         defer { try? FileManager.default.removeItem(at: outURL) }
 
@@ -259,12 +303,26 @@ final class CompositionFidelityTests: XCTestCase {
         print("[FIDELITY] exportAudio src=\(srcASBD.mFormatID)/\(srcASBD.mSampleRate)"
               + "/\(srcASBD.mChannelsPerFrame) out=\(outASBD.mFormatID)/\(outASBD.mSampleRate)"
               + "/\(outASBD.mChannelsPerFrame)")
-        // パススルーなのでコーデック・サンプルレート・チャンネル数が完全一致するはず。
-        // ずれたら再エンコードが起きている。
-        XCTAssertEqual(outASBD.mFormatID, srcASBD.mFormatID,
-                       "音声が再エンコードされている（コーデック不一致）")
+        // コーデック・サンプルレート・チャンネル数の一致。
+        // 注意: **これだけでは経路（パススルー / 再エンコード）を区別できない。**
+        // テスト素材は AAC/44.1kHz/1ch で、再エンコード経路もレート・チャンネル数を
+        // 素材に合わせた AAC を書く（`reencodeAudioFormat(matching:)`）ため、
+        // この 3 項目はどちらの経路でも一致する。経路そのものの契約は
+        // `test_noTransformTimelineSelectsPassthroughPipeline`（decide の入口）と
+        // `MultiClipExportTests` の真理値表テストが担う。ここで見ているのは
+        // 「音声が消えていない・素材と同じ素性で載っている」ことまで。
+        XCTAssertEqual(outASBD.mFormatID, srcASBD.mFormatID, "書き出しでコーデックが変わった")
         XCTAssertEqual(outASBD.mSampleRate, srcASBD.mSampleRate)
         XCTAssertEqual(outASBD.mChannelsPerFrame, srcASBD.mChannelsPerFrame)
+
+        // 経路を実際に区別できるのはビットレート。素材は 64kbps AAC、再エンコード経路は
+        // 96kbps 固定（`aacAudioSettings`）なので、再エンコードに落ちるとここがずれる。
+        let outAudioRate = try await outAudio[0].load(.estimatedDataRate)
+        print("[FIDELITY] exportAudio dataRate src=\(srcAudioRate) out=\(outAudioRate)")
+        XCTAssertGreaterThan(srcAudioRate, 0, "素材のデータレートが 0 で比較にならない")
+        XCTAssertEqual(outAudioRate, srcAudioRate, accuracy: srcAudioRate * 0.2,
+                       "音声のビットレートが素材と大きく違う。"
+                       + "無変換タイムラインなのに再エンコード経路へ落ちている可能性がある。")
 
         // 尺がほぼ保たれていること（音声が途中で切れていない）。
         let outDuration = try await outAudio[0].load(.timeRange).duration

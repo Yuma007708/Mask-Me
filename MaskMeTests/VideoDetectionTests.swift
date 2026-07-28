@@ -48,6 +48,50 @@ final class VideoDetectionTests: XCTestCase {
         XCTAssertTrue(didLock, "追従が一度も .tracking にロックしませんでした")
     }
 
+    /// 検出率が高くても、**1 フレームだけ検出が抜ける**とモザイクが一瞬外れて見える
+    /// （実機で確認。全候補 crop 再検証を入れた直後に発生し、`verifiedMemory` の猶予で対処）。
+    /// 平均検出率のテストはこの穴を検出できない（80% 以上なら 1 フレーム抜けは通る）ので、
+    /// 「検出あり → 抜け → 検出あり」で挟まれた孤立した抜けの数を直接数える。
+    /// 実運用と同じ 15fps バケットで走査する。
+    /// **現状このテストに検出力はない。** 実機で報告されたちらつきは、手元の
+    /// `sample_face` / `profile` では猶予（`verifiedMemory`）の有無にかかわらず 0 件で
+    /// 再現しなかった（計測済み）。再現する素材が手に入るまでは「将来の退行を止める枠」
+    /// にすぎないので、このテストが green であることをちらつき解消の根拠にしないこと。
+    func testNoIsolatedDetectionGaps() throws {
+        guard let modelPath = FixtureLoader.modelPath() else {
+            throw XCTSkip("face_landmarker.task が見つかりません")
+        }
+        let urls = ["sample_face", "profile"].compactMap { name in
+            FixtureLoader.videoURL(named: name).map { (name, $0) }
+        }
+        try XCTSkipIf(urls.isEmpty, "Fixtures に検証用の動画がありません")
+
+        var failures: [String] = []
+        for (name, url) in urls {
+            let adapter = try MediaPipeFaceLandmarkerAdapter(modelPath: modelPath,
+                                                            runningMode: .video)
+            let interval = 1.0 / 15.0
+            let frames = try Self.extractFrames(from: url, interval: interval)
+            if frames.count < 3 { continue }
+
+            let detected: [Bool] = frames.enumerated().map { index, frame in
+                adapter.landmarks(in: frame,
+                                  timestampMs: Int(Double(index) * interval * 1000)) != nil
+            }
+            let isolatedGaps = (1..<(detected.count - 1)).filter {
+                !detected[$0] && detected[$0 - 1] && detected[$0 + 1]
+            }
+            if !isolatedGaps.isEmpty {
+                failures.append("\(name): index=\(isolatedGaps) 全 \(detected.count) フレーム")
+            }
+        }
+        XCTAssertTrue(
+            failures.isEmpty,
+            "検出が 1 フレームだけ抜けている（モザイクが一瞬外れる）:\n"
+                + failures.joined(separator: "\n")
+        )
+    }
+
     /// Decodes frames at a fixed interval into `UIImage`s.
     private static func extractFrames(from url: URL, interval: Double) throws -> [UIImage] {
         let asset = AVAsset(url: url)

@@ -33,24 +33,27 @@ extension MosaicEditorModel {
     }
 
     /// プリスキャン（フル解像度・VIDEO モード）の 1 フレーム分の結果を検出キャッシュへ
-    /// 記録する。MainActor 上で呼ぶこと。
+    /// 記録する。`rawTime` は**合成時刻**で、入口で素材ID・素材時刻へ写像してから
+    /// 記録する（丸めは写像の後。`resolveSourceTime` の doc 参照）。MainActor 上で呼ぶこと。
     ///
-    /// - キーはライブ検出と同じ 15fps バケット（`liveBucket`）に正規化する。
-    ///   プリスキャンループの `t += 1/15` 累積値をそのままキーにすると、丸めで得た
-    ///   バケット値と最下位ビットで食い違い、ライブ検出が先に書いた低解像度エントリ
-    ///   （誤検知含む）を上書きできずプレビュー・エクスポート両方に残り続ける。
+    /// - キーはライブ検出と同じ 15fps バケット（`DetectionCacheKey.init` の丸め）に
+    ///   正規化される。プリスキャンループの `t += 1/15` 累積値をそのままキーにすると、
+    ///   丸めで得たバケット値と最下位ビットで食い違い、ライブ検出が先に書いた低解像度
+    ///   エントリ（誤検知含む）を上書きできずプレビュー・エクスポート両方に残り続ける。
     /// - 空結果も上書き記録する。フル解像度パイプラインの「顔なし」判定でライブ検出
     ///   （480px 簡易経路）の誤検知を消すため。空エントリは DetectionBridge が
     ///   無視するので追従率には影響せず、nearestCachedFaces のホールド抑止
     ///   （体への貼り付き防止）には効く。
     func storePreScanResult(_ faces: [FaceLandmarkSet], at rawTime: Double) {
-        cacheStore.store(faces, sourceID: currentSourceID, time: rawTime)
+        let (sourceID, sourceTime) = resolveSourceTime(atComposition: rawTime)
+        cacheStore.store(faces, sourceID: sourceID, time: sourceTime)
     }
 
-    /// テスト専用: 「この時刻をスキャンしたが顔は無かった」状態を再現する。
+    /// テスト専用: 「この時刻（合成時刻）をスキャンしたが顔は無かった」状態を再現する。
     /// ライブ検出の空エントリ記録（storeLiveDetection）と同じ意味のキャッシュ状態を作る。
     func recordScannedEmptyForTesting(at timeSec: Double) {
-        cacheStore.store([], sourceID: currentSourceID, time: timeSec)
+        let (sourceID, sourceTime) = resolveSourceTime(atComposition: timeSec)
+        cacheStore.store([], sourceID: sourceID, time: sourceTime)
     }
 
     /// 動画読み込み・顔追加時にライブ検出の集計状態をリセットする。
@@ -73,29 +76,67 @@ extension MosaicEditorModel {
         }
     }
 
-    /// プレビューがこの時刻のフレームを検出すべきか（表示スレッドから安価に判定する）。
+    /// プレビューがこの**合成時刻**のフレームを検出すべきか（表示スレッドから安価に判定する）。
+    /// 素材ID・素材時刻へ写像してからバケットの有無を見る。
     /// 既に同バケットを検出済み・検出中・顔タブOFF・写真モードのときはスキップ。
+    ///
+    /// **トランジションの重なり区間では検出しない**（S8）。プレビューが持っている
+    /// フレームは 2 クリップを合成した画（フェード・スライド・ワイプの途中）であり、
+    /// そこで検出した顔位置は素材フレームのどちらの座標系にも属さない。素材キーで
+    /// 書き込むと検出キャッシュが汚染され、エクスポート（キャッシュヒットで検出を
+    /// スキップする）まで巻き添えになる。重なり区間の顔は両側のキャッシュを
+    /// `displayFaces(at:)` が写像・union して賄う。
+    ///
+    /// **モザイク適用区間のゲートをここに入れてはならない（S10）。** 区間外でもライブ検出は
+    /// 継続して検出キャッシュを埋めるのが設計であり、止めると「後から区間を広げたときに
+    /// 再検出が要る」ことになる。この契約は
+    /// `TimelineEditingModelTests.test_shouldDetectPreviewFrame_ignoresApplyRangeGate` が
+    /// 固定している（冒頭に `guard isMosaicActive(...)` を足すと落ちる）。
     func shouldDetectPreviewFrame(at timeSec: Double) -> Bool {
         guard mode == .video, faceMosaicOn, !liveDetectionInFlight else { return false }
-        return !cacheStore.hasEntry(sourceID: currentSourceID, time: timeSec)
+        guard mapping.sourceLocations(at: timeSec).count < 2 else { return false }
+        let (sourceID, sourceTime) = resolveSourceTime(atComposition: timeSec)
+        return !cacheStore.hasEntry(sourceID: sourceID, time: sourceTime)
     }
 
     /// プレビューのデコード済みフレーム（検出用に縮小済み CGImage）を受け取り、
     /// バックグラウンドで顔検出して detectionCache を埋める。
+    /// `timeSec` は合成時刻。素材キーへの写像は書き込み側（`storeLiveDetection`）が
+    /// 行うため、ここでは丸めも写像もせず生の合成時刻を持ち回る
+    /// （合成時刻で先に丸めると rate≠1 でキーが分裂する。`resolveSourceTime` の doc 参照）。
     func submitPreviewFrameForDetection(_ cgImage: CGImage, at timeSec: Double) {
         guard !liveDetectionInFlight else { return }
         liveDetectionInFlight = true
-        let bucket = liveBucket(timeSec)
+        // submit 時点の世代トークンを閉じ込める。検出中にタイムライン編集が入ると、
+        // この合成時刻は**旧タイムライン**のフレームを指しており、新しい写像で
+        // 素材キーへ落とすと誤った素材時刻に正規の検出として記録されてしまう
+        // （S3 レビューの観測事項）。書き込み側（世代チェック付き storeLiveDetection）
+        // が照合して不一致なら破棄する。
+        let generation = timelineGeneration
         liveDetectionQueue.async { [weak self, liveScanner] in
             let img = UIImage(cgImage: cgImage)
             // liveLandmarks は IMAGE 検出に加えてテンポラル ROI 再検出・フロー橋渡しで
-            // 横顔・急な頭部回転を追跡する（バケットではなく生の timeSec を渡す:
+            // 横顔・急な頭部回転を追跡する（再生ストリームの時系列＝合成時刻の生値を渡す:
             // 丸めると adapter 側のシーク不連続検知が鈍る）。
             let detection = liveScanner.liveLandmarks(in: img, atMediaSeconds: timeSec)
             Task { @MainActor in
-                self?.storeLiveDetection(detection, at: bucket, source: img)
+                self?.storeLiveDetection(detection, at: timeSec, source: img, generation: generation)
             }
         }
+    }
+
+    /// 世代チェック付きの記録入口。`generation`（submit 時点の世代トークン）が現在の
+    /// `timelineGeneration` と一致しない場合、結果を破棄する（旧タイムラインの合成時刻を
+    /// 新しい写像で解釈すると誤った素材キーに落ちるため）。in-flight ガードだけは解除して
+    /// 次のフレームの検出を止めない。
+    @MainActor
+    func storeLiveDetection(_ detection: LiveDetectionResult, at t: Double,
+                            source: UIImage, generation: Int) {
+        guard generation == timelineGeneration else {
+            liveDetectionInFlight = false
+            return
+        }
+        storeLiveDetection(detection, at: t, source: source)
     }
 
     /// シーク時にライブ追跡状態（ROI track / フロー）を破棄する。adapter 側の
@@ -107,10 +148,13 @@ extension MosaicEditorModel {
         }
     }
 
-    /// ライブ検出 1 フレーム分の結果を記録する。フロー橋渡し由来（bridgedByFlow）は
+    /// ライブ検出 1 フレーム分の結果を記録する。`t` は**合成時刻**で、素材キーへの
+    /// 写像はここ（書き込みの入口）で行う。フロー橋渡し由来（bridgedByFlow）は
     /// 「実検出は無かった」事実を detectionCache に空で残しつつ、追跡位置を
     /// `liveFlowCache` に別置きする（エクスポート非汚染・検出率バッジ非算入・
     /// nearestCachedFaces の体貼り付き防止の意味論をすべて維持するため）。
+    /// 両キャッシュとも**同じ写像済み素材キー**を使う（片方だけ合成時刻キーだと、
+    /// lookupFaces の素材時刻検索から取り残される）。
     @MainActor
     func storeLiveDetection(_ detection: LiveDetectionResult, at t: Double, source: UIImage) {
         guard detection.bridgedByFlow else {
@@ -118,8 +162,9 @@ extension MosaicEditorModel {
             return
         }
         liveDetectionInFlight = false
-        cacheStore.store([], sourceID: currentSourceID, time: t)
-        liveFlowCache[DetectionCacheKey(sourceID: currentSourceID, time: t, bucketFPS: liveBucketFPS)] =
+        let (sourceID, sourceTime) = resolveSourceTime(atComposition: t)
+        cacheStore.store([], sourceID: sourceID, time: sourceTime)
+        liveFlowCache[DetectionCacheKey(sourceID: sourceID, time: sourceTime, bucketFPS: liveBucketFPS)] =
             detection.faces
         #if DEBUG
         print("[MMLIVE] t=\(String(format: "%.2f", t)) flow faces=\(detection.faces.count)")
@@ -151,14 +196,18 @@ extension MosaicEditorModel {
 
     /// internal: シナリオテスト（フレームアウト→イン・後ろ向き→正面・冒頭顔なし等）が
     /// ライブ検出の1フレーム分を直接注入して選択層まで含めて検証するための可視性。
+    /// `t` は**合成時刻**（クリップ未構築のテスト注入では恒等フォールバックにより
+    /// 従来どおり素材時刻と同値）。
     @MainActor
     func storeLiveDetection(_ faces: [FaceLandmarkSet], at t: Double, source: UIImage) {
         liveDetectionInFlight = false
+        let (sourceID, sourceTime) = resolveSourceTime(atComposition: t)
         #if DEBUG
         // 実機デバッグ用: ライブ検出が「どの時刻に・何件」乗ったかの証跡。
         // 「途中スタートでモザイクなし」等の報告時に、検出が走っていないのか
         // （このログ自体が出ない）、走ったが空なのか（faces=0）を切り分ける。
-        print("[MMLIVE] t=\(String(format: "%.2f", t)) faces=\(faces.count) "
+        print("[MMLIVE] t=\(String(format: "%.2f", t)) src=\(String(format: "%.2f", sourceTime)) "
+              + "faces=\(faces.count) "
               + "targets=\(detectedFaces.count) sel=\(detectedFaces.filter(\.isSelected).count)")
         #endif
         // 空の結果も保存する。「スキャン済みで顔なし」という事実が残らないと、
@@ -166,7 +215,7 @@ extension MosaicEditorModel {
         // 「体にモザイクが乗る／モザイクがずれる」誤描画になる。また、空を記録する
         // ことで shouldDetectPreviewFrame が同じ顔なしフレームを再スキャンし続ける
         // 無駄も止まる（DetectionBridge / nearestCachedFaces は空エントリを無視する）。
-        cacheStore.store(faces, sourceID: currentSourceID, time: t)
+        cacheStore.store(faces, sourceID: sourceID, time: sourceTime)
         // ポーズ中のシーク先で検出が終わったとき、次の displayLink を待たずに
         // モザイクを反映する（再生中は毎フレーム描画されるので実質無害）。
         previewController?.invalidate()
@@ -180,7 +229,8 @@ extension MosaicEditorModel {
             detectedFaces = faces.enumerated().map { idx, lm in
                 FaceTarget(id: UUID(), landmarks: lm,
                            thumbnail: generateThumbnail(for: lm, from: source),
-                           isSelected: faces.count == 1 && idx == 0)
+                           isSelected: faces.count == 1 && idx == 0,
+                           sourceID: sourceID)
             }
         }
 
@@ -211,16 +261,22 @@ extension MosaicEditorModel {
         }
     }
 
-    /// `liveFlowCache` のうち `time` から±1バケット強（0.1s）以内で最も近い顔リスト。
-    /// 現在の素材（`currentSourceID`）のエントリのみを対象にする（他素材混入防止）。
-    ///
-    /// **アクセスレベル変更**: 元は `private func` だったが、
-    /// `lookupFaces`（`MosaicEditorModel+DetectionCache.swift`）から呼ばれるため
-    /// `internal`（無印）にした。
+    /// `nearestFlowFaces(sourceID:sourceTime:)` の合成時刻版。入口で素材ID・素材時刻へ
+    /// 写像する（テストの直接呼び出しはクリップ未構築の恒等フォールバックで従来と同値）。
     func nearestFlowFaces(at time: Double) -> [FaceLandmarkSet] {
+        let (sourceID, sourceTime) = resolveSourceTime(atComposition: time)
+        return nearestFlowFaces(sourceID: sourceID, sourceTime: sourceTime)
+    }
+
+    /// `liveFlowCache` のうち素材時刻 `sourceTime` から±1バケット強（0.1s）以内で
+    /// 最も近い顔リスト。指定素材のエントリのみを対象にする（他素材混入防止）。
+    ///
+    /// **アクセスレベル**: `lookupFaces`（`MosaicEditorModel+DetectionCache.swift`）
+    /// から写像済みの素材ID・素材時刻で呼ばれるため `internal`（無印）。
+    func nearestFlowFaces(sourceID: UUID, sourceTime: Double) -> [FaceLandmarkSet] {
         var best: (dist: Double, faces: [FaceLandmarkSet])?
-        for (key, faces) in liveFlowCache where key.sourceID == currentSourceID && !faces.isEmpty {
-            let d = abs(key.bucket - time)
+        for (key, faces) in liveFlowCache where key.sourceID == sourceID && !faces.isEmpty {
+            let d = abs(key.bucket - sourceTime)
             if d > 1.5 / liveBucketFPS { continue }
             if best == nil || d < best!.dist { best = (d, faces) }
         }
@@ -323,10 +379,13 @@ extension MosaicEditorModel {
                 // プリスキャンで最初に見つかった顔を補完する（安全網）。
                 if !facesForCache.isEmpty && self.detectedFaces.isEmpty {
                     // storeLiveDetection の安全網と同じ自動選択規則（単一顔なら即モザイク）。
+                    // プリスキャンは現在ロード中の素材全体を舐める前提の旧経路なので
+                    // 素材IDは currentSourceID 固定で良い。
                     self.detectedFaces = facesForCache.enumerated().map { idx, lm in
                         FaceTarget(id: UUID(), landmarks: lm,
                                    thumbnail: self.generateThumbnail(for: lm, from: img),
-                                   isSelected: facesForCache.count == 1 && idx == 0)
+                                   isSelected: facesForCache.count == 1 && idx == 0,
+                                   sourceID: self.currentSourceID)
                     }
                 }
                 var counts = matchCountsCopy

@@ -7,9 +7,6 @@ import MosaicCore
 #if canImport(Metal)
 import Metal
 
-// フェーズ2でこのファイルに本格的に手を入れる際に解消する予定の構造的負債
-// swiftlint:disable type_body_length
-
 /// リアルタイム撮影のフレーム処理層。カメラの生フレームを受け取り、
 /// ライブ顔検出（`liveLandmarks`: ROI 再検出 + フロー橋渡し）→ オプトアウト選択
 /// フィルタ → Metal モザイク描画、をフレームごとに行い、プレビュー画像と
@@ -28,9 +25,9 @@ final class CameraMosaicPipeline {
     /// 検出顔数と OFF 数の変化通知（UI バッジ用）。フレーム処理キューから呼ばれる。
     var onFaceCountChange: ((_ detected: Int, _ unmasked: Int) -> Void)?
 
-    private let renderer: MosaicRenderer
+    let renderer: MosaicRenderer
     private let scanner: FaceLandmarking
-    private let ciContext: CIContext
+    let ciContext: CIContext
     private var textureCache: CVMetalTextureCache?
     private let detectionQueue = DispatchQueue(label: "com.maskme.camera.detection")
 
@@ -62,15 +59,18 @@ final class CameraMosaicPipeline {
     /// コネクションの `videoRotationAngle` はカメラ/フォーマットによって非対応が
     /// ありうる（実機報告: フロントだけ 90 度ずれる）ため、デバイス差に依存しない
     /// 最終防衛としてパイプライン側でも向きを保証する。
-    private var portraitPool: CVPixelBufferPool?
-    private var portraitPoolSize = CGSize.zero
+    var portraitPool: CVPixelBufferPool?
+    var portraitPoolSize = CGSize.zero
     #if DEBUG
     /// 実機診断用: フレーム寸法が変わったときだけログを出す（縦長=回転適用済みの確認）。
     private var lastLoggedFrameSize = CGSize.zero
     #endif
 
-    /// プレビュー描画の最大幅（MosaicPreviewController と同じ 720px）。
-    private static let previewMaxWidth = 720.0
+    /// プレビュー描画の最大幅。粗さスライダーの基準幅
+    /// （`MosaicRenderer.referenceFrameWidth`）に合わせる。`MosaicPreviewController`
+    /// の縮小幅と同じ由来で、素の定数を書くと片方だけ変えたときに
+    /// プレビューとカメラで粗さが食い違う。
+    static let previewMaxWidth = Double(MosaicRenderer.referenceFrameWidth)
     /// 非録画時、検出全滅がこの秒数続いたらモザイクを消す。録画中は消さない
     /// （焼き込みは不可逆のため、最後の位置に置きつづける安全側挙動）。
     private static let lostGraceSeconds = 0.5
@@ -350,136 +350,10 @@ final class CameraMosaicPipeline {
         }
     }
 
-    // MARK: - レンダリング
-
-    // フェーズ2でこのファイルに本格的に手を入れる際に解消する予定の構造的負債
-    // swiftlint:disable function_parameter_count
-    /// 録画中: フル解像度でレコーダーのプールへ焼き込み、同じバッファから
-    /// プレビュー（と要求があれば写真）を作る。
-    private func renderRecordingFrame(
-        pixelBuffer: CVPixelBuffer,
-        pts: CMTime,
-        faces: [FaceLandmarkSet],
-        options: [MosaicRenderer.FaceRenderOption],
-        recorder: CameraRecorder,
-        photoCompletion: ((UIImage?) -> Void)?,
-        cache: CVMetalTextureCache
-    ) {
-        guard let inputTexture = MetalTextureUtilities.texture(from: pixelBuffer, cache: cache),
-              let pool = recorder.pixelBufferPool,
-              let outBuffer = makePixelBuffer(from: pool),
-              let outputTexture = MetalTextureUtilities.texture(from: outBuffer, cache: cache)
-        else {
-            photoCompletion?(nil)
-            return
-        }
-        renderer.render(input: inputTexture, into: outputTexture,
-                        landmarkSets: faces, faceOptions: options, waitForCompletion: true)
-        recorder.appendVideo(outBuffer, at: pts)
-        publishPreview(from: outBuffer)
-        if let photoCompletion {
-            let image = downscaledCGImage(from: outBuffer, maxWidth: .infinity)
-                .map { UIImage(cgImage: $0) }
-            photoCompletion(image)
-        }
-    }
-    // swiftlint:enable function_parameter_count
-
-    /// 写真撮影: フル解像度で新規テクスチャへ描画して UIImage 化する。
-    private func renderPhotoFrame(
-        pixelBuffer: CVPixelBuffer,
-        faces: [FaceLandmarkSet],
-        options: [MosaicRenderer.FaceRenderOption],
-        completion: (UIImage?) -> Void,
-        cache: CVMetalTextureCache
-    ) {
-        guard let inputTexture = MetalTextureUtilities.texture(from: pixelBuffer, cache: cache),
-              let result = renderer.renderToNewTexture(
-                  input: inputTexture, landmarkSets: faces, faceOptions: options),
-              let cg = MetalTextureUtilities.cgImage(from: result.texture) else {
-            completion(nil)
-            return
-        }
-        completion(UIImage(cgImage: cg))
-        onPreviewImage?(UIImage(cgImage: cg))
-    }
-
-    /// 待機中: 720px に縮小してから描画する（プレビュー再生と同じ負荷削減）。
-    private func renderPreviewOnlyFrame(pixelBuffer: CVPixelBuffer,
-                                        faces: [FaceLandmarkSet],
-                                        options: [MosaicRenderer.FaceRenderOption]) {
-        guard let cg = downscaledCGImage(from: pixelBuffer, maxWidth: Self.previewMaxWidth),
-              let inputTexture = try? MetalTextureUtilities.texture(
-                  from: cg, device: renderer.device),
-              let result = renderer.renderToNewTexture(
-                  input: inputTexture, landmarkSets: faces, faceOptions: options),
-              let outCG = MetalTextureUtilities.cgImage(from: result.texture) else { return }
-        onPreviewImage?(UIImage(cgImage: outCG))
-    }
-
-    private func publishPreview(from pixelBuffer: CVPixelBuffer) {
-        guard let cg = downscaledCGImage(from: pixelBuffer, maxWidth: Self.previewMaxWidth) else {
-            return
-        }
-        onPreviewImage?(UIImage(cgImage: cg))
-    }
-
-    // MARK: - 変換ヘルパー
-
-    /// 横長（センサー素通し）のバッファを 90° 時計回りに回転して縦長へ正規化する。
-    /// 縦長で届いたフレーム（コネクション回転が効いている通常ケース）は素通し。
-    /// iPhone の前面・背面ともセンサーは同じ横置きで、ポートレート正立は 90° CW
-    /// （旧 API の videoOrientation=.portrait と同じ物理回転。ミラーは別概念で、
-    /// 本パイプラインは常に非ミラーを前提とする）。
-    private func normalizedPortraitBuffer(_ buffer: CVPixelBuffer) -> CVPixelBuffer {
-        let width = CVPixelBufferGetWidth(buffer)
-        let height = CVPixelBufferGetHeight(buffer)
-        guard width > height else { return buffer }
-
-        let outSize = CGSize(width: height, height: width)
-        if portraitPool == nil || portraitPoolSize != outSize {
-            let attrs: [String: Any] = [
-                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
-                kCVPixelBufferWidthKey as String: Int(outSize.width),
-                kCVPixelBufferHeightKey as String: Int(outSize.height),
-                kCVPixelBufferMetalCompatibilityKey as String: true,
-                kCVPixelBufferIOSurfacePropertiesKey as String: [:]
-            ]
-            var pool: CVPixelBufferPool?
-            CVPixelBufferPoolCreate(kCFAllocatorDefault, nil, attrs as CFDictionary, &pool)
-            portraitPool = pool
-            portraitPoolSize = outSize
-        }
-        guard let pool = portraitPool, let out = makePixelBuffer(from: pool) else {
-            return buffer
-        }
-        let rotated = CIImage(cvPixelBuffer: buffer).oriented(.right)
-        ciContext.render(rotated, to: out)
-        return out
-    }
-
-    private func downscaledCGImage(from pixelBuffer: CVPixelBuffer,
-                                   maxWidth: Double) -> CGImage? {
-        let width = Double(CVPixelBufferGetWidth(pixelBuffer))
-        let scale = min(maxWidth / width, 1.0)
-        var ci = CIImage(cvPixelBuffer: pixelBuffer)
-        if scale < 0.99 {
-            ci = ci.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
-        }
-        return ciContext.createCGImage(ci, from: ci.extent)
-    }
-
-    private func makePixelBuffer(from pool: CVPixelBufferPool) -> CVPixelBuffer? {
-        var buffer: CVPixelBuffer?
-        CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool, &buffer)
-        return buffer
-    }
-
     private func withLock<T>(_ body: () -> T) -> T {
         stateLock.lock()
         defer { stateLock.unlock() }
         return body()
     }
 }
-// swiftlint:enable type_body_length
 #endif

@@ -5,50 +5,6 @@ import Metal
 import MetalKit
 import Combine
 
-/// Parameters handed to `mosaicKernel`. The memory layout mirrors the
-/// `MosaicParams` struct in `MosaicShader.metal` exactly — keep them in sync.
-public struct MosaicParams: Equatable {
-    /// Uniform mosaic block size (in pixels) applied to every masked region.
-    /// Strength is driven by the single coarseness slider in the editor.
-    public var block: Float
-    public var edgeSoftness: Float
-    /// Face roll in radians; the block grid rotates by this so the mosaic
-    /// follows a tilted face. Set per frame from the landmarks.
-    public var rotation: Float
-    /// Face center (pixels) the grid is anchored to and rotated about.
-    public var centerX: Float
-    public var centerY: Float
-    public var width: UInt32
-    public var height: UInt32
-
-    public init(
-        block: Float = 28,
-        edgeSoftness: Float = 0.35,
-        rotation: Float = 0,
-        centerX: Float = 0,
-        centerY: Float = 0,
-        width: UInt32 = 0,
-        height: UInt32 = 0
-    ) {
-        self.block = block
-        self.edgeSoftness = edgeSoftness
-        self.rotation = rotation
-        self.centerX = centerX
-        self.centerY = centerY
-        self.width = width
-        self.height = height
-    }
-}
-
-/// Errors thrown while setting up the Metal pipeline. The most common in CI /
-/// headless contexts is ``noDevice`` — there simply is no GPU to bind to.
-public enum MosaicRendererError: Error, Equatable {
-    case noDevice
-    case libraryUnavailable
-    case functionMissing(String)
-    case commandQueueUnavailable
-}
-
 /// シェーダーライブラリを取得する。
 ///
 /// iOS（Xcode ビルド）は `.metal` を precompiled な `default.metallib` にしてバンドルへ含めるため
@@ -79,7 +35,7 @@ public final class MosaicRenderer: NSObject {
     public let device: MTLDevice
     let commandQueue: MTLCommandQueue
     let pipelineState: MTLComputePipelineState
-    private var maskBuilder: FaceMaskBuilder
+    var maskBuilder: FaceMaskBuilder
     /// Mesh-mapped 3D mosaic renderer; used when a full face mesh is available,
     /// otherwise the contour-mask compute path is the fallback.
     private let meshRenderer: FaceMeshMosaicRenderer?
@@ -104,7 +60,8 @@ public final class MosaicRenderer: NSObject {
         statusSubject.receive(on: DispatchQueue.main).eraseToAnyPublisher()
     }
 
-    private var maskTexture: MTLTexture?
+    /// 顔コンタ用マスクテクスチャのキャッシュ（`MosaicRenderer+Mask.swift` が更新する）。
+    var maskTexture: MTLTexture?
     /// Cached mask texture for the flat background mosaic (see
     /// ``renderBackground(input:into:mask:block:waitForCompletion:)``).
     var backgroundMaskTexture: MTLTexture?
@@ -200,6 +157,10 @@ public final class MosaicRenderer: NSObject {
         var kernelParams = params
         kernelParams.width = UInt32(width)
         kernelParams.height = UInt32(height)
+        // Resolution-independent coarseness (see `effectiveBlock`): the same
+        // slider value must look the same in the 720px preview and in the
+        // full-resolution export.
+        kernelParams.block = Self.effectiveBlock(params.block, textureWidth: width)
         // Anchor and rotate the block grid to the face so blocks follow a tilt.
         let size = CGSize(width: width, height: height)
         kernelParams.rotation = landmarks.rollAngle(in: size)
@@ -317,6 +278,10 @@ public final class MosaicRenderer: NSObject {
         var kernelParams = params
         kernelParams.width = UInt32(input.width)
         kernelParams.height = UInt32(input.height)
+        // 解像度非依存の粗さ（`effectiveBlock`）。手動矩形もこの経路を通るため、
+        // ここを素の px 値のままにするとプレビュー（720px）と書き出し（原寸）で
+        // ブロックの細かさが食い違う。
+        kernelParams.block = Self.effectiveBlock(params.block, textureWidth: input.width)
         kernelParams.rotation = 0
         kernelParams.centerX = Float(input.width) / 2
         kernelParams.centerY = Float(input.height) / 2
@@ -369,89 +334,8 @@ public final class MosaicRenderer: NSObject {
     }
 
     // MARK: - Mask management
-
-    private func updatedMaskTexture(
-        for landmarks: FaceLandmarkSet,
-        width: Int,
-        height: Int
-    ) -> MTLTexture? {
-        guard let rendered = maskBuilder.renderMask(
-            for: landmarks,
-            width: width,
-            height: height
-        ) else {
-            return nil
-        }
-
-        let texture = reuseOrMakeMaskTexture(width: width, height: height)
-        guard let texture else { return nil }
-
-        rendered.bytes.withUnsafeBytes { raw in
-            texture.replace(
-                region: MTLRegionMake2D(0, 0, width, height),
-                mipmapLevel: 0,
-                withBytes: raw.baseAddress!,
-                bytesPerRow: rendered.bytesPerRow
-            )
-        }
-        return texture
-    }
-
-    private func reuseOrMakeMaskTexture(width: Int, height: Int) -> MTLTexture? {
-        reuseOrMakeR8Texture(&maskTexture, width: width, height: height)
-    }
-
-    /// r8Unorm のマスクテクスチャを、サイズが一致すれば再利用し、なければ生成して
-    /// `cache` に格納する。顔コンタ用・背景用で同じ確保ロジックを共有する。
-    func reuseOrMakeR8Texture(
-        _ cache: inout MTLTexture?,
-        width: Int,
-        height: Int
-    ) -> MTLTexture? {
-        if let existing = cache, existing.width == width, existing.height == height {
-            return existing
-        }
-        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .r8Unorm,
-            width: width,
-            height: height,
-            mipmapped: false
-        )
-        descriptor.usage = [.shaderRead]
-        let texture = device.makeTexture(descriptor: descriptor)
-        cache = texture
-        return texture
-    }
-
-    func copy(
-        from source: MTLTexture,
-        to destination: MTLTexture,
-        waitForCompletion: Bool = false
-    ) {
-        guard let commandBuffer = commandQueue.makeCommandBuffer(),
-              let blit = commandBuffer.makeBlitCommandEncoder() else { return }
-        let size = MTLSize(
-            width: min(source.width, destination.width),
-            height: min(source.height, destination.height),
-            depth: 1
-        )
-        blit.copy(
-            from: source,
-            sourceSlice: 0,
-            sourceLevel: 0,
-            sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
-            sourceSize: size,
-            to: destination,
-            destinationSlice: 0,
-            destinationLevel: 0,
-            destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0)
-        )
-        blit.endEncoding()
-        commandBuffer.commit()
-        if waitForCompletion {
-            commandBuffer.waitUntilCompleted()
-        }
-    }
+    //
+    // マスクテクスチャの確保・更新とテクスチャ間コピーは `MosaicRenderer+Mask.swift`。
 }
 
 /// SwiftUI-friendly observable wrapper around a renderer's status stream.
