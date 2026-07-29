@@ -16,6 +16,24 @@ import MosaicCore
 /// 合成尺は短く（15秒＝450フレーム）してマシン負荷の影響を抑え、fail-fast タイムアウトで
 /// ハングを避ける。export はフレーム数に対して線形なので fps から 5分（9000フレーム）を外挿する。
 /// 出力フレーム数を実デコードして検証し、encode が実際に走ったことを保証する。
+///
+/// ## ⚠️ Simulator の数字で最適化の当否を決めないこと
+///
+/// 2026-07-29 に同一条件を Simulator と実機（iPhone 17）で測ったところ、**律速が真逆**だった。
+///
+/// | | Simulator | 実機 |
+/// |---|---|---|
+/// | 実効 fps | 4 | 148 |
+/// | render（モザイク描画） | 2% | 51% |
+/// | other/encode | 98% | 37% |
+///
+/// Simulator は VideoToolbox がソフトウェア実行なので encode が全体を覆い隠す。
+///
+/// さらに実機で「毎フレームの GPU 完了待ちを 1 フレーム遅延パイプラインで隠す」改修を試したが、
+/// render は 51% → 14% に落ちたのに **wall は 2.9s のまま 1 秒も変わらなかった**。
+/// 待ち場所が `adaptor.append` へ移っただけで、真の律速は **HW エンコーダのスループット**。
+/// 1080p で 148 fps は HW エンコーダとして妥当な水準で、ここを速くするには解像度か
+/// エンコード設定を変えるしかない。**同じ改修を再度作らないこと。**
 final class ExportSpeedMeasurementTests: XCTestCase {
     private let fps: Int32 = 30
     private let width = 1920
@@ -36,9 +54,12 @@ final class ExportSpeedMeasurementTests: XCTestCase {
         // AVAsset を書き出す本テストでは「素材全体 1 クリップ」の恒等写像を渡す
         // （全時刻キャッシュヒットの前提を維持する）。
         let sourceID = UUID()
-        let mapping = TimelineMapping(clips: [
-            TimelineClip(sourceID: sourceID, sourceStart: 0, sourceEnd: Double(synthSeconds))
-        ])
+        let clips = [TimelineClip(sourceID: sourceID, sourceStart: 0, sourceEnd: Double(synthSeconds))]
+        let mapping = TimelineMapping(clips: clips)
+        // ⚠️ `applyRanges` の既定の空は「適用なし（全区間 OFF）」。クリップを持つ写像を渡すと
+        // ゲートはフェイルオープンしないので、ここを省くと**モザイクを 1 フレームも掛けずに**
+        // 速度を測ることになる（実際そうなっていた）。全区間適用を明示する。
+        let applyRanges = MosaicApplyGate.fullCoverRanges(for: clips, photoSourceIDs: [])
 
         let exporter = VideoMosaicExporter(renderer: renderer, landmarker: NullFaceLandmarker())
         let exp = expectation(description: "export")
@@ -48,7 +69,8 @@ final class ExportSpeedMeasurementTests: XCTestCase {
             let t0 = CFAbsoluteTimeGetCurrent()
             outURL = try? await exporter.export(
                 asset: asset, selectedFaceTargets: [], manualRegions: [],
-                detectionCaches: [sourceID: cache], mapping: mapping, faceEnabled: true,
+                detectionCaches: [sourceID: cache], mapping: mapping,
+                applyRanges: applyRanges, faceEnabled: true,
                 backgroundEnabled: false, backgroundBlock: 28, speed: .fast
             ) { _ in }
             exportSec = CFAbsoluteTimeGetCurrent() - t0
@@ -59,9 +81,16 @@ final class ExportSpeedMeasurementTests: XCTestCase {
         // 出力検証（encode が実際に走った証明）。
         var outFrames = 0
         var outBytes = 0
+        var faceRoughness: Double?
+        var plainRoughness: Double?
         if let outURL {
             outBytes = ((try? FileManager.default.attributesOfItem(atPath: outURL.path)[.size]) as? Int) ?? 0
             outFrames = (try? countFrames(in: AVURLAsset(url: outURL))) ?? 0
+            // **モザイクが実際に焼き込まれたかを測る。** ここを見ていなかったため、
+            // `applyRanges` の渡し忘れで全区間 OFF になっていても速度テストが通っていた。
+            let measured = try? measureRoughness(in: AVURLAsset(url: outURL))
+            faceRoughness = measured?.face
+            plainRoughness = measured?.plain
             try? FileManager.default.removeItem(at: outURL)
         }
 
@@ -81,6 +110,57 @@ final class ExportSpeedMeasurementTests: XCTestCase {
 
         // encode が走ったこと（出力が入力の9割以上）を保証。
         XCTAssertGreaterThan(outFrames, inFrames * 9 / 10, "出力フレーム不足=encode未実行の疑い")
+
+        // モザイクが焼き込まれたことを保証。合成動画は一様なグラデーションなので、
+        // 顔領域だけブロック化されれば隣接画素差（粗さ）がはっきり下がる。
+        let face = try XCTUnwrap(faceRoughness, "出力からフレームを取り出せなかった")
+        let plain = try XCTUnwrap(plainRoughness)
+        print(String(format: "[MMSPEED] 粗さ 顔領域=%.2f 顔外=%.2f", face, plain))
+        XCTAssertLessThan(face, plain * 0.5,
+                          "顔領域にモザイクが焼き込まれていない（applyRanges の渡し忘れを疑う）")
+    }
+
+    /// 出力の中盤フレームから、顔領域と顔外領域の「隣接画素差の平均」を返す。
+    /// モザイクが掛かった領域はブロック内が平坦になるのでこの値が下がる。
+    private func measureRoughness(in asset: AVAsset) throws -> (face: Double, plain: Double) {
+        let generator = AVAssetImageGenerator(asset: asset)
+        generator.appliesPreferredTrackTransform = true
+        generator.requestedTimeToleranceBefore = .zero
+        generator.requestedTimeToleranceAfter = .zero
+        let cg = try generator.copyCGImage(
+            at: CMTime(seconds: Double(synthSeconds) / 2, preferredTimescale: 600), actualTime: nil)
+
+        let w = cg.width, h = cg.height
+        var pixels = [UInt8](repeating: 0, count: w * h * 4)
+        guard let ctx = CGContext(data: &pixels, width: w, height: h, bitsPerComponent: 8,
+                                  bytesPerRow: w * 4,
+                                  space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else {
+            throw NSError(domain: "roughness", code: 1)
+        }
+        ctx.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
+
+        // 合成顔メッシュは正規化 x 0.35〜0.65 / y 0.30〜0.65 に置いてある（makeSyntheticFace）。
+        // 顔外は右下の余白から取る。
+        func roughness(x0: Double, y0: Double, x1: Double, y1: Double) -> Double {
+            let xs = Int(x0 * Double(w)), xe = Int(x1 * Double(w))
+            let ys = Int(y0 * Double(h)), ye = Int(y1 * Double(h))
+            var total = 0.0
+            var count = 0
+            for y in ys..<ye where y + 1 < h {
+                for x in xs..<xe where x + 1 < w {
+                    let i = (y * w + x) * 4
+                    let right = (y * w + x + 1) * 4
+                    let down = ((y + 1) * w + x) * 4
+                    total += abs(Double(pixels[i]) - Double(pixels[right]))
+                    total += abs(Double(pixels[i]) - Double(pixels[down]))
+                    count += 2
+                }
+            }
+            return count > 0 ? total / Double(count) : 0
+        }
+        return (face: roughness(x0: 0.42, y0: 0.38, x1: 0.58, y1: 0.58),
+                plain: roughness(x0: 0.75, y0: 0.75, x1: 0.95, y1: 0.95))
     }
 
     // MARK: - 出力フレーム計数
