@@ -36,7 +36,7 @@ public struct TransitionParameters: Equatable, Sendable {
 /// cropRectangleRamp）と、重なり区間のランドマーク座標変換の**両方**がこの関数を呼ぶ。
 /// 同じ数式を別の場所に二重実装してはならない（ランプと座標変換のずれはモザイク漏れになる）。
 public enum TransitionKind: String, Codable, CaseIterable, Sendable {
-    /// 一度黒画面を挟むフェード。前半で先行クリップが退場し、後半で後続クリップが登場する。
+    /// 一度黒画面を挟むフェード。暗転 → 黒を保つ（`blackHoldFraction`）→ 明転の 3 段。
     case fadeToBlack
     /// 2 クリップを直接クロスフェード。
     case crossfade
@@ -49,18 +49,46 @@ public enum TransitionKind: String, Codable, CaseIterable, Sendable {
     /// 境界線が左端から右へ掃引するワイプ（後続クリップが左側から現れる）。
     case wipeRight
 
+    /// `fadeToBlack` で**完全な黒を保つ**区間が、トランジション全体に占める割合。
+    ///
+    /// 0 だと黒は progress=0.5 の一瞬しか出ず、暗転がそのまま明転に折り返すため
+    /// 「黒を挟んだ」という印象が残らない（実機で確認して 2026-07-29 に導入）。
+    /// 暗転 `(1-hold)/2` → 黒 `hold` → 明転 `(1-hold)/2` の 3 段になる。
+    ///
+    /// この値を変えると `rampBreakpoints` の分割点も自動で追従する
+    /// （分割点を手で書かないこと。ランプと数式がずれるとモザイクが漏れる）。
+    public static let blackHoldFraction: Double = 0.3
+
+    /// `fadeToBlack` の暗転（および明転）1 段ぶんが占める割合。
+    /// = `(1 - blackHoldFraction) / 2`。黒ホールドの両端の分割点でもある。
+    static let fadeToBlackRampFraction: Double = (1 - blackHoldFraction) / 2
+
+    /// トランジションを新規に付けるときの既定の尺（秒）。
+    ///
+    /// `fadeToBlack` は暗転・黒・明転の 3 段を通すため、他と同じ 0.5 秒では
+    /// 各段が 0.15〜0.18 秒しかなく黒が視認できない。ここだけ長くする。
+    /// 実際に採用される値は隣り合うクリップ尺による上限でクランプされる
+    /// （`TimelineState.maximumTransitionDuration(afterClipID:)`）。
+    public var defaultDuration: Double {
+        self == .fadeToBlack ? 1.0 : 0.5
+    }
+
     /// 進行度 `progress` における `side` 側クリップの視覚パラメータを返す純関数。
     ///
     /// 端点契約: progress=0 で outgoing が完全表示・incoming が非表示、progress=1 でその逆。
-    /// 中間値は線形ランプ（fadeToBlack のみ前半/後半の区分線形）。
+    /// 中間値は線形ランプ（fadeToBlack のみ暗転／黒ホールド／明転の区分線形）。
     /// progress は [0,1] にクランプされる（NaN は 0 扱い）。
     public func parameters(progress: Double, side: TransitionSide) -> TransitionParameters {
         let p = Self.clampedProgress(progress)
         let unit = CGRect(x: 0, y: 0, width: 1, height: 1)
         switch self {
         case .fadeToBlack:
-            // 前半 [0, 0.5] で outgoing が黒へ、後半 [0.5, 1] で incoming が黒から。
-            let opacity = side == .outgoing ? max(0, 1 - 2 * p) : max(0, 2 * p - 1)
+            // [0, r] で outgoing が黒へ、[1-r, 1] で incoming が黒から。
+            // その間 [r, 1-r] は両側 0 = 完全な黒（r = fadeToBlackRampFraction）。
+            let r = Self.fadeToBlackRampFraction
+            let opacity = side == .outgoing
+                ? max(0, min(1, (r - p) / r))
+                : max(0, min(1, (p - (1 - r)) / r))
             return TransitionParameters(opacity: opacity, translation: .zero, visibleRect: unit)
         case .crossfade:
             let opacity = side == .outgoing ? 1 - p : p
@@ -113,10 +141,15 @@ public enum TransitionKind: String, Codable, CaseIterable, Sendable {
     /// 各区間の端点値を `parameters(progress:side:)` から取る（分割点の知識も
     /// 数式も二重実装しない）。
     ///
+    /// `fadeToBlack` の折れ点は黒ホールドの両端（`blackHoldFraction` から導出）。
+    /// 定数を直接書かないので、ホールド割合を変えれば instruction の分割も追従する。
+    ///
     /// 「各区間の中で `parameters` が本当に線形か」は
     /// `TransitionRampTests` が全種類・全区間について中点で検証している。
     public var rampBreakpoints: [Double] {
-        self == .fadeToBlack ? [0, 0.5, 1] : [0, 1]
+        guard self == .fadeToBlack else { return [0, 1] }
+        let r = Self.fadeToBlackRampFraction
+        return [0, r, 1 - r, 1]
     }
 
     // MARK: - ランドマークの視覚変換（重なり区間の union 用）
@@ -169,8 +202,8 @@ public enum TransitionKind: String, Codable, CaseIterable, Sendable {
     /// 隠すだけであり、どちらでも結果は同じ）。
     ///
     /// 具体値: crossfade は常に 1（= 正しいクロスフェード。素直に a_in = p を
-    /// 与えると中間で黒が透けて暗くなる）、fadeToBlack は前半 0・後半 2p−1
-    /// （黒を挟む意図がそのまま出る）、slide/wipe は 1。
+    /// 与えると中間で黒が透けて暗くなる）、fadeToBlack は暗転区間と黒ホールド区間で 0・
+    /// 明転区間で `(p−(1−r))/r`（黒を挟む意図がそのまま出る）、slide/wipe は 1。
     /// いずれも `rampBreakpoints` の各区間内で progress の線形関数になるため、
     /// AVFoundation の線形ランプで誤差なく表現できる（`TransitionRampTests` が固定）。
     ///

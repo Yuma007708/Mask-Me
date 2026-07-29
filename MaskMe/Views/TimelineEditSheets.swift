@@ -261,6 +261,10 @@ struct TimelineTransitionSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var kind: TransitionKind
     @State private var duration: Double
+    /// スライダーを一度でも触ったか。触るまでは種類の切り替えに合わせて
+    /// 既定尺（`TransitionKind.defaultDuration`）へ追従させる。触った後に
+    /// 上書きすると、選んだ長さが種類変更で黙って消える。
+    @State private var didAdjustDuration = false
 
     init(current: TransitionSpec?,
          maximumDuration: Double,
@@ -270,9 +274,17 @@ struct TimelineTransitionSheet: View {
         self.maximumDuration = maximumDuration
         self.onApply = onApply
         self.onRemove = onRemove
-        _kind = State(initialValue: current?.kind ?? .crossfade)
-        let initial = current?.duration ?? min(0.5, maximumDuration)
-        _duration = State(initialValue: min(max(initial, TransitionSpec.minimumDuration), maximumDuration))
+        let initialKind = current?.kind ?? .crossfade
+        _kind = State(initialValue: initialKind)
+        let initial = current?.duration ?? initialKind.defaultDuration
+        _duration = State(initialValue: Self.clamp(initial, maximum: maximumDuration))
+        // 既存トランジションを編集しているときは、その長さがユーザーの選択。
+        // 種類を変えても保つ。
+        _didAdjustDuration = State(initialValue: current != nil)
+    }
+
+    private static func clamp(_ value: Double, maximum: Double) -> Double {
+        min(max(value, TransitionSpec.minimumDuration), max(maximum, TransitionSpec.minimumDuration))
     }
 
     var body: some View {
@@ -298,7 +310,9 @@ struct TimelineTransitionSheet: View {
                         .font(.footnote.monospacedDigit())
                         .foregroundStyle(.secondary)
                 }
-                Slider(value: $duration, in: sliderRange)
+                Slider(value: $duration, in: sliderRange) { editing in
+                    if editing { didAdjustDuration = true }
+                }
                 Text(String(format: "上限 %.2f 秒（隣り合うクリップの短い方の半分）", maximumDuration))
                     .font(.caption2)
                     .foregroundStyle(.secondary)
@@ -333,6 +347,11 @@ struct TimelineTransitionSheet: View {
     private func kindButton(_ candidate: TransitionKind) -> some View {
         Button {
             kind = candidate
+            // 長さを触っていなければ、その種類の既定尺へ寄せる
+            // （黒フェードは暗転・黒・明転の 3 段ぶん長さが要る）。
+            if !didAdjustDuration {
+                duration = Self.clamp(candidate.defaultDuration, maximum: maximumDuration)
+            }
         } label: {
             VStack(spacing: 4) {
                 Image(systemName: candidate.symbolName)

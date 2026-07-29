@@ -53,9 +53,13 @@ final class TransitionRampTests: XCTestCase {
     }
 
     /// 折れ点を持つのは fadeToBlack だけであること（分割点の仕様そのものの固定）。
+    ///
+    /// fadeToBlack の折れ点は黒ホールドの両端。ここが 2 点（= 3 区間）ないと
+    /// instruction が黒ホールドの境界で割れず、黒を保つ意図がランプに出ない。
     func test_onlyFadeToBlackIsPiecewise() {
+        let r = TransitionKind.fadeToBlackRampFraction
         for kind in TransitionKind.allCases {
-            XCTAssertEqual(kind.rampBreakpoints, kind == .fadeToBlack ? [0, 0.5, 1] : [0, 1],
+            XCTAssertEqual(kind.rampBreakpoints, kind == .fadeToBlack ? [0, r, 1 - r, 1] : [0, 1],
                            "\(kind): 分割点が想定と違う")
         }
     }
@@ -94,14 +98,21 @@ final class TransitionRampTests: XCTestCase {
         XCTAssertEqual(ramp.end, 1.0, accuracy: 1e-9)
     }
 
-    /// fadeToBlack は前半で背面が完全に沈み（黒が見える）、後半で 0 → 1 に戻ること。
-    func test_fadeToBlackBackLayerStaysHiddenInFirstHalf() {
-        let first = TransitionKind.fadeToBlack.incomingLayerOpacityRamp(from: 0, to: 0.5)
-        XCTAssertEqual(first.start, 0, accuracy: 1e-9)
-        XCTAssertEqual(first.end, 0, accuracy: 1e-9)
-        let second = TransitionKind.fadeToBlack.incomingLayerOpacityRamp(from: 0.5, to: 1)
-        XCTAssertEqual(second.start, 0, accuracy: 1e-9)
-        XCTAssertEqual(second.end, 1, accuracy: 1e-9)
+    /// fadeToBlack の背面（incoming）は暗転区間と黒ホールド区間で沈んだまま（黒が見える）、
+    /// 明転区間だけで 0 → 1 に戻ること。
+    func test_fadeToBlackBackLayerStaysHiddenUntilTheFinalRamp() {
+        let kind = TransitionKind.fadeToBlack
+        let r = TransitionKind.fadeToBlackRampFraction
+        let fade = kind.incomingLayerOpacityRamp(from: 0, to: r)
+        XCTAssertEqual(fade.start, 0, accuracy: 1e-9)
+        XCTAssertEqual(fade.end, 0, accuracy: 1e-9)
+        // 黒ホールド区間: 背面も 0 のまま（ここが 1 になると黒が透ける）。
+        let hold = kind.incomingLayerOpacityRamp(from: r, to: 1 - r)
+        XCTAssertEqual(hold.start, 0, accuracy: 1e-9)
+        XCTAssertEqual(hold.end, 0, accuracy: 1e-9)
+        let rise = kind.incomingLayerOpacityRamp(from: 1 - r, to: 1)
+        XCTAssertEqual(rise.start, 0, accuracy: 1e-9)
+        XCTAssertEqual(rise.end, 1, accuracy: 1e-9)
     }
 
     /// スライド・ワイプ（画面上で重ならない種類）の背面は常に不透明 1 であること。

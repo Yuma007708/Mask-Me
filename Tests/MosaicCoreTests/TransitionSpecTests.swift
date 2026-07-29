@@ -63,11 +63,55 @@ final class TransitionSpecTests: XCTestCase {
                        0.5, accuracy: 1e-9)
         XCTAssertEqual(TransitionKind.crossfade.parameters(progress: 0.5, side: .incoming).opacity,
                        0.5, accuracy: 1e-9)
-        // fadeToBlack の区分線形: 0.25 で outgoing 0.5、incoming はまだ 0。
-        XCTAssertEqual(TransitionKind.fadeToBlack.parameters(progress: 0.25, side: .outgoing).opacity,
+        // fadeToBlack の区分線形: 暗転区間の中点で outgoing 0.5、incoming はまだ 0。
+        let fadeMid = TransitionKind.fadeToBlackRampFraction / 2
+        XCTAssertEqual(TransitionKind.fadeToBlack.parameters(progress: fadeMid, side: .outgoing).opacity,
                        0.5, accuracy: 1e-9)
-        XCTAssertEqual(TransitionKind.fadeToBlack.parameters(progress: 0.25, side: .incoming).opacity,
+        XCTAssertEqual(TransitionKind.fadeToBlack.parameters(progress: fadeMid, side: .incoming).opacity,
                        0.0, accuracy: 1e-9)
+    }
+
+    /// 黒ホールド: `blackHoldFraction` の区間では**両側とも完全に不可視**であること。
+    ///
+    /// これが 1 点（progress=0.5 のみ）に潰れると、暗転がそのまま明転へ折り返して
+    /// 「黒を挟んだ」印象が出ない（実機で確認して 2026-07-29 に区間へ広げた）。
+    /// 端点・内部・区間外の直前直後まで見て、区間の幅そのものを固定する。
+    func test_fadeToBlackHoldsFullBlackOverAnInterval() {
+        let kind = TransitionKind.fadeToBlack
+        let r = TransitionKind.fadeToBlackRampFraction
+        XCTAssertGreaterThan(TransitionKind.blackHoldFraction, 0, "黒ホールドが 0 幅に潰れている")
+        XCTAssertLessThan(TransitionKind.blackHoldFraction, 1, "黒ホールドが全区間を占めている")
+        XCTAssertEqual(r, (1 - TransitionKind.blackHoldFraction) / 2, accuracy: 1e-12,
+                       "暗転区間の割合が blackHoldFraction から導出されていない")
+
+        // 黒ホールドの内側（両端を含む）は両側 0。
+        for t in [0.0, 0.25, 0.5, 0.75, 1.0] {
+            let p = r + (1 - 2 * r) * t
+            XCTAssertEqual(kind.parameters(progress: p, side: .outgoing).opacity, 0, accuracy: 1e-9,
+                           "p=\(p): 黒ホールド中に outgoing が残っている")
+            XCTAssertEqual(kind.parameters(progress: p, side: .incoming).opacity, 0, accuracy: 1e-9,
+                           "p=\(p): 黒ホールド中に incoming が出ている")
+        }
+        // ホールドの直前・直後はまだ／もう映像が見えている（= 黒が区間ちょうどで終わる）。
+        XCTAssertGreaterThan(kind.parameters(progress: r * 0.99, side: .outgoing).opacity, 0,
+                             "暗転が黒ホールドより手前で終わっている")
+        XCTAssertGreaterThan(kind.parameters(progress: 1 - r * 0.99, side: .incoming).opacity, 0,
+                             "明転が黒ホールドより後ろから始まっている")
+        // 黒ホールド中はどちらの顔も画面に無い（モザイクを載せる対象がない）。
+        XCTAssertNil(kind.transformPoint(CGPoint(x: 0.5, y: 0.5), progress: 0.5, side: .outgoing))
+        XCTAssertNil(kind.transformPoint(CGPoint(x: 0.5, y: 0.5), progress: 0.5, side: .incoming))
+    }
+
+    /// 種類ごとの既定尺: 黒フェードだけ長い（3 段を通すため）。
+    func test_defaultDurationIsLongerForFadeToBlack() {
+        XCTAssertEqual(TransitionKind.fadeToBlack.defaultDuration, 1.0, accuracy: 1e-9)
+        for kind in TransitionKind.allCases where kind != .fadeToBlack {
+            XCTAssertEqual(kind.defaultDuration, 0.5, accuracy: 1e-9, "\(kind)")
+        }
+        for kind in TransitionKind.allCases {
+            XCTAssertGreaterThanOrEqual(kind.defaultDuration, TransitionSpec.minimumDuration,
+                                        "\(kind): 既定尺が最小尺を下回る")
+        }
     }
 
     /// スライド系は progress=0.5 で translation だけが変わること（可視領域・不透明度は全画面/1）。
