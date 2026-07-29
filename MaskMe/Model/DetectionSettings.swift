@@ -40,9 +40,9 @@ public struct DetectionSettings: Equatable, Codable {
         get {
             switch (useFaceDetector, useYunet) {
             case (false, false): return .off
-            case (true,  false): return .faceDetector
+            case (true, false): return .faceDetector
             case (false, true ): return .yunet
-            case (true,  true ): return .all
+            case (true, true ): return .all
             }
         }
         set {
@@ -129,12 +129,12 @@ public struct DetectionSettings: Equatable, Codable {
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encode(minFaceDetectionConfidence, forKey: .minFaceDetectionConfidence)
-        try c.encode(minFacePresenceConfidence,  forKey: .minFacePresenceConfidence)
-        try c.encode(minTrackingConfidence,      forKey: .minTrackingConfidence)
-        try c.encode(numFaces,                   forKey: .numFaces)
-        try c.encode(minSpan,                    forKey: .minSpan)
-        try c.encode(useFaceDetector,            forKey: .useFaceDetector)
-        try c.encode(useYunet,                   forKey: .useYunet)
+        try c.encode(minFacePresenceConfidence, forKey: .minFacePresenceConfidence)
+        try c.encode(minTrackingConfidence, forKey: .minTrackingConfidence)
+        try c.encode(numFaces, forKey: .numFaces)
+        try c.encode(minSpan, forKey: .minSpan)
+        try c.encode(useFaceDetector, forKey: .useFaceDetector)
+        try c.encode(useYunet, forKey: .useYunet)
     }
 
     public struct Preset {

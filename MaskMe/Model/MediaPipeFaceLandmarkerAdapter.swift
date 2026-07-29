@@ -33,6 +33,9 @@ public func makeFaceLandmarker(
 
 #if canImport(MediaPipeTasksVision)
 import MediaPipeTasksVision
+
+// フェーズ2でこのファイルに本格的に手を入れる際に解消する予定の構造的負債
+// swiftlint:disable file_length
 import CoreImage.CIFilterBuiltins
 
 /// フレームの顔をどの検出経路が最初に拾ったか。精度計測（DValid）で
@@ -59,6 +62,8 @@ public struct FaceDetectionSourceStats {
     public var flowFrames = 0
 }
 
+// フェーズ2でこのファイルに本格的に手を入れる際に解消する予定の構造的負債
+// swiftlint:disable type_body_length
 /// Thin wrapper around MediaPipe's `FaceLandmarker` that produces the
 /// framework-agnostic `FaceLandmarkSet` consumed by `MosaicRenderer`.
 public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
@@ -254,8 +259,8 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
         // Apple Vision は削除済み: 実機で torso・首・肩を顔 bbox として拾い体モザイクの
         // 原因になった上、Simulator では 0 検出でシミュレータ検証が不可能だった。
         var detectors: [FaceBBoxDetecting] = []
-        if useFaceDetector   { detectors.append(MediaPipeFaceBBoxDetector()) }
-        if useYunet          { detectors.append(YuNetFaceDetector()) }
+        if useFaceDetector { detectors.append(MediaPipeFaceBBoxDetector()) }
+        if useYunet { detectors.append(YuNetFaceDetector()) }
         switch detectors.count {
         case 0:  return nil
         case 1:  return detectors[0]
@@ -293,12 +298,27 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
             result = lowConfDetect(image)
             if !result.isEmpty { source = .lowConf }
         }
+        // 静止画経路にも採用直前の再検証を通す。写真ロード（顔が 1 つならタップなしで
+        // 即モザイク）・動画のシードスキャン・再検出ボタン・タイムラインへの素材追加が
+        // すべてここを通るのに、以前は video / live 経路だけが検証されていた。
+        // 静止画は 1 枚あたりのコストが問題にならないので全候補を検証する。
+        if !result.isEmpty {
+            result = verifySuspiciousFaces(result, in: image, verifyAll: true)
+            if result.isEmpty { source = .none }
+        }
         recordSource(source)
-        return result
+        // 同一顔の重複を最終段で間引く。MP 本体（numFaces=5）が曖昧な被写体に対して
+        // 同じ顔へ複数のメッシュを返すことがあり、augment の early return 経路では
+        // 補助検出器側の除去も効かないため、全経路が通る return 直前で潰す。
+        return deduplicated(result)
     }
 
+    // フェーズ2でこのファイルに本格的に手を入れる際に解消する予定の構造的負債
+    // swiftlint:disable:next cyclomatic_complexity
     public func allLandmarks(in image: UIImage, timestampMs: Int) -> [FaceLandmarkSet] {
         resetTracksIfNeeded(timestampMs: timestampMs)
+        ageVerifiedMemory()
+        ageRejectedMemory()
         var result: [FaceLandmarkSet]
         var source: FaceDetectionSource
         #if DEBUG
@@ -320,6 +340,10 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
                 result = mp
                 source = mp.isEmpty ? .none : mpSource
             }
+            // track 再構築・体誤フィット検証より前に重複を潰す。重複を残したまま
+            // rebuildTracks に渡すと同じ顔に track が二重に立ち、以降の ROI 再検出でも
+            // 重複が再生産されるため。
+            result = deduplicated(result)
             if result.isEmpty {
                 // 全画面パイプライン全滅 → 前フレームの顔位置周辺だけを再走査する。
                 result = redetectFromTrackedBoxes(image: image)
@@ -344,6 +368,14 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
                 // 全滅でもタイル内なら検出できる）。成功したら track を再シードして
                 // 以降のフレームは安価な ROI 追跡に引き継ぐ。
                 result = tiledDetect(image)
+                // タイル走査は「全画面も ROI も低 confidence 走査も全滅したフレーム」で
+                // 拡大 crop に対して最後にもう一度だけ賭ける経路で、自己相似テクスチャ
+                // （砂・波紋・岩肌）を顔と読む誤検出がここに集中する。しかもここで拾った顔は
+                // track の種になり以降の ROI 追跡へ引き継がれるので、誤検出は 1 フレームでは
+                // 済まない。位置・形状で疑わしいものだけでなく全件を crop 再検証に通す。
+                if !result.isEmpty {
+                    result = verifySuspiciousFaces(result, in: image, verifyAll: true)
+                }
                 source = result.isEmpty ? .none : .tiled
                 if !result.isEmpty {
                     rebuildTracks(from: result.map { $0.boundingBox })
@@ -368,14 +400,31 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
             reseedFlow(from: result, image: image)
         }
         recordSource(source)
-        return result
+        // ROI / lowConf / tiled / flow 経路の合流後にもう一度だけ重複を潰す。
+        return deduplicated(result)
     }
 
     /// 最終採用直前の体誤フィット検証。棄却された候補に対応する track だけを外科的に
     /// 殺し（ROI 延命が体 track を引きずるのを防ぐ）、検証通過分を返す。
     /// 他 track の missCount 状態は保持する。
+    ///
+    /// **全候補を検証する（`verifyAll: true`）。** 以前は「疑わしい候補」＝画面下半分または
+    /// 縦長形状だけを検証していたが、実測（顔が写っていない胴体クリップ）では
+    /// MediaPipe 本体が胸に **conf 1.00 / 幾何スコア 1.00 / 478 点フルメッシュ**、しかも
+    /// ピクセル換算縦横比 0.7〜1.1（実顔と同じ形）・画面上半分（midY 0.2〜0.34）で
+    /// メッシュを貼る。位置も形も confidence も実顔と区別できないので、疑わしさの
+    /// 事前判定では検証に回せない。全候補を crop 再検証に通すと 71% → 29% まで落ちた。
+    /// 残り 29% はまぐれで検証を通った 1 フレームがフロー橋渡しで増幅した分だが、
+    /// これを抑える「棄却の記憶」は横顔の退行と引き換えになるため採らない
+    /// （不採用の経緯は `MARK: - 検討して不採用にした「棄却の記憶」` を参照）。
+    /// 顔の検出率側は `VideoDetectionTests` / `DetectionAccuracyTests` /
+    /// `RealFaceMosaicTests` / `LiveScenarioTests` で退行なしを確認済み。
+    ///
+    /// ただし平均検出率が落ちなくても、実顔は動きブレ・角度・まばたきで**単発の検証失敗**を
+    /// 起こし、その 1〜2 フレームだけモザイクが外れて見える（実機で確認）。そのため
+    /// 検証通過の記憶（`verifiedMemory`）で単発失敗に猶予を与える。
     private func verifyAndPruneTracks(_ result: [FaceLandmarkSet], in image: UIImage) -> [FaceLandmarkSet] {
-        let verified = verifySuspiciousFaces(result, in: image)
+        let verified = verifySuspiciousFaces(result, in: image, verifyAll: true, temporalGrace: true)
         guard verified.count != result.count else { return result }
         let droppedBoxes = result.map(\.boundingBox).filter { box in
             !verified.contains { $0.boundingBox == box }
@@ -433,10 +482,44 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
     private func reseedFlow(from result: [FaceLandmarkSet], image: UIImage) {
         consecutiveFlowFrames = 0
         flowStates = result.prefix(maxFlowTracks).compactMap { face in
+            guard isTrustedFlowSeed(face) else { return nil }
             let tracker = OpticalFlowTracker()
             guard tracker.seed(with: image, faceBox: face.boundingBox) else { return nil }
             return FlowState(tracker: tracker, lastLandmarks: face)
         }
+    }
+
+    /// フロー橋渡し（`advanceFlowBridge`）の種にしてよい検出か。
+    ///
+    /// 体誤フィットは crop 再検証でほぼ毎フレーム落ちるが、数十フレームに 1 度まぐれで通る。
+    /// その 1 フレームが種になると、フローは検出器が全滅したフレームを繋ぐ経路（＝原理的に
+    /// 再検証できない）なので、十数フレームへ増幅される（実測: torso で通過 1 → 検出 13）。
+    ///
+    /// そこで**直前まで検証に落ち続けていた場所**の通過だけは、「連続で検証を通った」実績
+    /// （`isRecentlyVerified`＝`minPassStreakForGrace` 回以上）を種の条件にする。
+    /// まぐれ通過は単発、実顔はほぼ毎フレーム通る、という既に実測済みの非対称
+    /// （`verifiedMemory` の doc 参照）をここでも使う。
+    ///
+    /// **落ちた履歴がない場所の検出は無条件に種にする。** 位置や形で絞ろうとすると外れる
+    /// （体誤フィットは画面上半分・ほぼ正方形に出るので `isSuspectBodyRegion` では捕まらない。
+    /// 実測で確認済み）。
+    ///
+    /// 全検出に連続通過を要求する版も試し、手元の実顔 8 本では検出フレーム数が同じだった
+    /// （フロー橋渡しは検出全滅フレームしか使わないので、実顔素材では寄与が小さい）。
+    /// それでも緩い側を採るのは、その版がフロー橋渡しを全面的に弱めるためで、手元の素材に
+    /// 出なかった退行が他の素材で出るリスクを読めないから。**誤モザイクより顔の見逃しが重い。**
+    private func isTrustedFlowSeed(_ face: FaceLandmarkSet) -> Bool {
+        guard priorFailStreak(at: face.boundingBox) > 0 else { return true }
+        return isRecentlyVerified(face.boundingBox)
+    }
+
+    /// その場所が「通過に転じる直前まで」連続で落ちていた回数。通過して記憶に載ったあとも
+    /// 参照できるよう、`VerifiedBox` に持ち越した値を優先して読む。
+    private func priorFailStreak(at box: CGRect) -> Int {
+        if let verified = verifiedMemory.first(where: { iou($0.box, box) > verifiedMemoryIoU }) {
+            return verified.priorFailStreak
+        }
+        return failStreak(at: box)
     }
 
     // MARK: - ライブプレビュー経路（IMAGE モード + テンポラル追跡）
@@ -462,6 +545,7 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
     public func resetLiveTracking() {
         trackedFaces.removeAll()
         flowStates = []
+        verifiedMemory.removeAll()
         consecutiveFlowFrames = 0
         lastLiveSeconds = nil
         lastRealLiveDetectionSeconds = nil
@@ -479,8 +563,12 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
         lastLiveSeconds = t
     }
 
+    // フェーズ2でこのファイルに本格的に手を入れる際に解消する予定の構造的負債
+    // swiftlint:disable:next cyclomatic_complexity
     public func liveLandmarks(in image: UIImage, atMediaSeconds t: Double) -> LiveDetectionResult {
         resetLiveTracksIfNeeded(mediaSeconds: t)
+        ageVerifiedMemory()
+        ageRejectedMemory()
         var result: [FaceLandmarkSet]
         var source: FaceDetectionSource
         #if DEBUG
@@ -500,6 +588,8 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
                 result = mp
                 source = mp.isEmpty ? .none : mpSource
             }
+            // VIDEO 経路と同じく、track 再構築より前に同一顔の重複を潰す。
+            result = deduplicated(result)
             if result.isEmpty {
                 // 全画面パイプライン全滅 → 前フレームの顔位置周辺だけを再走査する。
                 // 全画面 640px 縮小では潰れる横顔・小顔も、拡大 crop + upscaledIfSmall
@@ -541,7 +631,8 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
             reseedFlow(from: result, image: image)
         }
         recordSource(source)
-        return LiveDetectionResult(faces: result, bridgedByFlow: bridgedByFlow)
+        // ROI / lowConf / flow 経路の合流後にもう一度だけ重複を潰す。
+        return LiveDetectionResult(faces: deduplicated(result), bridgedByFlow: bridgedByFlow)
     }
 
     /// トラックの正規化bboxが、フローブリッジしてよい「顔として妥当な」範囲か。
@@ -565,7 +656,8 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
               !result.faceLandmarks.isEmpty else { return [] }
         return result.faceLandmarks.compactMap { face in
             let pts = face.map { FaceLandmark(x: $0.x, y: $0.y, z: $0.z) }
-            guard let set = makeLandmarkSet(points: pts, eyeRatioRange: 0.45...1.0),
+            guard let set = makeLandmarkSet(points: pts, eyeRatioRange: 0.45...1.0,
+                                            imageSize: image.size),
                   !set.isBodyLikeShape(in: image.size) else { return nil }
             return set
         }
@@ -606,7 +698,8 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
                     points: points,
                     confidence: Float(min(1.0, Double(points.count) / Double(FaceLandmarkSet.fullMeshCount)))
                 ).remapped(into: tile)
-                if let vetted = makeLandmarkSet(points: raw.points, eyeRatioRange: 0.45...1.0),
+                if let vetted = makeLandmarkSet(points: raw.points, eyeRatioRange: 0.45...1.0,
+                                                imageSize: image.size),
                    !vetted.isBodyLikeShape(in: image.size) {
                     candidate = vetted
                     break
@@ -624,37 +717,292 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
 
     /// タイムスタンプが巻き戻った（新ストリーム/リスタート）か 1 秒を超えて飛んだ
     /// （シーク）場合は、前フレームの顔位置がもう意味を持たないので track を捨てる。
-    /// 画面下寄りの採用候補に対する体誤フィット検証パス。s5 実測で誤モザイク（lowCy）の
-    /// 大半が画面下半分（胸・股への顔メッシュフィット)に集中し、mp/enhance 経路にも
-    /// baseline から存在するため、最終採用の直前に「疑わしい位置」の候補だけを再確認する:
-    /// bbox の 1.3 倍 crop を IMG モードで再検出し、eyeRatio ≥ 0.45（lowConf/タイルと同じ
-    /// 厳格値）+ 位置一致（IoU>0.3）を満たさなければ棄却。体フィットは文脈（video モードの
+    /// 採用候補に対する体誤フィット検証パス。s5 実測で誤モザイク（lowCy）の大半が
+    /// 画面下半分（胸・股への顔メッシュフィット)に集中し、mp/enhance 経路にも baseline
+    /// から存在するため、最終採用の直前に「疑わしい候補」だけを再確認する。「疑わしい」は
+    /// 位置（画面下半分）**または**縦長の体誤フィット形状（`isSuspectBodyRegion`）で判定する。
+    /// 位置だけで判定すると、体・首・肩への誤フィットが画面上部で起きたときに検証を
+    /// すり抜けてしまうため（首・肩は画面上半分にも及ぶ）。
+    /// 検証本体: bbox の 1.3 倍 crop を IMG モードで再検出し、eyeRatio ≥ 0.45（lowConf/タイルと
+    /// 同じ厳格値）+ 位置一致（IoU>0.3）を満たさなければ棄却。体フィットは文脈（video モードの
     /// 追跡状態）が切れたタイト crop では再現しにくく、実顔は再検出できるという非対称を使う。
-    /// 上半分の候補には一切触れないので、正位置の検出率への影響はない。
+    /// 縦長でない正方形〜横長の候補は、上半分では従来どおり検証をスキップする
+    /// （正位置・正形状の検出率への影響を最小にするため）。
     private let verifySuspectCy: CGFloat = 0.55
     private let verifyCropExpansion: CGFloat = 1.3
 
-    private func verifySuspiciousFaces(_ faces: [FaceLandmarkSet], in image: UIImage) -> [FaceLandmarkSet] {
+    /// 再検出結果に要求する confidence 下限。`makeLandmarkSet` の confidence は
+    /// 面数比 ×(0.5 + 0.5×幾何スコア) なので、0.6 は「ほぼフルメッシュ かつ 幾何スコアが
+    /// 下限すれすれではない」ことを意味する。補助 bbox 経路の採用条件と同値。
+    private let verifyMinConfidence: Float = 0.6
+
+    /// - Parameter verifyAll: `true` なら「疑わしい候補」に限らず全候補を再検証する。
+    ///   静止画経路（写真ロード・シードスキャン・再検出ボタン・素材追加）で使う。
+    ///   静止画は 1 枚あたりの顔が少なくコストが問題にならないうえ、顔が 1 つなら
+    ///   タップなしで即モザイクが確定する＝誤検出が最も高くつく経路なので、位置・形状で
+    ///   絞らず全部確認する。動画・ライブは毎フレーム全候補を crop 再検出すると
+    ///   実時間性が壊れるので従来どおり疑わしい候補のみ。
+    /// - Parameter temporalGrace: `true` なら「直近で検証を通った場所」の単発の検証失敗を
+    ///   数フレームだけ見逃す（`verifiedMemoryFrames`）。動画・ライブ経路で使う。
+    ///   静止画は 1 枚ずつ独立に扱うので `false`。
+    private func verifySuspiciousFaces(_ faces: [FaceLandmarkSet],
+                                       in image: UIImage,
+                                       verifyAll: Bool = false,
+                                       temporalGrace: Bool = false) -> [FaceLandmarkSet] {
         guard let cropLandmarker = landmarkerForCrop else { return faces }
         return faces.filter { face in
             let box = face.boundingBox
-            guard box.midY > verifySuspectCy else { return true }
-            guard face.isPlausibleFace(minSpan: plausibilityMinSpan, eyeRatioRange: 0.45...1.0) else {
-                return false
+            guard verifyAll
+                    || face.isSuspectBodyRegion(in: image.size, suspectMidY: verifySuspectCy)
+            else { return true }
+            verifyStats.examined += 1
+            // 検証に落ちたときの共通後処理。直近で検証を通った顔なら猶予で残す。
+            func reject(_ reason: VerifyRejectionReason) -> Bool {
+                verifyStats.count(reason)
+                // 棄却の記憶は時系列経路（動画・ライブ）でだけ持つ。静止画は 1 枚ずつ独立で、
+                // 連続棄却という概念が無いうえ、毎フレームの `ageRejectedMemory` が回らないので
+                // 記憶が捨てられず溜まり続ける。
+                if temporalGrace {
+                    let streak = rememberRejected(box)
+                    verifyStats.rejectStreaks[streak, default: 0] += 1
+                }
+                let saved = temporalGrace && isRecentlyVerified(box)
+                if saved { verifyStats.savedByGrace += 1 }
+                return saved
+            }
+            guard face.isPlausibleFace(minSpan: plausibilityMinSpan,
+                                       eyeRatioRange: 0.45...1.0,
+                                       imageSize: image.size) else {
+                return reject(.preGate)
             }
             let roi = expandedClamped(box, factor: verifyCropExpansion)
             guard roi.width > 0, roi.height > 0,
                   let cropped = cropImage(image, normalizedRect: roi),
                   let mpImage = try? MPImage(uiImage: upscaledIfSmall(cropped)),
                   let result = try? cropLandmarker.detect(image: mpImage),
-                  let first = result.faceLandmarks.first else { return false }
+                  let first = result.faceLandmarks.first else {
+                return reject(.noRedetection)
+            }
             let points = first.map { FaceLandmark(x: $0.x, y: $0.y, z: $0.z) }
             let meshFraction = Float(min(1.0, Double(points.count) / Double(FaceLandmarkSet.fullMeshCount)))
             let redetected = FaceLandmarkSet(points: points, confidence: meshFraction)
                 .remapped(into: roi)
-            return iou(redetected.boundingBox, box) > 0.3
+            // 再検出結果そのものを妥当性チェックに通す。ここを省いて位置一致（IoU）だけで
+            // 採否を決めていた頃は「同じ場所でもう一度何かが見つかったか」しか見ておらず、
+            // 誤検出が既に示した事実を聞き直しているだけだった。crop 内で改めて
+            // 幾何スコア（目間比・目と口の上下・ピクセル換算縦横比）と面数を満たし、
+            // かつ体形状でないことを要求する。
+            guard let vetted = makeLandmarkSet(points: redetected.points,
+                                               eyeRatioRange: 0.45...1.0,
+                                               imageSize: image.size) else {
+                return reject(.geometry)
+            }
+            guard vetted.confidence >= verifyMinConfidence else { return reject(.confidence) }
+            guard !vetted.isBodyLikeShape(in: image.size) else { return reject(.bodyShape) }
+            guard iou(vetted.boundingBox, box) > 0.3 else { return reject(.displaced) }
+            verifyStats.passed += 1
+            let prior = failStreak(at: box)
+            verifyStats.passAfterStreaks[prior, default: 0] += 1
+            forgetRejected(box)
+            if temporalGrace { rememberVerified(box, priorFailStreak: prior) }
+            return true
         }
     }
+
+    // MARK: - crop 再検証の棄却理由の内訳（診断用）
+
+    /// crop 再検証（`verifySuspiciousFaces`）が何を理由に候補を落としたかの集計。
+    ///
+    /// **ゲートのしきい値を実測なしに触らないための計測点。** 誤検出を下げる修正が
+    /// 横顔の検出率を巻き添えにする事故が実際に起きており（`棄却の記憶` の不採用記録を参照）、
+    /// 「横顔がどのゲートで落ちているか」を数字で分けられないと、直す場所を間違える。
+    ///
+    /// 加算しているだけで採否には一切影響しない。診断テストから読む。
+    enum VerifyRejectionReason {
+        /// crop に回す前の幾何ゲート（目間比・縦横比・目と口の上下）。
+        case preGate
+        /// タイト crop から顔を再検出できなかった。
+        case noRedetection
+        /// 再検出はできたが幾何ゲートを通らなかった。
+        case geometry
+        /// 幾何は通ったが confidence が下限未満。
+        case confidence
+        /// 縦長すぎて体形状と判定された（横顔もここに落ちうる）。
+        case bodyShape
+        /// 再検出した顔が元の候補と別の場所にいた（IoU 不足）。
+        case displaced
+    }
+
+    struct VerifyStats {
+        var examined = 0
+        var passed = 0
+        var savedByGrace = 0
+        var preGate = 0
+        var noRedetection = 0
+        var geometry = 0
+        var confidence = 0
+        var bodyShape = 0
+        var displaced = 0
+        /// 「同じ場所で連続何回落ちたか」の分布（連続回数 → その回数に到達した件数）。
+        /// 実顔の散発的な失敗と、体誤フィットの継続的な失敗を分けられるかを見るための計測。
+        var rejectStreaks: [Int: Int] = [:]
+        /// 検証を通った時点で、その場所が直前まで何回連続で落ちていたか（連続回数 → 件数）。
+        /// 体誤フィットの「まぐれ通過」はフロー橋渡しの種になって十数フレームへ増幅するので、
+        /// 通過そのものを直前の失敗歴で疑えるかを見る。
+        var passAfterStreaks: [Int: Int] = [:]
+
+        mutating func count(_ reason: VerifyRejectionReason) {
+            switch reason {
+            case .preGate: preGate += 1
+            case .noRedetection: noRedetection += 1
+            case .geometry: geometry += 1
+            case .confidence: confidence += 1
+            case .bodyShape: bodyShape += 1
+            case .displaced: displaced += 1
+            }
+        }
+    }
+
+    /// 直近の検出セッションの棄却内訳。診断テストが読む前に `resetVerifyStats()` する。
+    private(set) var verifyStats = VerifyStats()
+
+    func resetVerifyStats() { verifyStats = VerifyStats() }
+
+    // MARK: - 棄却の連続回数（実顔と体誤フィットを分ける非対称）
+
+    /// 同じ場所で crop 再検証に**連続して**落ちた回数の記憶。
+    ///
+    /// 実顔も動きブレ・角度で単発の検証失敗を起こす（実測: profile.mov で 78 回中 11 回失敗、
+    /// それでも検出は 91/91 フレーム成立）。一方で体誤フィットは同じ場所でほぼ毎フレーム
+    /// 落ち続ける（実測: torso で 29 回中 28 回失敗）。**落ちたかどうかでは両者を区別できないが、
+    /// 落ち続けたかどうかでは区別できる**というのがここの前提。
+    ///
+    /// 通過の記憶（`verifiedMemory`）が「顔を増やす方向」にしか働かないのに対し、こちらは
+    /// 顔を減らす方向に働くので、検出率の退行に直結する。しきい値は必ず実測で決めること。
+    private struct RejectedBox {
+        let box: CGRect
+        let framesLeft: Int
+        let failStreak: Int
+    }
+    private var rejectedMemory: [RejectedBox] = []
+    /// 棄却の記憶を保持するフレーム数。検出が途切れている間も場所を覚えておく必要があるため、
+    /// 通過の記憶（2 フレーム）より長く取る。
+    private let rejectedMemoryFrames = 4
+
+    private func ageRejectedMemory() {
+        rejectedMemory = rejectedMemory.compactMap {
+            $0.framesLeft <= 1
+                ? nil
+                : RejectedBox(box: $0.box, framesLeft: $0.framesLeft - 1, failStreak: $0.failStreak)
+        }
+    }
+
+    /// 棄却を記録し、その場所での連続棄却回数を返す。
+    @discardableResult
+    private func rememberRejected(_ box: CGRect) -> Int {
+        let streak = (rejectedMemory.first { iou($0.box, box) > verifiedMemoryIoU }?.failStreak ?? 0) + 1
+        rejectedMemory.removeAll { iou($0.box, box) > verifiedMemoryIoU }
+        rejectedMemory.append(
+            RejectedBox(box: box, framesLeft: rejectedMemoryFrames, failStreak: streak))
+        return streak
+    }
+
+    /// その場所での現在の連続棄却回数（記憶がなければ 0）。
+    private func failStreak(at box: CGRect) -> Int {
+        rejectedMemory.first { iou($0.box, box) > verifiedMemoryIoU }?.failStreak ?? 0
+    }
+
+    /// 検証を通った場所の棄却記憶は捨てる（連続でなくなったため）。
+    private func forgetRejected(_ box: CGRect) {
+        rejectedMemory.removeAll { iou($0.box, box) > verifiedMemoryIoU }
+    }
+
+    // MARK: - 検証通過の記憶（実顔のモザイクちらつき止め）
+
+    /// 直近フレームで crop 再検証を**通った** bbox の記憶。
+    ///
+    /// 全候補を毎フレーム再検証するようにした結果（`verifyAndPruneTracks` の doc）、
+    /// 実顔でも動きブレ・角度・まばたきで単発の検証失敗が起き、その 1〜2 フレームだけ
+    /// モザイクが外れて見える（実機で確認）。検証は「その瞬間に crop からもう一度顔を
+    /// 起こせたか」を見ているだけで、外れたフレームに顔が無いわけではない。
+    ///
+    /// そこで直近で検証を通った場所は、単発の失敗を `verifiedMemoryFrames` だけ見逃す。
+    /// **この記憶は顔を増やす方向にしか働かない**ので、検出率（顔の見逃し）を悪化させる
+    /// ことは原理的にない。逆向きの「棄却の記憶」（下の不採用記録）とは非対称。
+    ///
+    /// **猶予は「連続 `minPassStreakForGrace` フレーム検証を通った」場所にだけ与える。**
+    /// 体誤フィットも数十フレームに 1 度はまぐれで検証を通るので、通過 1 回で猶予を
+    /// 与えると胴体クリップの誤検出が 29% → 42% に戻る（実測。猶予の長さを 1 フレームに
+    /// 縮めても変わらない＝増分はまぐれ通過の直後に集中している）。まぐれ通過は単発で、
+    /// 実顔はほぼ毎フレーム通るので、通過の連続数が両者を分ける唯一の実測可能な非対称。
+    private struct VerifiedBox {
+        let box: CGRect
+        let framesLeft: Int
+        let passStreak: Int
+        /// この場所が通過に転じる直前まで連続で落ちていた回数（`isTrustedFlowSeed` が読む）。
+        let priorFailStreak: Int
+    }
+    private var verifiedMemory: [VerifiedBox] = []
+    /// 猶予の長さ。`ageVerifiedMemory` が毎フレーム 1 減らし 1 以下で捨てるので、
+    /// 2 は「通過の次の 1 フレームだけ見逃す」= 実測されたちらつき（1 フレーム抜け）を
+    /// 埋める最小値。
+    private let verifiedMemoryFrames = 2
+    /// 猶予を与えるのに要求する連続通過フレーム数。
+    private let minPassStreakForGrace = 2
+    private let verifiedMemoryIoU: CGFloat = 0.3
+
+    private func ageVerifiedMemory() {
+        verifiedMemory = verifiedMemory.compactMap {
+            $0.framesLeft <= 1
+                ? nil
+                : VerifiedBox(box: $0.box, framesLeft: $0.framesLeft - 1,
+                              passStreak: $0.passStreak, priorFailStreak: $0.priorFailStreak)
+        }
+    }
+
+    /// - Parameter priorFailStreak: 通過に転じる直前までの連続棄却回数。連続通過の 2 回目以降は
+    ///   1 回目に記録した値を引き継ぐ（「落ち続けていた場所か」は通過が続いても変わらないため）。
+    private func rememberVerified(_ box: CGRect, priorFailStreak: Int) {
+        let previous = verifiedMemory.first { iou($0.box, box) > verifiedMemoryIoU }
+        let streak = (previous?.passStreak ?? 0) + 1
+        let prior = previous?.priorFailStreak ?? priorFailStreak
+        verifiedMemory.removeAll { iou($0.box, box) > verifiedMemoryIoU }
+        verifiedMemory.append(
+            VerifiedBox(box: box, framesLeft: verifiedMemoryFrames,
+                        passStreak: streak, priorFailStreak: prior))
+    }
+
+    private func isRecentlyVerified(_ box: CGRect) -> Bool {
+        verifiedMemory.contains {
+            iou($0.box, box) > verifiedMemoryIoU && $0.passStreak >= minPassStreakForGrace
+        }
+    }
+
+    // MARK: - 検討して不採用にした「棄却の記憶」
+
+    /// **不採用の記録（同じ実装を再度作らないため）。**
+    /// 体誤フィットは同じ場所で毎フレーム候補に挙がり、そのほとんどは crop 再検証で落ちるが、
+    /// 数十フレームに 1 度まぐれで通り抜け、その 1 フレームがオプティカルフロー橋渡し
+    /// （`advanceFlowBridge`。検出器が全滅したフレームを繋ぐ経路なので原理的に検証できない）の
+    /// 種になって十数フレームへ増幅される（実測: 通過 1 フレーム → フロー 13 フレーム）。
+    /// そこで「同じ場所で最近棄却された bbox」を数フレーム覚えてフロー出力から落とす実装を
+    /// 試した。誤検出は胴体クリップで 29% → 2% まで落ちたが、**横顔がモザイクから外れる退行**が
+    /// 出た（`RealFaceMosaicTests` の横顔区間。全経路に適用した版でもフロー出力だけに絞った版でも
+    /// 同じ）。横顔は crop 再検証（eyeRatio 0.45 以上を要求）に落ちる頻度が高く、
+    /// 体誤フィットと**同じゲートで同じように落ちる**ため、棄却理由では両者を区別できない。
+    /// **顔を見逃す退行は誤モザイクより重い**ので、この方向は捨てた。
+    ///
+    /// **決着（2026-07-29）**: 増幅は「棄却を使って顔を消す」のではなく
+    /// **「まぐれ通過をフローの種にしない」**（`isTrustedFlowSeed`）で止めた。誤検出は
+    /// torso 29% → 2%、実顔 8 本の検出フレーム数は**完全に不変**。棄却の記憶が横顔を殺したのは、
+    /// 実顔も検証に落ちること自体はあるのに（実測: profile.mov で 78 回中 11 回失敗、
+    /// それでも検出は 91/91 成立）、その棄却を根拠に顔を消していたため。
+    /// 落ちた事実ではなく「落ち続けた直後の単発通過」だけを疑えば両者は分かれる。
+    ///
+    /// なお当初立てた「crop 再検証の横顔リコールを上げる」（yaw 推定で eyeRatio ゲートを
+    /// 角度依存にする）という仮説は**計測で否定された**。crop 再検証は横顔を落としていない
+    /// （profile.mov の棄却 11 件はすべて preGate 2 / 再検出失敗 9 で、eyeRatio 由来でも
+    /// 体形状ゲート由来でもない）。棄却理由の内訳は `VerifyStats` から取れる。
 
     private func resetTracksIfNeeded(timestampMs: Int) {
         if lastVideoTimestampMs != .min,
@@ -662,6 +1010,8 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
             trackedFaces.removeAll()
             flowStates = []
             consecutiveFlowFrames = 0
+            verifiedMemory.removeAll()
+            rejectedMemory.removeAll()
         }
         lastVideoTimestampMs = timestampMs
     }
@@ -733,7 +1083,8 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
             let meshFraction = Float(min(1.0, Double(points.count) / Double(FaceLandmarkSet.fullMeshCount)))
             let raw = FaceLandmarkSet(points: points, confidence: meshFraction).remapped(into: roi)
             guard let remapped = makeLandmarkSet(points: raw.points,
-                                                 eyeRatioRange: plausibilityEyeRatioRange) else {
+                                                 eyeRatioRange: plausibilityEyeRatioRange,
+                                                 imageSize: image.size) else {
                 trackedFaces[index].missCount += 1
                 continue
             }
@@ -819,11 +1170,17 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
         // 補助検出器の生 bbox を「明らかに顔ではない形状」で前段ガードする。
         // torso / 首・胸元・肩・髪など顔でない領域の bbox を弾き、ROI 再検出のコストも節約する。
         // - 6% 未満は多くの誤検知（腕・首・耳など）を含むので棄却
-        // - w/h 0.6〜1.4 で torso/neck のような縦長/横長を除外
+        // - 縦横比は**ピクセル換算**で判定する。正規化比で判定していた頃は素材の
+        //   アスペクト比がそのまま比に乗るため、実顔の bbox が素材の向きだけで落ちていた
+        //   （実測: 720x1280 縦動画では正方形 bbox が正規化 w/h=1.78、1280x674 横動画では
+        //   同じ bbox が 0.53 になり、旧ガード 0.6...1.4 の外側へ出る）。
+        //   実測 180 個の生 bbox のピクセル w/h は 0.53〜1.06（YuNet は 0.77 前後、
+        //   MediaPipe FaceDetector は正方形の 1.00）に収まったので、余裕を見て 0.5...1.6。
+        let imageAspect = image.size.height > 0 ? image.size.width / image.size.height : 1
         let candidateBoxes = rawBoxes.filter { box in
-            guard box.width >= 0.06, box.height >= 0.06 else { return false }
-            let ratio = box.width / box.height
-            return ratio >= 0.6 && ratio <= 1.4
+            guard box.width >= 0.06, box.height >= 0.06, box.height > 0 else { return false }
+            let pixelRatio = (box.width / box.height) * imageAspect
+            return pixelRatio >= 0.5 && pixelRatio <= 1.6
         }
         if candidateBoxes.isEmpty { return mpResults }
         let mpBoxes = mpResults.map { $0.boundingBox }
@@ -850,17 +1207,24 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
                 // ソフトマージン（境界横顔用）を通り抜けて体モザイクになる。
                 // 面数完全 × 目間比 0.45 以上を要求 (isPlausibleFace の元来の閾値相当)。
                 guard raw.isPlausibleFace(minSpan: plausibilityMinSpan,
-                                          eyeRatioRange: 0.45...1.0),
+                                          eyeRatioRange: 0.45...1.0,
+                                          imageSize: image.size),
                       let vetted = makeLandmarkSet(points: raw.points,
-                                                   eyeRatioRange: 0.45...1.0),
+                                                   eyeRatioRange: 0.45...1.0,
+                                                   imageSize: image.size),
                       vetted.confidence >= 0.6 else {
                     continue
                 }
-                // 加えて、remap 後の bbox が縦横比で顔から外れていたら棄却
-                // （torso 上に MP がメッシュを描いたケースを二重防御）。
-                let vb = vetted.boundingBox
-                let vratio = vb.width / max(vb.height, 0.001)
-                guard vratio >= 0.6, vratio <= 1.4 else { continue }
+                // 加えて、remap 後のメッシュが縦横比で顔から外れていたら棄却
+                // （torso 上に MP がメッシュを描いたケースを二重防御）。ここも
+                // **ピクセル換算**で見る。旧実装は正規化 w/h 0.6...1.4 で、実測では
+                // 正真正銘の顔メッシュ（ピクセル h/w 1.00〜1.22）が縦動画で正規化
+                // 1.42〜1.63 になり全部落ちていた。
+                // 低 confidence 救済経路と同じ体ゲート（h/w ≤ 1.4）＋横に潰れすぎた
+                // 形状（h/w < 0.6）の除外に置き換える。
+                guard let vPixelAspect = vetted.pixelAspectRatio(in: image.size),
+                      vPixelAspect >= 0.6,
+                      !vetted.isBodyLikeShape(in: image.size) else { continue }
                 extras.append(vetted)
             }
             // A-2 の canonical mesh フォールバックは削除。補助検出器（YuNet / Vision /
@@ -869,7 +1233,63 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
             // 体にモザイクが乗る誤検知になる。横顔・逆光の穴埋めは Kalman ROI 予測 (A-1)
             // + lookupFaces の直近ホールドフォールバックで拾う。
         }
-        return mpResults + extras
+        return deduplicated(mpResults + extras)
+    }
+
+    // MARK: - 重複検出の間引き（NMS）
+
+    /// 同一顔の重複を間引く IoU 閾値。別人の顔同士がここまで重なることは実質ないため、
+    /// 「ほぼ同じ位置・同じ大きさ」だけを重複とみなす保守的な値。
+    private let duplicateIoUThreshold: CGFloat = 0.5
+    /// 同一顔の重複を間引く包含率閾値（交差 ÷ 小さい方の面積）。
+    private let duplicateContainmentThreshold: CGFloat = 0.85
+
+    /// MP 本体の結果と補助 bbox 由来の crop 再検出結果を重複排除して返す。
+    ///
+    /// `:843` の前段フィルタは「補助検出器の生 bbox」対「478 点メッシュの外接矩形」を
+    /// 比べており矩形の定義が違うため、同じ顔でも IoU が閾値を割って素通りする。
+    /// また extras 同士（BlazeFace と YuNet が同じ顔を返した場合）の重複も見ていない。
+    /// そこで最終的に **メッシュ外接矩形同士** で判定し直す。
+    ///
+    /// 判定は 2 条件の OR:
+    /// - IoU > 0.5: 大きさが揃った重複（ずれただけの同一顔）を拾う。
+    /// - 包含率 > 0.85: 実測の重複ペアは IoU 0.49〜0.76 とばらついた一方、包含率は
+    ///   すべて 0.90 以上だった（大小の違う同一顔で、小さい方が大きい方にほぼ収まる）。
+    ///   IoU だけで拾おうとすると閾値を 0.45 以下まで下げる必要があり、そちらの方が
+    ///   隣り合う別人の顔を潰すリスクが高い。
+    ///
+    /// 隣接する別人の顔は互いにほぼ収まることも 5 割超重なることもないため、
+    /// 複数人シーンの検出数は落とさない。
+    /// 残す優先度は confidence 降順（同値なら元の並び順＝MP 本体が先）。
+    /// 返り値の並びは元の順序を保つ（下流の追跡・選択が index の安定を前提にするため）。
+    private func deduplicated(_ faces: [FaceLandmarkSet]) -> [FaceLandmarkSet] {
+        guard faces.count > 1 else { return faces }
+        let ranked = faces.enumerated().sorted { lhs, rhs in
+            lhs.element.confidence == rhs.element.confidence
+                ? lhs.offset < rhs.offset
+                : lhs.element.confidence > rhs.element.confidence
+        }
+        var keptIndices: [Int] = []
+        var keptBoxes: [CGRect] = []
+        for (index, face) in ranked {
+            let box = face.boundingBox
+            let duplicated = keptBoxes.contains { kept in
+                iou(kept, box) > duplicateIoUThreshold
+                    || containmentRatio(kept, box) > duplicateContainmentThreshold
+            }
+            guard !duplicated else { continue }
+            keptIndices.append(index)
+            keptBoxes.append(box)
+        }
+        return keptIndices.sorted().map { faces[$0] }
+    }
+
+    /// 交差面積 ÷ 小さい方の面積。片方がもう片方に収まっているほど 1.0 に近づく。
+    private func containmentRatio(_ a: CGRect, _ b: CGRect) -> CGFloat {
+        let inter = a.intersection(b)
+        guard !inter.isNull, inter.width > 0, inter.height > 0 else { return 0 }
+        let minArea = min(a.width * a.height, b.width * b.height)
+        return minArea > 0 ? (inter.width * inter.height) / minArea : 0
     }
 
     /// UIImage のピクセル寸法（UIImage.size はポイント単位で scale 依存のため CGImage を使う）。
@@ -909,7 +1329,7 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
         guard let mpImage = try? MPImage(uiImage: image),
               let result = try? landmarker.detect(image: mpImage),
               !result.faceLandmarks.isEmpty else { return nil }
-        return convertAll(result)
+        return convertAll(result, imageSize: image.size)
     }
 
     private func detectAllVideoFrame(_ image: UIImage, timestampMs: Int) -> [FaceLandmarkSet]? {
@@ -919,7 +1339,7 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
                   timestampInMilliseconds: timestampMs
               ),
               !result.faceLandmarks.isEmpty else { return nil }
-        return convertAll(result)
+        return convertAll(result, imageSize: image.size)
     }
 
     private enum EnhanceLevel { case moderate, aggressive, backlight }
@@ -936,43 +1356,43 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
             ci = ci
                 .applyingFilter("CIHighlightShadowAdjust", parameters: [
                     "inputHighlightAmount": 0.6,
-                    "inputShadowAmount":    0.5,
+                    "inputShadowAmount": 0.5
                 ])
                 .applyingFilter("CISharpenLuminance", parameters: [
                     "inputSharpness": 0.5,
-                    "inputRadius":    1.5,
+                    "inputRadius": 1.5
                 ])
         case .aggressive:
             ci = ci
                 .applyingFilter("CIExposureAdjust", parameters: [
-                    "inputEV": 1.5,           // +1.5段分（約2.8倍）明るく
+                    "inputEV": 1.5           // +1.5段分（約2.8倍）明るく
                 ])
                 .applyingFilter("CIHighlightShadowAdjust", parameters: [
                     "inputHighlightAmount": 0.8,
-                    "inputShadowAmount":    0.9,
+                    "inputShadowAmount": 0.9
                 ])
                 .applyingFilter("CIColorControls", parameters: [
-                    "inputContrast":   1.1,
+                    "inputContrast": 1.1,
                     "inputBrightness": 0.05,
-                    "inputSaturation": 1.0,
+                    "inputSaturation": 1.0
                 ])
                 .applyingFilter("CISharpenLuminance", parameters: [
                     "inputSharpness": 0.7,
-                    "inputRadius":    1.5,
+                    "inputRadius": 1.5
                 ])
         case .backlight:
             // 逆光対策: 明部を抑え、暗部を最大に持ち上げ、ガンマでさらに暗部ディテールを引き出す。
             ci = ci
                 .applyingFilter("CIHighlightShadowAdjust", parameters: [
                     "inputHighlightAmount": 0.3,
-                    "inputShadowAmount":    1.0,
+                    "inputShadowAmount": 1.0
                 ])
                 .applyingFilter("CIGammaAdjust", parameters: [
-                    "inputPower": 0.65,    // < 1.0 で暗部側を強く持ち上げる
+                    "inputPower": 0.65    // < 1.0 で暗部側を強く持ち上げる
                 ])
                 .applyingFilter("CISharpenLuminance", parameters: [
                     "inputSharpness": 0.6,
-                    "inputRadius":    1.2,
+                    "inputRadius": 1.2
                 ])
         }
         guard let out = ciContext.createCGImage(ci, from: ci.extent) else { return nil }
@@ -984,10 +1404,12 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
     /// チェックで棄却する（例: 薄暗い場面で体や乳首を顔として検出するケース）。
     /// 全件棄却したらそのまま 0 件を返す（生検出を信頼するフォールバックは入れない。
     /// 唯一の検出が誤検出だった場合に乳首などを復活させてしまうため）。
-    private func convertAll(_ result: FaceLandmarkerResult) -> [FaceLandmarkSet] {
+    private func convertAll(_ result: FaceLandmarkerResult, imageSize: CGSize) -> [FaceLandmarkSet] {
         result.faceLandmarks.compactMap { face in
             let points = face.map { FaceLandmark(x: $0.x, y: $0.y, z: $0.z) }
-            return makeLandmarkSet(points: points, eyeRatioRange: plausibilityEyeRatioRange)
+            return makeLandmarkSet(points: points,
+                                   eyeRatioRange: plausibilityEyeRatioRange,
+                                   imageSize: imageSize)
         }
     }
 
@@ -996,14 +1418,16 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
     /// 各パスから共通で呼ぶ。スコア 0 は棄却で `nil`。
     fileprivate func makeLandmarkSet(
         points: [FaceLandmark],
-        eyeRatioRange: ClosedRange<CGFloat>
+        eyeRatioRange: ClosedRange<CGFloat>,
+        imageSize: CGSize?
     ) -> FaceLandmarkSet? {
         // 面数比（0.5〜1.0）で「部分メッシュはやや低い confidence」を表現する。
         let meshCompleteness = Float(min(1.0, Double(points.count) / Double(FaceLandmarkSet.fullMeshCount)))
         let base = FaceLandmarkSet(points: points, confidence: meshCompleteness)
         let geom = base.plausibilityScore(
             minSpan: plausibilityMinSpan,
-            eyeRatioRange: eyeRatioRange
+            eyeRatioRange: eyeRatioRange,
+            imageSize: imageSize
         )
         guard geom > 0 else { return nil }
         // 部分メッシュは 0.5、フルメッシュは 1.0 を上限にする。境界横顔は geom≈0.3〜1.0 で
@@ -1013,4 +1437,6 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
         return FaceLandmarkSet(points: points, confidence: confidence)
     }
 }
+// swiftlint:enable type_body_length
 #endif
+// swiftlint:enable file_length

@@ -1,4 +1,5 @@
 import SwiftUI
+import MosaicCore
 
 /// Landing screen: two side-by-side entry buttons (写真 / 動画) on top,
 /// the recent-items list below.
@@ -11,6 +12,13 @@ struct HomeView: View {
     @State private var pickedMedia: PickedMedia?
     @State private var resumeContext: EditorView.ResumeContext?
     @State private var showEditor = false
+    /// 取り込み失敗の文言（`MediaPicker` の `onFailure`）。ここには
+    /// `MosaicEditorModel.errorMessage` が無いのでこの画面のアラートで伝える。
+    @State private var pickerError: String?
+
+    private var showPickerError: Binding<Bool> {
+        Binding(get: { pickerError != nil }, set: { if !$0 { pickerError = nil } })
+    }
 
     var body: some View {
         VStack(spacing: 20) {
@@ -29,13 +37,23 @@ struct HomeView: View {
         }
         .navigationTitle("Mask Me")
         .sheet(item: $pickerFilter) { filter in
-            MediaPicker(filter: filter) { media in
-                pickerFilter = nil
-                pickedMedia = media
-                resumeContext = nil
-                showEditor = true
-            }
-            .ignoresSafeArea()
+            // ここは**新規編集セッションの開始**なので 1 件のまま（既定値）。
+            // 複数選択はタイムラインへの素材追加（VideoTimelineView）だけが使う。
+            MediaPicker(filter: filter,
+                        onFailure: { pickerError = $0 },
+                        onPick: { picked in
+                            pickerFilter = nil
+                            guard let media = picked.first else { return }
+                            pickedMedia = media
+                            resumeContext = nil
+                            showEditor = true
+                        })
+                .ignoresSafeArea()
+        }
+        .alert("読み込みに失敗しました", isPresented: showPickerError) {
+            Button("OK", role: .cancel) { pickerError = nil }
+        } message: {
+            Text(pickerError ?? "")
         }
         .navigationDestination(isPresented: $showEditor) {
             if let pickedMedia {
@@ -43,9 +61,23 @@ struct HomeView: View {
                            settings: settingsStore.settings)
             }
         }
+        .onAppear { seedForUITestsIfNeeded() }
+    }
+
+    /// UI テスト起動時だけ、合成した動画で編集画面へ直行する（`UITestBootstrap` の doc）。
+    /// 通常起動では `isSeedingVideo` が false なので何もしない。
+    private func seedForUITestsIfNeeded() {
+        guard UITestBootstrap.isSeedingVideo, pickedMedia == nil else { return }
+        Task {
+            guard let url = await UITestBootstrap.seedVideoURL() else { return }
+            pickedMedia = .video(url)
+            resumeContext = nil
+            showEditor = true
+        }
     }
 
     /// 動画の「編集中」下書きをタップしたら、元動画＋保存パラメータで再開する。
+    /// v2 下書きはタイムライン（複数クリップ・rate・トランジション）も復元する。
     private func resume(_ draft: EditingDraft) {
         pickedMedia = .video(draftStore.sourceURL(for: draft))
         resumeContext = EditorView.ResumeContext(
@@ -54,7 +86,10 @@ struct HomeView: View {
             backgroundMosaicOn: draft.backgroundMosaicOn,
             faceBlockSize: draft.faceBlockSize,
             backgroundBlockSize: draft.backgroundBlockSize,
-            manualRects: draft.manualRects
+            manualRects: draft.manualRects,
+            timeline: draft.timeline.clips.isEmpty ? nil : draft.timeline,
+            sourceURLs: draftStore.sourceURLs(for: draft),
+            primarySourceID: draft.primarySource?.id
         )
         showEditor = true
     }
@@ -86,6 +121,7 @@ extension MediaPicker.Filter: Identifiable {
         switch self {
         case .images: return 0
         case .videos: return 1
+        case .videosAndImages: return 2
         }
     }
 }

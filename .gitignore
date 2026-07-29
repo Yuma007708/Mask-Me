@@ -8,6 +8,8 @@ Package.resolved
 *.xcworkspace/xcuserdata/
 DerivedData/
 *.xcuserstate
+# 実機ビルド用の -derivedDataPath 出力（xcodebuild -destination 'id=…' で使う）
+build/
 
 # CocoaPods (MediaPipe is integrated via Pods in the app target)
 Pods/

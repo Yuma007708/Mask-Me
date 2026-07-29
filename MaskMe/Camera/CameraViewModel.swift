@@ -143,6 +143,8 @@ final class CameraViewModel: ObservableObject {
                 }
             }
         case .video:
+            // フェーズ2でこのファイルに本格的に手を入れる際に解消する予定の構造的負債
+            // swiftlint:disable:next void_function_in_ternary
             isRecording ? finishRecording() : beginRecording()
         }
     }

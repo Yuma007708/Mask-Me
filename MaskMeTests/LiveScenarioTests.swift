@@ -191,7 +191,7 @@ final class LiveScenarioTests: XCTestCase {
         feed(model, faces: [fakeFace(cx: 0.5, cy: 0.4)], at: 0.0)
         // 横顔化: 実検出が全滅し、フローが位置を供給
         feedFlow(model, faces: [fakeFace(cx: 0.55, cy: 0.4)], at: step)
-        XCTAssertEqual(model.detectionCache[model.liveBucket(step)], [],
+        XCTAssertEqual(model.cacheStore.faces(sourceID: model.currentSourceID, time: step), [],
                        "フロー由来が実検出キャッシュに混入している（エクスポート汚染）")
         let looked = model.lookupFaces(at: step)
         XCTAssertFalse(looked.isEmpty, "プレビューがフロー位置を引けていない")
@@ -248,5 +248,59 @@ final class LiveScenarioTests: XCTestCase {
         XCTAssertEqual(landmarks.count, 1, "フロー明けの実検出で選択顔を再マッチできていない")
         let c = model.normalizedCentroid(of: landmarks[0])
         XCTAssertEqual(Double(c.y), 0.2, accuracy: 0.01, "非選択顔に飛び移っている")
+    }
+
+    // MARK: - liveFlowCache の素材基準キー化（フェーズ2地ならし）
+
+    /// 他素材（偽のsourceID）のフロー由来エントリが、同一バケット時刻であっても
+    /// 拾われないこと。フェーズ2で複数素材が入ったときに誤フレームの顔を
+    /// 返さないための境界。
+    func test_nearestFlowFaces_ignoresEntriesFromOtherSource() {
+        let model = makeModel()
+        let otherSourceID = UUID()
+        let bucket = model.liveBucket(step)
+        model.liveFlowCache[
+            DetectionCacheKey(sourceID: otherSourceID, time: bucket, bucketFPS: model.liveBucketFPS)
+        ] = [fakeFace(cx: 0.5, cy: 0.4)]
+        XCTAssertTrue(model.nearestFlowFaces(at: step).isEmpty,
+                      "他素材のフロー由来エントリを拾ってしまっている")
+    }
+
+    /// 対照テスト: 自素材のフロー由来エントリは従来どおり拾えること
+    /// （sourceIDフィルタが「何でも弾く」誤実装で1のテストが偽陽性greenにならないための歯止め）。
+    func test_nearestFlowFaces_stillMatchesOwnSource() {
+        let model = makeModel()
+        feed(model, faces: [fakeFace(cx: 0.5, cy: 0.4)], at: 0.0)
+        feedFlow(model, faces: [fakeFace(cx: 0.55, cy: 0.4)], at: step)
+        XCTAssertFalse(model.nearestFlowFaces(at: step).isEmpty,
+                       "自素材のフロー由来エントリまで弾いてしまっている")
+    }
+
+    /// フロー橋渡しの書き込みが、cacheStoreと同じ DetectionCacheKey
+    /// (sourceID: currentSourceID + bucket) でキーされていること。
+    func test_storeLiveDetection_flowBridged_keysByCurrentSourceID() {
+        let model = makeModel()
+        feedFlow(model, faces: [fakeFace(cx: 0.5, cy: 0.4)], at: step)
+        let bucket = model.liveBucket(step)
+        let expectedKey = DetectionCacheKey(
+            sourceID: model.currentSourceID, time: bucket, bucketFPS: model.liveBucketFPS)
+        XCTAssertEqual(model.liveFlowCache[expectedKey]?.count, 1,
+                       "flow橋渡しの書き込みキーがcurrentSourceID基準になっていない")
+    }
+
+    /// resetLiveDetection はsourceIDに関わらずliveFlowCacheを全消去すること
+    /// （scoped-clearにしない既存仕様は意図的: 動画切替のたびに追跡状態ごと破棄する）。
+    func test_resetLiveDetection_clearsFlowCacheRegardlessOfSource() {
+        let model = makeModel()
+        feedFlow(model, faces: [fakeFace(cx: 0.5, cy: 0.4)], at: step)
+        let otherSourceID = UUID()
+        let bucket = model.liveBucket(step)
+        model.liveFlowCache[
+            DetectionCacheKey(sourceID: otherSourceID, time: bucket, bucketFPS: model.liveBucketFPS)
+        ] = [fakeFace(cx: 0.9, cy: 0.9)]
+        XCTAssertEqual(model.liveFlowCache.count, 2)
+        model.resetLiveDetection()
+        XCTAssertTrue(model.liveFlowCache.isEmpty,
+                      "sourceに関わらずliveFlowCacheが全消去されるべき")
     }
 }

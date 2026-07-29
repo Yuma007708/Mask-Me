@@ -142,8 +142,9 @@ final class DValidLiveModelTests: XCTestCase {
 
         // シーク先以降のバケットにライブ検出が乗っているか（実検出+flow の合算）
         let midStart = duration * 0.5 - 0.1
-        let scannedMid = model.detectionCache.keys.filter { $0 >= midStart }.count
-        let facesMid = model.detectionCache.filter { $0.key >= midStart && !$0.value.isEmpty }.count
+        let scannedMid = model.cacheStore.allEntries.keys.filter { $0.bucket >= midStart }.count
+        let facesMid = model.cacheStore.allEntries
+            .filter { $0.key.bucket >= midStart && !$0.value.isEmpty }.count
         fputs("[MIDSTART] duration=\(duration) scannedMid=\(scannedMid) facesMid=\(facesMid) " +
               "pos=\(model.playbackPosition) detected=\(model.detectedFaces.count) " +
               "selected=\(model.detectedFaces.filter(\.isSelected).count)\n", stderr)

@@ -35,6 +35,15 @@ targets:
         INFOPLIST_FILE: MaskMe/Info.plist
         PRODUCT_BUNDLE_IDENTIFIER: com.maskme.app
         DEVELOPMENT_TEAM: 8694X8U5SQ
+        # Simulator では実機用証明書を探さず ad-hoc 署名にする。
+        # これが無いと DEVELOPMENT_TEAM / CODE_SIGN_IDENTITY が全 SDK に効き、
+        # Simulator ビルドの成果物が **未署名** になる。iOS 26 の Simulator は
+        # 未署名アプリの起動を拒否するため、ビルドも swift test も通るのに
+        # `xcodebuild test` だけが「Launchd job spawn failed /
+        # Security policy issue」で全滅する（2026-07-29 に踏んだ）。
+        "CODE_SIGN_IDENTITY[sdk=iphonesimulator*]": "-"
+        "CODE_SIGN_STYLE[sdk=iphonesimulator*]": Manual
+        "DEVELOPMENT_TEAM[sdk=iphonesimulator*]": ""
         MARKETING_VERSION: "1.0"
         CURRENT_PROJECT_VERSION: "1"
         TARGETED_DEVICE_FAMILY: "1,2"
@@ -70,6 +79,7 @@ targets:
     scheme:
       testTargets:
         - MaskMeTests
+        - MaskMeUITests
 
   # OpenCV 疎 LK オプティカルフローのラッパー framework。
   # OpenCV を使ってよいのはこのターゲットだけ（公開 API は Foundation/UIKit 型のみ）。
@@ -122,3 +132,22 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
         TEST_HOST: "$(BUILT_PRODUCTS_DIR)/MaskMe.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/MaskMe"
         BUNDLE_LOADER: "$(TEST_HOST)"
+
+  # 指の操作（払う・長押しドラッグ・つまむ）の検証。**ジェスチャの取り合いは
+  # 実際に触らないと決まらない**ため、純ロジックのテストでは素通りする事故
+  # （クリップの上を払っても横スクロールしない等）をここで塞ぐ。
+  # MediaPipe には依存しないので Pods の結線は不要（Podfile にも入れない）。
+  # 起動は `-uiTestSeedVideo` で合成動画を種にする（MaskMe/UITestBootstrap.swift）。
+  MaskMeUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: MaskMeUITests
+    dependencies:
+      - target: MaskMe
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.maskme.app.uitests
+        SWIFT_VERSION: "5.9"
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_TARGET_NAME: MaskMe
