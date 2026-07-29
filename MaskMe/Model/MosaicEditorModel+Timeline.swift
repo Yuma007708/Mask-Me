@@ -63,8 +63,26 @@ extension MosaicEditorModel {
     }
 
     /// 指定クリップを `toIndex` の位置へ並べ替える。
+    ///
+    /// **再生位置は動かしたクリップを追いかける。** 並べ替えは合成時刻の意味を変えるので、
+    /// 時刻を据え置くと掴んでいたクリップが画面から消えて別のクリップが映る。
+    /// 再生位置が対象クリップの外にいたときは従来どおり時刻を据え置く
+    /// （`TimelineState.compositionTime(following:from:to:time:)` が判定する）。
     public func moveClip(id: UUID, toIndex: Int) {
-        applyTimelineEdit { $0.moving(clipID: id, toIndex: toIndex) }
+        let newState = timeline.moving(clipID: id, toIndex: toIndex)
+        guard newState != timeline else { return }
+        let followed = TimelineState.compositionTime(
+            following: id, from: timeline, to: newState,
+            time: compositionTime(forPosition: playbackPosition))
+        replaceTimeline(newState, keepingCompositionSeconds: followed)
+        // 再構築の完了を待たずにここでも反映する。`rebuildComposition` の復元は
+        // Composition を作れたときにしか走らない（素材未登録では早期 return する）ので、
+        // そこだけに任せると再生位置の写像が合成の成否に依存してしまう。
+        // 同じ値を入れるので、再構築後の復元と食い違わない。
+        if videoDuration > 0 {
+            playbackPosition = min(max(followed, 0), videoDuration.nextDown) / videoDuration
+        }
+        commitEdit()
     }
 
     /// 指定クリップの素材使用範囲を変更する。
@@ -233,9 +251,13 @@ extension MosaicEditorModel {
     /// 復元する（編集のたびに先頭へ飛ばない）。同一状態なら何もしない。
     /// 履歴確定は行わない: 編集 API（`applyTimelineEdit`）は確定するが、
     /// undo/redo の適用（`apply(_:)`）は lastCommitted を自前管理するため。
-    func replaceTimeline(_ newState: TimelineState) {
+    ///
+    /// - Parameter keepingCompositionSeconds: 復元したい合成時刻。`nil` なら差し替え前の
+    ///   再生位置をそのまま保つ。並べ替えのように**合成時刻の意味が変わる**編集は、
+    ///   写した先の時刻をここで明示する（`TimelineState.compositionTime(following:from:to:time:)`）。
+    func replaceTimeline(_ newState: TimelineState, keepingCompositionSeconds: Double? = nil) {
         guard newState != timeline else { return }
-        let keepSeconds = compositionTime(forPosition: playbackPosition)
+        let keepSeconds = keepingCompositionSeconds ?? compositionTime(forPosition: playbackPosition)
         timeline = newState  // didSet が mapping 追随・世代インクリメント・尺更新を行う
         let generation = timelineGeneration
         // exportVideo が await できるようタスクを世代付きで保持する（本体 doc 参照）。

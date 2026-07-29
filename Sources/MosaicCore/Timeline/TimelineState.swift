@@ -207,6 +207,34 @@ public struct TimelineState: Codable, Equatable, Sendable {
         return replacing(clips: newClips, transitions: newTransitions)
     }
 
+    /// 並べ替えの前後で、**掴んだクリップの中の同じ位置**を指す合成時刻へ写す。
+    ///
+    /// 並べ替えは合成時刻の意味を変える（同じ「3.0 秒」に別のクリップが来る）。再生位置を
+    /// 時刻のまま据え置くと、動かしたクリップが画面から消えて別のクリップが映る。
+    /// そこでクリップ内の相対位置（オフセット）を保って写す。
+    ///
+    /// 再生位置が対象クリップの**外**にいたときは写す先が定義できないので `time` をそのまま返す
+    /// （その場合は従来どおり時刻が据え置かれる）。トランジションの重なりで尺が縮む影響は
+    /// `mapping` が吸収するため、ここで重なりを意識する必要はない。
+    ///
+    /// - Parameters:
+    ///   - clipID: 並べ替えたクリップ。
+    ///   - old: 並べ替え前の状態。
+    ///   - new: 並べ替え後の状態。
+    ///   - time: 並べ替え前の合成時刻（再生位置）。
+    public static func compositionTime(following clipID: UUID,
+                                       from old: TimelineState,
+                                       to new: TimelineState,
+                                       time: Double) -> Double {
+        guard let oldStart = old.mapping.clipStartTime(clipID: clipID),
+              let newStart = new.mapping.clipStartTime(clipID: clipID),
+              let clip = old.clips.first(where: { $0.id == clipID })
+        else { return time }
+        let offset = time - oldStart
+        guard offset >= 0, offset < clip.duration else { return time }
+        return newStart + offset
+    }
+
     /// 指定したクリップの素材使用範囲を変更する。
     ///
     /// クリップ尺が縮んだ結果 `duration > min(両クリップ合成尺)/2` を破るトランジションは

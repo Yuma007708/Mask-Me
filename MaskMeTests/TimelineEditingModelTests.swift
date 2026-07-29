@@ -96,6 +96,48 @@ final class TimelineEditingModelTests: XCTestCase {
         XCTAssertEqual(model.clips.map(\.id), [second.id, first.id])
     }
 
+    /// 並べ替え後、再生位置が**動かしたクリップを追いかける**こと。
+    ///
+    /// 合成時刻を据え置くと、並べ替えでその時刻に別のクリップが来るため、掴んでいた
+    /// クリップが画面から消えて別の映像が映る（実機で確認された挙動）。
+    func test_moveClip_playheadFollowsMovedClip() async {
+        let model = makeModel()
+        let source = model.currentSourceID
+        let first = TimelineClip(sourceID: source, sourceStart: 0, sourceEnd: 2)
+        let second = TimelineClip(sourceID: source, sourceStart: 4, sourceEnd: 6)
+        model.setClipsForTesting([first, second])
+        // 合成尺 4s。second は [2,4) にいるので、その 0.5 秒目 = 合成 2.5s を見ている。
+        model.playbackPosition = 2.5 / 4.0
+
+        model.moveClip(id: second.id, toIndex: 0)
+        await model.awaitPendingTimelineRebuild()
+
+        // second は先頭 [0,2) へ移ったので、同じ 0.5 秒目 = 合成 0.5s。
+        let composition = model.playbackPosition * model.videoDuration
+        XCTAssertEqual(composition, 0.5, accuracy: 1e-6,
+                       "再生位置が動かしたクリップを追いかけていない")
+        let location = model.timeline.mapping.sourceLocation(at: composition)
+        XCTAssertEqual(location?.clipID, second.id, "並べ替え後に別のクリップを指している")
+        XCTAssertEqual(location?.time ?? -1, 4.5, accuracy: 1e-6,
+                       "素材時刻が並べ替え前（4.5s）とずれている")
+    }
+
+    /// 再生位置が動かしたクリップの**外**にいたときは、合成時刻を据え置くこと。
+    func test_moveClip_playheadStaysWhenOutsideMovedClip() async {
+        let model = makeModel()
+        let source = model.currentSourceID
+        let first = TimelineClip(sourceID: source, sourceStart: 0, sourceEnd: 2)
+        let second = TimelineClip(sourceID: source, sourceStart: 4, sourceEnd: 6)
+        model.setClipsForTesting([first, second])
+        model.playbackPosition = 0.5 / 4.0   // first の中（合成 0.5s）
+
+        model.moveClip(id: second.id, toIndex: 0)
+        await model.awaitPendingTimelineRebuild()
+
+        XCTAssertEqual(model.playbackPosition * model.videoDuration, 0.5, accuracy: 1e-6,
+                       "対象クリップ外の再生位置が動いている")
+    }
+
     /// setClipRate が合成尺（videoDuration）へ波及すること
     /// （seekTo 等の `position * videoDuration` が正しい合成時刻になる前提）。
     func test_setClipRate_updatesVideoDurationToScaledTotal() {

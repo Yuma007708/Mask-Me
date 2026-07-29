@@ -137,6 +137,52 @@ final class TimelineStateTests: XCTestCase {
         XCTAssertEqual(state.moving(clipID: state.clips[0].id, toIndex: 0), state)
     }
 
+    // MARK: - 並べ替え後の再生位置
+
+    /// 掴んだクリップの中にいた再生位置が、移動先の同じ相対位置へ写ること。
+    func test_compositionTimeFollowsMovedClip() throws {
+        let state = makeState()
+        let cID = state.clips[2].id
+        let before = try XCTUnwrap(state.mapping.clipStartTime(clipID: cID)) + 1.5  // C の 1.5 秒目
+
+        // C を先頭へ移す。移動後 C は 0 秒始まりなので、写った先は 1.5 秒。
+        let moved = state.moving(clipID: cID, toIndex: 0)
+        let movedStart = try XCTUnwrap(moved.mapping.clipStartTime(clipID: cID))
+        let after = TimelineState.compositionTime(
+            following: cID, from: state, to: moved, time: before)
+
+        XCTAssertEqual(movedStart, 0, accuracy: 1e-9, "移動後の C は先頭にいるはず")
+        XCTAssertEqual(after, 1.5, accuracy: 1e-9,
+                       "掴んだクリップ内の相対位置（1.5 秒目）が保たれていない")
+        // 相対位置が保たれている＝写した先でも同じ素材の同じ時刻を指す、が本質。
+        let sourceBefore = try XCTUnwrap(state.mapping.sourceLocation(at: before))
+        let sourceAfter = try XCTUnwrap(moved.mapping.sourceLocation(at: after))
+        XCTAssertEqual(sourceBefore.clipID, cID)
+        XCTAssertEqual(sourceAfter.clipID, cID, "写した先が別のクリップを指している")
+        XCTAssertEqual(sourceBefore.time, sourceAfter.time, accuracy: 1e-6,
+                       "写した先が別の素材時刻を指している")
+    }
+
+    /// 再生位置が掴んだクリップの外にいたときは、時刻を据え置くこと
+    /// （写す先が定義できないため。据え置きは従来どおりの挙動）。
+    func test_compositionTimeStaysWhenPlayheadIsOutsideMovedClip() {
+        let state = makeState()
+        let cID = state.clips[2].id
+        let moved = state.moving(clipID: cID, toIndex: 0)
+        // A の中（0.5 秒）を見ている状態で C を動かす。
+        let after = TimelineState.compositionTime(
+            following: cID, from: state, to: moved, time: 0.5)
+        XCTAssertEqual(after, 0.5, accuracy: 1e-9)
+    }
+
+    /// 未知のクリップ id では時刻を据え置くこと（クラッシュも 0 への飛びもしない）。
+    func test_compositionTimeStaysForUnknownClip() {
+        let state = makeState()
+        let after = TimelineState.compositionTime(
+            following: UUID(), from: state, to: state, time: 2.0)
+        XCTAssertEqual(after, 2.0, accuracy: 1e-9)
+    }
+
     // MARK: - trimming / settingRate のクランプと破棄
 
     /// トリムで縮んだクリップの duration 制約を破るトランジションはクランプされること。
