@@ -318,6 +318,7 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
     public func allLandmarks(in image: UIImage, timestampMs: Int) -> [FaceLandmarkSet] {
         resetTracksIfNeeded(timestampMs: timestampMs)
         ageVerifiedMemory()
+        ageRejectedMemory()
         var result: [FaceLandmarkSet]
         var source: FaceDetectionSource
         #if DEBUG
@@ -481,10 +482,44 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
     private func reseedFlow(from result: [FaceLandmarkSet], image: UIImage) {
         consecutiveFlowFrames = 0
         flowStates = result.prefix(maxFlowTracks).compactMap { face in
+            guard isTrustedFlowSeed(face) else { return nil }
             let tracker = OpticalFlowTracker()
             guard tracker.seed(with: image, faceBox: face.boundingBox) else { return nil }
             return FlowState(tracker: tracker, lastLandmarks: face)
         }
+    }
+
+    /// フロー橋渡し（`advanceFlowBridge`）の種にしてよい検出か。
+    ///
+    /// 体誤フィットは crop 再検証でほぼ毎フレーム落ちるが、数十フレームに 1 度まぐれで通る。
+    /// その 1 フレームが種になると、フローは検出器が全滅したフレームを繋ぐ経路（＝原理的に
+    /// 再検証できない）なので、十数フレームへ増幅される（実測: torso で通過 1 → 検出 13）。
+    ///
+    /// そこで**直前まで検証に落ち続けていた場所**の通過だけは、「連続で検証を通った」実績
+    /// （`isRecentlyVerified`＝`minPassStreakForGrace` 回以上）を種の条件にする。
+    /// まぐれ通過は単発、実顔はほぼ毎フレーム通る、という既に実測済みの非対称
+    /// （`verifiedMemory` の doc 参照）をここでも使う。
+    ///
+    /// **落ちた履歴がない場所の検出は無条件に種にする。** 位置や形で絞ろうとすると外れる
+    /// （体誤フィットは画面上半分・ほぼ正方形に出るので `isSuspectBodyRegion` では捕まらない。
+    /// 実測で確認済み）。
+    ///
+    /// 全検出に連続通過を要求する版も試し、手元の実顔 8 本では検出フレーム数が同じだった
+    /// （フロー橋渡しは検出全滅フレームしか使わないので、実顔素材では寄与が小さい）。
+    /// それでも緩い側を採るのは、その版がフロー橋渡しを全面的に弱めるためで、手元の素材に
+    /// 出なかった退行が他の素材で出るリスクを読めないから。**誤モザイクより顔の見逃しが重い。**
+    private func isTrustedFlowSeed(_ face: FaceLandmarkSet) -> Bool {
+        guard priorFailStreak(at: face.boundingBox) > 0 else { return true }
+        return isRecentlyVerified(face.boundingBox)
+    }
+
+    /// その場所が「通過に転じる直前まで」連続で落ちていた回数。通過して記憶に載ったあとも
+    /// 参照できるよう、`VerifiedBox` に持ち越した値を優先して読む。
+    private func priorFailStreak(at box: CGRect) -> Int {
+        if let verified = verifiedMemory.first(where: { iou($0.box, box) > verifiedMemoryIoU }) {
+            return verified.priorFailStreak
+        }
+        return failStreak(at: box)
     }
 
     // MARK: - ライブプレビュー経路（IMAGE モード + テンポラル追跡）
@@ -533,6 +568,7 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
     public func liveLandmarks(in image: UIImage, atMediaSeconds t: Double) -> LiveDetectionResult {
         resetLiveTracksIfNeeded(mediaSeconds: t)
         ageVerifiedMemory()
+        ageRejectedMemory()
         var result: [FaceLandmarkSet]
         var source: FaceDetectionSource
         #if DEBUG
@@ -719,14 +755,25 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
             guard verifyAll
                     || face.isSuspectBodyRegion(in: image.size, suspectMidY: verifySuspectCy)
             else { return true }
+            verifyStats.examined += 1
             // 検証に落ちたときの共通後処理。直近で検証を通った顔なら猶予で残す。
-            func reject() -> Bool {
-                temporalGrace && isRecentlyVerified(box)
+            func reject(_ reason: VerifyRejectionReason) -> Bool {
+                verifyStats.count(reason)
+                // 棄却の記憶は時系列経路（動画・ライブ）でだけ持つ。静止画は 1 枚ずつ独立で、
+                // 連続棄却という概念が無いうえ、毎フレームの `ageRejectedMemory` が回らないので
+                // 記憶が捨てられず溜まり続ける。
+                if temporalGrace {
+                    let streak = rememberRejected(box)
+                    verifyStats.rejectStreaks[streak, default: 0] += 1
+                }
+                let saved = temporalGrace && isRecentlyVerified(box)
+                if saved { verifyStats.savedByGrace += 1 }
+                return saved
             }
             guard face.isPlausibleFace(minSpan: plausibilityMinSpan,
                                        eyeRatioRange: 0.45...1.0,
                                        imageSize: image.size) else {
-                return reject()
+                return reject(.preGate)
             }
             let roi = expandedClamped(box, factor: verifyCropExpansion)
             guard roi.width > 0, roi.height > 0,
@@ -734,7 +781,7 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
                   let mpImage = try? MPImage(uiImage: upscaledIfSmall(cropped)),
                   let result = try? cropLandmarker.detect(image: mpImage),
                   let first = result.faceLandmarks.first else {
-                return reject()
+                return reject(.noRedetection)
             }
             let points = first.map { FaceLandmark(x: $0.x, y: $0.y, z: $0.z) }
             let meshFraction = Float(min(1.0, Double(points.count) / Double(FaceLandmarkSet.fullMeshCount)))
@@ -747,15 +794,127 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
             // かつ体形状でないことを要求する。
             guard let vetted = makeLandmarkSet(points: redetected.points,
                                                eyeRatioRange: 0.45...1.0,
-                                               imageSize: image.size),
-                  vetted.confidence >= verifyMinConfidence,
-                  !vetted.isBodyLikeShape(in: image.size),
-                  iou(vetted.boundingBox, box) > 0.3 else {
-                return reject()
+                                               imageSize: image.size) else {
+                return reject(.geometry)
             }
-            if temporalGrace { rememberVerified(box) }
+            guard vetted.confidence >= verifyMinConfidence else { return reject(.confidence) }
+            guard !vetted.isBodyLikeShape(in: image.size) else { return reject(.bodyShape) }
+            guard iou(vetted.boundingBox, box) > 0.3 else { return reject(.displaced) }
+            verifyStats.passed += 1
+            let prior = failStreak(at: box)
+            verifyStats.passAfterStreaks[prior, default: 0] += 1
+            forgetRejected(box)
+            if temporalGrace { rememberVerified(box, priorFailStreak: prior) }
             return true
         }
+    }
+
+    // MARK: - crop 再検証の棄却理由の内訳（診断用）
+
+    /// crop 再検証（`verifySuspiciousFaces`）が何を理由に候補を落としたかの集計。
+    ///
+    /// **ゲートのしきい値を実測なしに触らないための計測点。** 誤検出を下げる修正が
+    /// 横顔の検出率を巻き添えにする事故が実際に起きており（`棄却の記憶` の不採用記録を参照）、
+    /// 「横顔がどのゲートで落ちているか」を数字で分けられないと、直す場所を間違える。
+    ///
+    /// 加算しているだけで採否には一切影響しない。診断テストから読む。
+    enum VerifyRejectionReason {
+        /// crop に回す前の幾何ゲート（目間比・縦横比・目と口の上下）。
+        case preGate
+        /// タイト crop から顔を再検出できなかった。
+        case noRedetection
+        /// 再検出はできたが幾何ゲートを通らなかった。
+        case geometry
+        /// 幾何は通ったが confidence が下限未満。
+        case confidence
+        /// 縦長すぎて体形状と判定された（横顔もここに落ちうる）。
+        case bodyShape
+        /// 再検出した顔が元の候補と別の場所にいた（IoU 不足）。
+        case displaced
+    }
+
+    struct VerifyStats {
+        var examined = 0
+        var passed = 0
+        var savedByGrace = 0
+        var preGate = 0
+        var noRedetection = 0
+        var geometry = 0
+        var confidence = 0
+        var bodyShape = 0
+        var displaced = 0
+        /// 「同じ場所で連続何回落ちたか」の分布（連続回数 → その回数に到達した件数）。
+        /// 実顔の散発的な失敗と、体誤フィットの継続的な失敗を分けられるかを見るための計測。
+        var rejectStreaks: [Int: Int] = [:]
+        /// 検証を通った時点で、その場所が直前まで何回連続で落ちていたか（連続回数 → 件数）。
+        /// 体誤フィットの「まぐれ通過」はフロー橋渡しの種になって十数フレームへ増幅するので、
+        /// 通過そのものを直前の失敗歴で疑えるかを見る。
+        var passAfterStreaks: [Int: Int] = [:]
+
+        mutating func count(_ reason: VerifyRejectionReason) {
+            switch reason {
+            case .preGate: preGate += 1
+            case .noRedetection: noRedetection += 1
+            case .geometry: geometry += 1
+            case .confidence: confidence += 1
+            case .bodyShape: bodyShape += 1
+            case .displaced: displaced += 1
+            }
+        }
+    }
+
+    /// 直近の検出セッションの棄却内訳。診断テストが読む前に `resetVerifyStats()` する。
+    private(set) var verifyStats = VerifyStats()
+
+    func resetVerifyStats() { verifyStats = VerifyStats() }
+
+    // MARK: - 棄却の連続回数（実顔と体誤フィットを分ける非対称）
+
+    /// 同じ場所で crop 再検証に**連続して**落ちた回数の記憶。
+    ///
+    /// 実顔も動きブレ・角度で単発の検証失敗を起こす（実測: profile.mov で 78 回中 11 回失敗、
+    /// それでも検出は 91/91 フレーム成立）。一方で体誤フィットは同じ場所でほぼ毎フレーム
+    /// 落ち続ける（実測: torso で 29 回中 28 回失敗）。**落ちたかどうかでは両者を区別できないが、
+    /// 落ち続けたかどうかでは区別できる**というのがここの前提。
+    ///
+    /// 通過の記憶（`verifiedMemory`）が「顔を増やす方向」にしか働かないのに対し、こちらは
+    /// 顔を減らす方向に働くので、検出率の退行に直結する。しきい値は必ず実測で決めること。
+    private struct RejectedBox {
+        let box: CGRect
+        let framesLeft: Int
+        let failStreak: Int
+    }
+    private var rejectedMemory: [RejectedBox] = []
+    /// 棄却の記憶を保持するフレーム数。検出が途切れている間も場所を覚えておく必要があるため、
+    /// 通過の記憶（2 フレーム）より長く取る。
+    private let rejectedMemoryFrames = 4
+
+    private func ageRejectedMemory() {
+        rejectedMemory = rejectedMemory.compactMap {
+            $0.framesLeft <= 1
+                ? nil
+                : RejectedBox(box: $0.box, framesLeft: $0.framesLeft - 1, failStreak: $0.failStreak)
+        }
+    }
+
+    /// 棄却を記録し、その場所での連続棄却回数を返す。
+    @discardableResult
+    private func rememberRejected(_ box: CGRect) -> Int {
+        let streak = (rejectedMemory.first { iou($0.box, box) > verifiedMemoryIoU }?.failStreak ?? 0) + 1
+        rejectedMemory.removeAll { iou($0.box, box) > verifiedMemoryIoU }
+        rejectedMemory.append(
+            RejectedBox(box: box, framesLeft: rejectedMemoryFrames, failStreak: streak))
+        return streak
+    }
+
+    /// その場所での現在の連続棄却回数（記憶がなければ 0）。
+    private func failStreak(at box: CGRect) -> Int {
+        rejectedMemory.first { iou($0.box, box) > verifiedMemoryIoU }?.failStreak ?? 0
+    }
+
+    /// 検証を通った場所の棄却記憶は捨てる（連続でなくなったため）。
+    private func forgetRejected(_ box: CGRect) {
+        rejectedMemory.removeAll { iou($0.box, box) > verifiedMemoryIoU }
     }
 
     // MARK: - 検証通過の記憶（実顔のモザイクちらつき止め）
@@ -780,6 +939,8 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
         let box: CGRect
         let framesLeft: Int
         let passStreak: Int
+        /// この場所が通過に転じる直前まで連続で落ちていた回数（`isTrustedFlowSeed` が読む）。
+        let priorFailStreak: Int
     }
     private var verifiedMemory: [VerifiedBox] = []
     /// 猶予の長さ。`ageVerifiedMemory` が毎フレーム 1 減らし 1 以下で捨てるので、
@@ -794,15 +955,21 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
         verifiedMemory = verifiedMemory.compactMap {
             $0.framesLeft <= 1
                 ? nil
-                : VerifiedBox(box: $0.box, framesLeft: $0.framesLeft - 1, passStreak: $0.passStreak)
+                : VerifiedBox(box: $0.box, framesLeft: $0.framesLeft - 1,
+                              passStreak: $0.passStreak, priorFailStreak: $0.priorFailStreak)
         }
     }
 
-    private func rememberVerified(_ box: CGRect) {
-        let streak = (verifiedMemory.first { iou($0.box, box) > verifiedMemoryIoU }?.passStreak ?? 0) + 1
+    /// - Parameter priorFailStreak: 通過に転じる直前までの連続棄却回数。連続通過の 2 回目以降は
+    ///   1 回目に記録した値を引き継ぐ（「落ち続けていた場所か」は通過が続いても変わらないため）。
+    private func rememberVerified(_ box: CGRect, priorFailStreak: Int) {
+        let previous = verifiedMemory.first { iou($0.box, box) > verifiedMemoryIoU }
+        let streak = (previous?.passStreak ?? 0) + 1
+        let prior = previous?.priorFailStreak ?? priorFailStreak
         verifiedMemory.removeAll { iou($0.box, box) > verifiedMemoryIoU }
         verifiedMemory.append(
-            VerifiedBox(box: box, framesLeft: verifiedMemoryFrames, passStreak: streak))
+            VerifiedBox(box: box, framesLeft: verifiedMemoryFrames,
+                        passStreak: streak, priorFailStreak: prior))
     }
 
     private func isRecentlyVerified(_ box: CGRect) -> Bool {
@@ -823,11 +990,19 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
     /// 出た（`RealFaceMosaicTests` の横顔区間。全経路に適用した版でもフロー出力だけに絞った版でも
     /// 同じ）。横顔は crop 再検証（eyeRatio 0.45 以上を要求）に落ちる頻度が高く、
     /// 体誤フィットと**同じゲートで同じように落ちる**ため、棄却理由では両者を区別できない。
-    /// **顔を見逃す退行は誤モザイクより重い**ので、この方向は捨てて全候補再検証
-    /// （`verifyAndPruneTracks`）だけを採る。
+    /// **顔を見逃す退行は誤モザイクより重い**ので、この方向は捨てた。
     ///
-    /// 増幅を止めたければ、棄却の記憶ではなく「crop 再検証の横顔リコールを上げる」
-    /// （yaw 推定で eyeRatio ゲートを角度依存にする等）方向で攻めること。
+    /// **決着（2026-07-29）**: 増幅は「棄却を使って顔を消す」のではなく
+    /// **「まぐれ通過をフローの種にしない」**（`isTrustedFlowSeed`）で止めた。誤検出は
+    /// torso 29% → 2%、実顔 8 本の検出フレーム数は**完全に不変**。棄却の記憶が横顔を殺したのは、
+    /// 実顔も検証に落ちること自体はあるのに（実測: profile.mov で 78 回中 11 回失敗、
+    /// それでも検出は 91/91 成立）、その棄却を根拠に顔を消していたため。
+    /// 落ちた事実ではなく「落ち続けた直後の単発通過」だけを疑えば両者は分かれる。
+    ///
+    /// なお当初立てた「crop 再検証の横顔リコールを上げる」（yaw 推定で eyeRatio ゲートを
+    /// 角度依存にする）という仮説は**計測で否定された**。crop 再検証は横顔を落としていない
+    /// （profile.mov の棄却 11 件はすべて preGate 2 / 再検出失敗 9 で、eyeRatio 由来でも
+    /// 体形状ゲート由来でもない）。棄却理由の内訳は `VerifyStats` から取れる。
 
     private func resetTracksIfNeeded(timestampMs: Int) {
         if lastVideoTimestampMs != .min,
@@ -836,6 +1011,7 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
             flowStates = []
             consecutiveFlowFrames = 0
             verifiedMemory.removeAll()
+            rejectedMemory.removeAll()
         }
         lastVideoTimestampMs = timestampMs
     }

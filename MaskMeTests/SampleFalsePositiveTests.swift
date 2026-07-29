@@ -169,10 +169,13 @@ final class SampleFalsePositiveTests: XCTestCase {
     /// 「どんな誤検出か」の手掛かりにすぎず、顔なし素材では検出率が唯一の正しい指標。
     ///
     /// **0 は要求しない。** MediaPipe 本体が胴体に conf 1.00 / 478 点フルメッシュを
-    /// 貼るケースは幾何では実顔と区別できず、全候補 crop 再検証で 71% → 29% まで
-    /// 落とすのが現状の上限（`MediaPipeFaceLandmarkerAdapter.verifyAndPruneTracks` の doc）。
-    /// これ以上は「棄却の記憶」で下げられるが横顔の検出を落とすため採っていない。
-    /// このテストは**これ以上悪化させない**ための上限ガードとして 40% を置く。
+    /// 貼るケースは幾何では実顔と区別できず、まぐれで crop 再検証を通るフレームが残る。
+    /// 全候補 crop 再検証で 71% → 29%、さらにフロー橋渡しの種を絞って
+    /// （`MediaPipeFaceLandmarkerAdapter.isTrustedFlowSeed`）29% → 2% まで落としてある。
+    ///
+    /// 実測（4 本 × 45 フレーム）: elbow 0% / feet 0% / torso 2% / yoga 4%。
+    /// 上限 10% は、最悪の yoga（4%）に素材ごとのブレぶんの余裕を見た値。
+    /// **フロー種のゲートを外すと torso が 29% に戻り、このテストが落ちる。**
     func test_NonFaceVideos_falsePositiveRateIsBounded() async throws {
         let urls = nonFaceVideoURLs
         try XCTSkipIf(urls.isEmpty, "\(sampleDir)/nonfaces に顔なし動画がありません")
@@ -180,7 +183,7 @@ final class SampleFalsePositiveTests: XCTestCase {
         var failures: [String] = []
         for url in urls {
             let stats = try await scan(url: url, maxSeconds: 15, label: "NONFACE-RESULT")
-            if stats.detectionRate > 0.40 {
+            if stats.detectionRate > 0.10 {
                 failures.append(String(
                     format: "%@: 顔が無いのに %d/%d フレーム（%.0f%%）で検出 detections=%d",
                     url.lastPathComponent, stats.framesWithDetection, stats.totalFrames,
