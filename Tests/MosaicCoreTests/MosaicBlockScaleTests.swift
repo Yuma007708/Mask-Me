@@ -54,27 +54,38 @@ final class MosaicBlockScaleTests: XCTestCase {
         return texture
     }
 
-    /// 出力テクスチャの中央行を走査し、値が一定である連なり（＝ブロック）の
+    /// 出力テクスチャの 1 行を走査し、値が一定である連なり（＝ブロック）の
     /// **最頻の長さ**を返す。端の欠けたブロックに引きずられないよう最頻値を使う。
-    private func measuredBlockWidth(of texture: MTLTexture) -> Int {
+    ///
+    /// - Parameters:
+    ///   - row: 走査する行（既定は中央）。
+    ///   - xRange: 走査する列の範囲（既定は全幅）。顔メッシュ経路のように
+    ///     **モザイクが画面の一部にしか掛からない**場合、素の入力（列ごとに値が変わる
+    ///     ＝連なり長 1）が混ざると最頻値が 1 に張り付くため、範囲で絞る。
+    ///   - minRun: この長さ未満の連なりを最頻値の集計から外す。同上の理由で、
+    ///     モザイク領域の外縁や偶然の同値を弾く。
+    private func measuredBlockWidth(
+        of texture: MTLTexture, row: Int? = nil, xRange: Range<Int>? = nil, minRun: Int = 1
+    ) -> Int {
         let width = texture.width
-        let row = texture.height / 2
+        let row = row ?? texture.height / 2
         var pixels = [UInt8](repeating: 0, count: width * 4)
         pixels.withUnsafeMutableBytes { raw in
             texture.getBytes(raw.baseAddress!, bytesPerRow: width * 4,
                              from: MTLRegionMake2D(0, row, width, 1), mipmapLevel: 0)
         }
+        let range = xRange ?? 0..<width
         var runs: [Int: Int] = [:]
         var runLength = 1
-        for x in 1..<width {
+        for x in (range.lowerBound + 1)..<range.upperBound {
             if pixels[x * 4] == pixels[(x - 1) * 4] {
                 runLength += 1
             } else {
-                runs[runLength, default: 0] += 1
+                if runLength >= minRun { runs[runLength, default: 0] += 1 }
                 runLength = 1
             }
         }
-        runs[runLength, default: 0] += 1
+        if runLength >= minRun { runs[runLength, default: 0] += 1 }
         return runs.max { lhs, rhs in
             lhs.value == rhs.value ? lhs.key < rhs.key : lhs.value < rhs.value
         }?.key ?? 0
@@ -162,6 +173,83 @@ final class MosaicBlockScaleTests: XCTestCase {
         for entry in ratios.dropFirst() {
             XCTAssertEqual(entry.ratio, base.ratio, accuracy: base.ratio * 0.1,
                            "width=\(entry.width) のブロックが幅比で基準(720)と違う")
+        }
+    }
+
+    // MARK: - 顔メッシュ経路（立体モザイク）
+
+    /// 正面向きの合成フルメッシュ顔を作る。
+    ///
+    /// `FaceMeshTopology.frontalUV`（正面キャンバス上の正準 UV）をそのまま
+    /// `rect`（正規化フレーム座標）へ線形に写した「正面を向いた顔」。warp が恒等の
+    /// アフィン写像になるので、キャンバス上のブロックがフレーム上でも軸平行の矩形として
+    /// 現れ、走査で長さを測れる。
+    private func makeSyntheticFullMesh(in rect: CGRect) -> FaceLandmarkSet {
+        let uv = FaceMeshTopology.frontalUV
+        var points: [FaceLandmark] = []
+        points.reserveCapacity(FaceLandmarkSet.fullMeshCount)
+        for index in 0..<FaceMeshTopology.vertexCount {
+            let u = CGFloat(uv[index * 2])
+            let v = CGFloat(uv[index * 2 + 1])
+            points.append(FaceLandmark(x: Float(rect.minX + u * rect.width),
+                                       y: Float(rect.minY + v * rect.height)))
+        }
+        // 虹彩 10 点（468..477）はメッシュ描画に使われないが、`isFullMesh` を
+        // 満たしてメッシュ経路へ入るために埋める。
+        while points.count < FaceLandmarkSet.fullMeshCount {
+            points.append(FaceLandmark(x: Float(rect.midX), y: Float(rect.midY)))
+        }
+        return FaceLandmarkSet(points: points, confidence: 1)
+    }
+
+    /// **顔メッシュ経路の粗さも解像度に依らないこと。**
+    ///
+    /// この経路だけは `MosaicRenderer.effectiveBlock` を通らず、
+    /// `FaceMeshMosaicRenderer` が固定 256px キャンバス基準へ独自に換算している
+    /// (`block * canvasSize / referenceFaceWidth`)。式にテクスチャ幅が出てこないので
+    /// 原理的に解像度非依存だが、**フルメッシュ顔はアプリの主経路**（TikTok 風の立体
+    /// モザイクはここでしか出ない）なのに、背景・手動矩形と違って出力ピクセルで
+    /// 固定されていなかった。ここで実測して固定する。
+    ///
+    /// 期待値: フレーム上のブロック px = `block * 顔の幅(px) / referenceFaceWidth(380)`。
+    /// 顔がフレーム幅の一定割合を占める限り、ブロックはフレーム幅に比例する
+    /// ＝ プレビュー(720px)と書き出し(原寸)で見た目の粗さが一致する。
+    func test_faceMeshMosaicBlockScalesWithResolution() throws {
+        let renderer = try makeRenderer()
+        // 顔はフレーム幅の 50%。中央行(v=0.5)が必ず顔の中を通る。
+        let faceRect = CGRect(x: 0.25, y: 0.2, width: 0.5, height: 0.6)
+        let face = makeSyntheticFullMesh(in: faceRect)
+        var ratios: [Measurement] = []
+        for width in widths {
+            let height = width * 9 / 16
+            let input = try makeColumnNoiseTexture(device: renderer.device,
+                                                   width: width, height: height)
+            let result = try XCTUnwrap(
+                renderer.renderToNewTexture(input: input, landmarks: face),
+                "顔メッシュ経路が描画されなかった")
+            // 顔の縦中央の行を、顔の横幅の内側 70% だけ走査する（外縁の欠けたブロックと
+            // 素通しの入力を避ける）。連なり 3px 未満は集計から外す。
+            let row = Int((faceRect.minY + faceRect.height * 0.5) * CGFloat(height))
+            let from = Int((faceRect.minX + faceRect.width * 0.15) * CGFloat(width))
+            let to = Int((faceRect.minX + faceRect.width * 0.85) * CGFloat(width))
+            let measured = measuredBlockWidth(of: result.texture, row: row,
+                                              xRange: from..<to, minRun: 3)
+            ratios.append(Measurement(width: width, measured: measured))
+        }
+        for entry in ratios {
+            print("[BLOCKSCALE-mesh] width=\(entry.width) blockPx=\(entry.measured) "
+                  + "ratio=\(String(format: "%.5f", entry.ratio))")
+        }
+        let base = try XCTUnwrap(ratios.first)
+        XCTAssertGreaterThan(base.measured, 2, "メッシュ経路でブロックが検出できていない")
+        // 期待値は block * 顔幅px / 380。720px フレームで顔幅 360px なら 26.5px。
+        let expected = Double(block) * (Double(base.width) * faceRect.width) / 380
+        XCTAssertEqual(Double(base.measured), expected, accuracy: expected * 0.2,
+                       "メッシュ経路の換算（block * 顔幅 / referenceFaceWidth）から外れている")
+        for entry in ratios.dropFirst() {
+            XCTAssertEqual(entry.ratio, base.ratio, accuracy: base.ratio * 0.1,
+                           "width=\(entry.width) のブロックが幅比で基準(720)と違う"
+                           + "（プレビューと書き出しで立体モザイクの粗さが食い違う）")
         }
     }
 
