@@ -311,6 +311,20 @@ public final class MosaicEditorModel: ObservableObject {
     /// （`EditorDockRoute` の doc 参照。段が勝手に閉じないことがこの UI の契約）。
     @Published public var dockRoute: EditorDockRoute = .root
 
+    /// クロップ編集中の下書き。**nil＝クロップ編集していない。**
+    ///
+    /// `interactionMode`（`MosaicEditorModel+Crop.swift`）がこの nil 判定から
+    /// `.crop` / `.normal` を導く唯一の情報源。書き換えは同ファイルの
+    /// `beginCropEditing` / `updateCropDraft` / `cancelCropEditing` / `commitCropEditing`
+    /// からだけ行うこと。
+    @Published public var cropDraft: CropRect?
+    /// クロップ編集中の比率固定。**編集中のみ意味を持つ**（`cropDraft == nil` の間は
+    /// 無視される）。`beginCropEditing()` が毎回 `.free` へ戻す。
+    @Published public var cropAspectLock: CropAspectLock = .free
+    /// クロップ編集を始める前の `timeline.crop`。取消・確定の戻し先
+    /// （`MosaicEditorModel+Crop.swift` の doc 参照）。
+    var cropBeforeEditing: CropRect?
+
     /// 手動矩形ツール（プレビューをドラッグして範囲を指定するモード）が ON か。
     ///
     /// **既定は OFF。** 常時有効だった頃は、プレビューを少しなぞっただけで矩形が

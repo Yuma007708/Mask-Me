@@ -86,6 +86,38 @@ public struct CropRect: Equatable, Sendable, Codable {
         return effective.expand(placement)
     }
 
+    /// `expand(_:)` の逆写像。新しい枠（このクロップの `rect`）基準の配置を、
+    /// 元の出力枠基準の配置へ戻す。
+    ///
+    /// 式: `(c.minX + q.minX*c.width, c.minY + q.minY*c.height, q.width*c.width, q.height*c.height)`
+    /// （`c` はこのクロップの `rect`）。
+    ///
+    /// **クランプ・交差はしない。** `expand(_:)` と同じ契約——`q` が `[0,1]` の外を
+    /// 指していても、そのままはみ出した値を返す（`TimelineRenderLayout.remap` と
+    /// 同じ規約）。
+    public func contract(_ placement: CGRect) -> CGRect {
+        guard !isFull else { return placement }
+        return CGRect(x: rect.minX + placement.minX * rect.width,
+                      y: rect.minY + placement.minY * rect.height,
+                      width: placement.width * rect.width,
+                      height: placement.height * rect.height)
+    }
+
+    /// `expandSnapped(_:inFrame:)` の逆写像。`contract(_:)` を、偶数スナップまで
+    /// 含めた「正しい手順」で呼ぶ（分母に丸め前の生の `rect` を使わない、という
+    /// `expandSnapped` と同じ注意がここにも当てはまる）。
+    public func contractSnapped(_ placement: CGRect, inFrame frame: CGSize) -> CGRect {
+        guard !isFull else { return placement }
+        guard frame.width.isFinite, frame.height.isFinite,
+              frame.width > 0, frame.height > 0 else { return placement }
+        let snapped = snappedRect(inFrame: frame)
+        let effective = CropRect(rect: CGRect(x: snapped.minX / frame.width,
+                                              y: snapped.minY / frame.height,
+                                              width: snapped.width / frame.width,
+                                              height: snapped.height / frame.height))
+        return effective.contract(placement)
+    }
+
     /// クロップ矩形を `frame`（合成フレームのピクセルサイズ）へ写したピクセル矩形。
     /// スナップ前の生の値（`snappedRect(inFrame:)` が丸める前の入力）。
     public func pixelRect(inFrame frame: CGSize) -> CGRect {

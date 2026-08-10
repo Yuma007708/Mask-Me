@@ -78,6 +78,18 @@ final class EditorDockRouteTests: XCTestCase {
         XCTAssertEqual(EditorDockNavigation.enter(.mosaic, from: .mosaic), .mosaic)
     }
 
+    /// クロップ段は `root` から直接入り、`mosaic` を経由しない
+    /// （`colorGrade` / `transform` と同じ扱い）。完了はどの段からでも `root` へ戻る
+    /// 契約（`test_done_alwaysReturnsToRoot`）に `.crop` を足しても崩れないことも確認する。
+    func test_クロップ段へ入れて完了でrootへ戻る() {
+        XCTAssertEqual(EditorDockNavigation.enter(.crop, from: .root), .crop)
+        XCTAssertEqual(EditorDockNavigation.enter(.crop, from: .mosaic), .mosaic,
+                       "mosaic を経由してクロップへ入れてしまっている")
+        XCTAssertEqual(EditorDockNavigation.done(from: .crop), .root)
+        XCTAssertEqual(EditorDockNavigation.back(from: .crop), .root)
+        XCTAssertEqual(EditorDockRoute.crop.parent, .root)
+    }
+
     // MARK: - 粗さスライダーの所在
 
     /// 粗さは効果を選んだ段にだけ出る。`root` / `mosaic` に出すと、

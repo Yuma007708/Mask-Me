@@ -22,9 +22,14 @@ import MosaicCore
 extension EditorView {
     var previewArea: some View {
         GeometryReader { geo in
+            // **`model.timeline.crop` をそのまま渡す。** クロップ編集中は
+            // `beginCropEditing()` が合成を `crop = .full` へ組み直しているため、
+            // このタイミングでは `timeline.crop` も自然に `.full` になっており、
+            // ここで場合分けする必要が無い（`MosaicEditorModel+Crop.swift` 型 doc 参照）。
             let geometry = PreviewImageGeometry(containerSize: geo.size,
                                                 imageSize: model.previewImage?.size,
-                                                zoom: zoomSession.zoom)
+                                                zoom: zoomSession.zoom,
+                                                crop: model.timeline.crop)
             ZStack {
                 Color.black
 
@@ -70,6 +75,15 @@ extension EditorView {
                 // 一瞬で終わる編集では立たない（`MosaicEditorModel.rebuildIndicatorDelay`）。
                 if model.isRebuildingComposition {
                     rebuildIndicator
+                }
+
+                // クロップ編集中の暗幕＋ハンドル。**一番上に置く**——クロップ編集中は
+                // `PreviewInteractionPolicy` が他の操作面（顔ピック・矩形・テキスト・
+                // ピンチズーム）をすべて止める設計だが、重ね順でも当たり判定を
+                // 一番手前で確実に奪う（`CropOverlay` 自身は `allowsCropHandles` が
+                // false のときは `allowsHitTesting(false)` で透過する）。
+                if let cropDraft = model.cropDraft {
+                    CropOverlay(model: model, geometry: geometry, cropDraft: cropDraft)
                 }
 
                 // ズームの探針。UI テストが読む値（`VideoControlsView.swift` の
@@ -123,6 +137,9 @@ extension EditorView {
                 state = value.first != nil
             }
             .onChanged { value in
+                // クロップ編集中はピンチズームも止める（`PreviewInteractionPolicy` の
+                // 排他。クロップ枠のドラッグと取り合いにしない）。
+                guard model.previewInteraction.allowsPinchZoom else { return }
                 guard let magnification = value.first else { return }
                 if !zoomSession.isActive {
                     // アンカーは iOS 16 に位置付きジェスチャが無いため、合成した

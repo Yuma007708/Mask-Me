@@ -99,6 +99,12 @@ struct EditorView: View {
             if model.mode == .photo { photoEditingActive = true }
         }
         .onChange(of: scenePhase) { phase in
+            // **`cancelCropEditing()` は `persistDraft()` より先に呼ぶこと。**
+            // クロップ編集中は合成が `crop = .full` で組み直されている
+            // （`beginCropEditing()`）ため、ここで先に取消しておかないと、確定済みの
+            // クロップが下書きへ「クロップ無し」として焼かれてしまう
+            // （`MosaicEditorModel+Crop.swift` の型 doc 参照）。
+            if phase != .active { model.cancelCropEditing() }
             if phase == .background { persistDraft() }
             // 非アクティブになったら立てっぱなしにしない（バックグラウンドでは
             // Metal が使えず書き出しも継続できないので、保つ意味が無い）。
@@ -119,6 +125,11 @@ struct EditorView: View {
             persistDraft()
         }
         .onDisappear {
+            // **`persistDraft()` より先に呼ぶ。** クロップ編集中に画面が閉じられる
+            // 経路（`onDisappear`）はここでも取消しておく。`handleBack()` の
+            // `persistDraft()` は `dismiss()` の**前**に走るため、そちらは
+            // `handleBack()` 側でも同じ呼び出しを行う（下記）。
+            model.cancelCropEditing()
             autosaveTask?.cancel()
             UIApplication.shared.isIdleTimerDisabled = false
             // 画面を閉じるときに走行中の走査を畳む。`objectTrackingTasks` /
@@ -387,6 +398,9 @@ struct EditorView: View {
     // MARK: - 戻る・状態保持
 
     private func handleBack() {
+        // クロップ編集中に戻るを押した経路（`.video` は下の `persistDraft()` が
+        // `dismiss()` の前に下書きへ書くため、`onDisappear` より前にここで取消す）。
+        model.cancelCropEditing()
         switch model.mode {
         case .photo:
             showDiscardConfirm = true

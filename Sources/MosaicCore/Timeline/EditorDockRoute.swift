@@ -31,6 +31,15 @@ public enum EditorDockRoute: String, Equatable, Sendable, CaseIterable {
     /// 1 段へ畳んである（ツールバーの枠が足りないため。`VideoTimelineView+Toolbar` の
     /// doc 参照）。`colorGrade` と同じく `root` から直接入り、効果フラグを持たない。
     case transform
+    /// クロップ（切り抜き）。`colorGrade` / `transform` と同じく `root` から直接入る。
+    ///
+    /// 段の中身（`CropControlBar`）は `[取消][比率][リセット][確定]` を自前で出すが、
+    /// 汎用の `‹`（`dockBack`）／「完了」（`dockDone`）も**同じ意味**で使える
+    /// （`‹` は取消、「完了」は確定として振る舞う。`MosaicEditorModel+Dock.swift` の
+    /// `dockBack` / `dockDone` 参照）。`showsBackButton` / `showsDoneButton` を
+    /// 特別扱いしないのは、`allCases` 総当たりの既存契約（`test_everyRouteExceptRootHasBackButton`）
+    /// を崩さないため。
+    case crop
 
     /// 戻る `‹` の行き先。`root` は最上段なので自分自身を返す
     /// （＝ `root` では `‹` を出さない。`showsBackButton` を使う）。
@@ -39,7 +48,7 @@ public enum EditorDockRoute: String, Equatable, Sendable, CaseIterable {
         case .root: return .root
         case .mosaic: return .root
         case .face, .background, .rectangle: return .mosaic
-        case .colorGrade, .transform: return .root
+        case .colorGrade, .transform, .crop: return .root
         }
     }
 
@@ -55,7 +64,7 @@ public enum EditorDockRoute: String, Equatable, Sendable, CaseIterable {
     public var showsBlockSizeSlider: Bool {
         switch self {
         case .face, .background, .rectangle: return true
-        case .root, .mosaic, .colorGrade, .transform: return false
+        case .root, .mosaic, .colorGrade, .transform, .crop: return false
         }
     }
 }
@@ -82,9 +91,9 @@ public enum EditorDockNavigation {
             return .mosaic
         case (.mosaic, .face), (.mosaic, .background), (.mosaic, .rectangle):
             return destination
-        // `colorGrade` / `transform` は `mosaic` を経由しない（クリップ選択時の
+        // `colorGrade` / `transform` / `crop` は `mosaic` を経由しない（クリップ選択時の
         // ツールバーから直接入る。`mosaic` はモザイクの種類選びだけの入口）。
-        case (.root, .colorGrade), (.root, .transform):
+        case (.root, .colorGrade), (.root, .transform), (.root, .crop):
             return destination
         default:
             return current

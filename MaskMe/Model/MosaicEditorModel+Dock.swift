@@ -24,12 +24,22 @@ extension MosaicEditorModel {
     }
 
     /// 戻る `‹`。1 段上がる。**効果は保つ**（段を閉じることと効果を切ることは別）。
+    ///
+    /// **`crop` 段だけは例外。** クロップは「取消」と「確定」で戻し先が違うため、
+    /// 汎用の `‹` は「取消」として振る舞う（`CropControlBar` の取消ボタンと同じ
+    /// `cancelCropEditing()` を呼んでから段を戻す）。
     public func dockBack() {
+        if dockRoute == .crop { cancelCropEditing() }
         moveDock(to: EditorDockNavigation.back(from: dockRoute))
     }
 
     /// 完了。どの深さからでも一気に `root` へ戻す。
+    ///
+    /// **`crop` 段だけは例外。** 汎用の「完了」は `crop` では「確定」として振る舞う
+    /// （`CropControlBar` の確定ボタンと同じ `commitCropEditing()` を呼んでから
+    /// `root` へ戻す）。
     public func dockDone() {
+        if dockRoute == .crop { commitCropEditing() }
         moveDock(to: EditorDockNavigation.done(from: dockRoute))
     }
 
@@ -60,6 +70,13 @@ extension MosaicEditorModel {
             // 色調補正・向きは ON/OFF フラグを持たない（`EditorDockRoute` の doc）。
             // 粗さスライダーとも無関係なので `activeTab` は触らない対象のまま。
             activeTab = nil
+        case .crop:
+            // **クロップ以外の操作面を全部止める。** `activeTab = nil` で顔ピック・
+            // 矩形ツールを下ろし（`activeTab` の didSet が `isRectangleToolActive` も
+            // 下ろす）、`beginCropEditing()` で合成を crop = .full へ組み直す
+            // （`MosaicEditorModel+Crop.swift` の型 doc 参照）。
+            activeTab = nil
+            beginCropEditing()
         case .face:
             activeTab = .face
             setEffectOn(.face)

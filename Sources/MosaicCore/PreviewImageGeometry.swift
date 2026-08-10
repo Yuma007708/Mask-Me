@@ -20,12 +20,26 @@ public struct PreviewImageGeometry: Equatable, Sendable {
     /// ズームの結線を1箇所忘れてもコンパイルが素通りして気づけない。ズームを使わない
     /// 場合は明示的に `.identity` を渡す。
     public let zoom: PreviewZoom
+    /// 出力枠に対するクロップ。既定は `.full`（クロップなし＝従来どおりの換算）。
+    ///
+    /// `screenRect(from:)` は `crop.expandSnapped` を、`normalizedRect(from:)` /
+    /// `normalizedPoint(from:)` / `rawNormalizedPoint(from:)` は `crop.contractSnapped`
+    /// を通す。`.full` のときはどちらも入力をそのまま返すので、この 2 関数を経由しても
+    /// **既存の換算とビット同一**（`CropRect.expand` / `.contract` の `isFull` 早期 return）。
+    public let crop: CropRect
 
-    public init(containerSize: CGSize, imageSize: CGSize?, zoom: PreviewZoom) {
+    public init(containerSize: CGSize, imageSize: CGSize?, zoom: PreviewZoom, crop: CropRect = .full) {
         self.containerSize = containerSize
         self.imageSize = imageSize
         self.zoom = zoom
+        self.crop = crop
     }
+
+    /// `CropRect` の偶数スナップ計算に渡す「出力枠のピクセルサイズ」。
+    /// プレビューでは実寸のピクセル情報は `imageSize` しか持っていないため、
+    /// それを使う（無ければコンテナのポイントサイズにフォールバックする——
+    /// `crop == .full` のときはどちらの経路も使われないので影響しない）。
+    private var cropFrame: CGSize { imageSize ?? containerSize }
 
     /// `scaledToFit` の矩形（ズーム無し）。**ズームの有無で不変**。
     ///
@@ -64,13 +78,15 @@ public struct PreviewImageGeometry: Equatable, Sendable {
                       width: scaledSize.width, height: scaledSize.height)
     }
 
-    /// 正規化座標 → 画面座標。
+    /// 正規化座標 → 画面座標。クロップがあれば `crop.expandSnapped` で
+    /// 「クロップ後の枠を画面いっぱいに見せる」座標へ変換してから換算する。
     public func screenRect(from normalized: CGRect) -> CGRect {
         let rect = imageRect
-        return CGRect(x: rect.origin.x + normalized.origin.x * rect.width,
-                      y: rect.origin.y + normalized.origin.y * rect.height,
-                      width: normalized.width * rect.width,
-                      height: normalized.height * rect.height)
+        let expanded = crop.expandSnapped(normalized, inFrame: cropFrame)
+        return CGRect(x: rect.origin.x + expanded.origin.x * rect.width,
+                      y: rect.origin.y + expanded.origin.y * rect.height,
+                      width: expanded.width * rect.width,
+                      height: expanded.height * rect.height)
     }
 
     /// 画面座標 → 正規化座標。**画像の外へはみ出した分は切り落とす。**
@@ -83,10 +99,11 @@ public struct PreviewImageGeometry: Equatable, Sendable {
         guard rect.width > 0, rect.height > 0 else { return .zero }
         let clipped = screen.intersection(rect)
         guard !clipped.isNull, !clipped.isInfinite else { return .zero }
-        return CGRect(x: (clipped.origin.x - rect.origin.x) / rect.width,
-                      y: (clipped.origin.y - rect.origin.y) / rect.height,
-                      width: clipped.width / rect.width,
-                      height: clipped.height / rect.height)
+        let local = CGRect(x: (clipped.origin.x - rect.origin.x) / rect.width,
+                           y: (clipped.origin.y - rect.origin.y) / rect.height,
+                           width: clipped.width / rect.width,
+                           height: clipped.height / rect.height)
+        return crop.contractSnapped(local, inFrame: cropFrame)
     }
 
     /// 画面座標 → 正規化座標（点）。**画像の外は nil**。
@@ -96,8 +113,9 @@ public struct PreviewImageGeometry: Equatable, Sendable {
     public func normalizedPoint(from screen: CGPoint) -> CGPoint? {
         let rect = imageRect
         guard rect.width > 0, rect.height > 0, rect.contains(screen) else { return nil }
-        return CGPoint(x: (screen.x - rect.origin.x) / rect.width,
-                       y: (screen.y - rect.origin.y) / rect.height)
+        let local = CGPoint(x: (screen.x - rect.origin.x) / rect.width,
+                            y: (screen.y - rect.origin.y) / rect.height)
+        return crop.contractSnapped(CGRect(origin: local, size: .zero), inFrame: cropFrame).origin
     }
 
     /// 正規化座標（点） → 画面座標。`normalizedPoint(from:)` の逆写像。
@@ -109,8 +127,9 @@ public struct PreviewImageGeometry: Equatable, Sendable {
     /// `NormalizedPoint.clamped` / `TimelineState.settingTextCenter` が担う）。
     public func screenPoint(from normalized: CGPoint) -> CGPoint {
         let rect = imageRect
-        return CGPoint(x: rect.origin.x + normalized.x * rect.width,
-                       y: rect.origin.y + normalized.y * rect.height)
+        let expanded = crop.expandSnapped(CGRect(origin: normalized, size: .zero), inFrame: cropFrame)
+        return CGPoint(x: rect.origin.x + expanded.origin.x * rect.width,
+                       y: rect.origin.y + expanded.origin.y * rect.height)
     }
 
     /// 画面座標 → 正規化座標（点）。`normalizedPoint(from:)` と違い、**画像の外でも nil にせず
@@ -124,7 +143,8 @@ public struct PreviewImageGeometry: Equatable, Sendable {
     public func rawNormalizedPoint(from screen: CGPoint) -> CGPoint? {
         let rect = imageRect
         guard rect.width > 0, rect.height > 0 else { return nil }
-        return CGPoint(x: (screen.x - rect.origin.x) / rect.width,
-                       y: (screen.y - rect.origin.y) / rect.height)
+        let local = CGPoint(x: (screen.x - rect.origin.x) / rect.width,
+                            y: (screen.y - rect.origin.y) / rect.height)
+        return crop.contractSnapped(CGRect(origin: local, size: .zero), inFrame: cropFrame).origin
     }
 }

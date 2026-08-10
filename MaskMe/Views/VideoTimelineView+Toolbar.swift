@@ -60,7 +60,18 @@ extension VideoTimelineView {
             // 段に出すのは削除だけでよい（音量は BGM を選んだときだけ意味がある）。
             return canSetVolume ? [volumeItem, removeItem] : [removeItem]
         }
-        return [mosaicItem, addTextItem, addAudioItem, aspectRatioItem, addMediaItem]
+        return [mosaicItem, addTextItem, addAudioItem, aspectRatioItem, cropItem, addMediaItem]
+    }
+
+    /// クロップ（切り抜き）の段へ降りる入口。**作品全体の設定**（`aspectRatioItem` と
+    /// 同じ理由）なので、何も選んでいないときの段に置く。押すと `enterDock(.crop)` が
+    /// `EditorDockRoute.crop` へ降り、`beginCropEditing()` が合成を `crop = .full` で
+    /// 組み直す（`MosaicEditorModel+Crop.swift` の型 doc 参照）。
+    private var cropItem: TimelineToolItem {
+        TimelineToolItem(title: "切り抜き", systemImage: "crop",
+                         isEnabled: !model.timeline.clips.isEmpty) {
+            model.enterDock(.crop)
+        }
     }
 
     /// クリップの向き（回転・反転）の段へ降りる入口（P4）。

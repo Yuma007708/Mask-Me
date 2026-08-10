@@ -72,3 +72,14 @@ custom_rules:
     regex: "PreviewZoom"
     message: "PreviewZoom / PreviewZoomSession は MosaicEditorModel（Model 層）へ置かない。View 層（EditorView）の @State/@GestureState に留める。"
     severity: error
+  # クロップの幾何（対辺固定・比率固定の縮退・偶数スナップ）は `CropHandleMath` /
+  # `CropRect` / `PreviewImageGeometry` の 1 本に集約してある（`CropHandleMath` の
+  # 型 doc 参照）。View で `CropRect(rect:` を直接組み立てると、ここに書いた式が
+  # コア層の式と別々に発散し得る（同じ理由で禁止している他の custom_rules と同種）。
+  crop_geometry_stays_in_core:
+    included: "MaskMe/Views/Crop.*\\.swift"
+    regex: "CropRect\\(\\s*rect:"
+    match_kinds:
+      - identifier
+    message: "クロップの幾何は CropHandleMath / PreviewImageGeometry に置くこと（View で CropRect(rect:) を組み立てない）。"
+    severity: error

@@ -102,6 +102,8 @@ struct EditorDockView: View {
             colorGradeChips
         case .transform:
             transformButtons
+        case .crop:
+            CropControlBar(model: model)
         }
     }
 
