@@ -20,7 +20,22 @@ extension TimelineState {
     public func validate() -> Bool {
         validateTransitions() && validateApplyRanges() && validateClipAudioMuteRanges()
             && validateClipDuckRanges() && validateAudioItems() && validateTextItems()
-            && validateSources() && validateColorGrades()
+            && validateSources() && validateColorGrades() && validateClipTransforms()
+            && validateCrop()
+    }
+
+    /// 出力枠のクロップが [0,1]×[0,1] に収まり、各辺が `CropRect.minimumSide` 以上であること。
+    ///
+    /// `CropRect.rect` は `init(rect:)` / デコードの両方でクランプ済みなので通常はここで
+    /// 落ちることは無い安全網だが、`validateColorGrades()` と同じ立て付けで、直接代入する
+    /// テストコード（フューザ等）が将来 `CropRect` の内部を迂回しないことの機械的な裏取りとして置く。
+    private func validateCrop() -> Bool {
+        crop.rect.minX.isFinite && crop.rect.minY.isFinite
+            && crop.rect.width.isFinite && crop.rect.height.isFinite
+            && crop.rect.minX >= -1e-9 && crop.rect.minY >= -1e-9
+            && crop.rect.maxX <= 1 + 1e-9 && crop.rect.maxY <= 1 + 1e-9
+            && crop.rect.width >= CropRect.minimumSide - 1e-9
+            && crop.rect.height >= CropRect.minimumSide - 1e-9
     }
 
     /// 各クリップの色調補正が許容範囲に収まっていること。
@@ -36,6 +51,22 @@ extension TimelineState {
                   ColorGrade.contrastRange.contains(grade.contrast),
                   ColorGrade.saturationRange.contains(grade.saturation),
                   ColorGrade.warmthRange.contains(grade.warmth) else { return false }
+        }
+        return true
+    }
+
+    /// 各クリップの変形（拡大縮小・位置）が許容範囲に収まっていること。
+    ///
+    /// `ClipTransform` は `didSet`/`init`/`init(from:)` の 3 経路すべてでクランプしているため
+    /// 通常はここで落ちることは無い安全網だが、`TimelineClip.transform` へ直接代入する
+    /// テストコード（フューザ等）が将来 `ClipTransform` の内部を迂回しないことの機械的な
+    /// 裏取りとして置く（`validateColorGrades` と同じ立て付け）。
+    private func validateClipTransforms() -> Bool {
+        for clip in clips {
+            let transform = clip.transform
+            guard ClipTransform.scaleRange.contains(transform.scale),
+                  ClipTransform.offsetRange.contains(Double(transform.offset.x)),
+                  ClipTransform.offsetRange.contains(Double(transform.offset.y)) else { return false }
         }
         return true
     }

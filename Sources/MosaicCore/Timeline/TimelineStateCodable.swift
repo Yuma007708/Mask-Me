@@ -9,7 +9,7 @@ extension TimelineState {
 
     private enum CodingKeys: String, CodingKey {
         case clips, transitions, applyRanges, clipAudioMuteRanges, clipDuckRanges, audioItems, textItems,
-             sources, aspectRatio, schemaVersion
+             sources, aspectRatio, crop, schemaVersion
     }
 
     /// `clipID` を持たない v1 の適用区間（デコード専用）。
@@ -52,6 +52,12 @@ extension TimelineState {
         let decodedAspectRatio: TimelineAspectRatio?? = try? container.decodeIfPresent(
             TimelineAspectRatio.self, forKey: .aspectRatio)
         self.aspectRatio = (decodedAspectRatio ?? .source) ?? .source
+        // クロップ（`crop` キー追加時に足した）。**キーが無い旧下書きも、壊れた値も**
+        // `.full`（クロップなし）で復元する。`CropRect` 自身の `init(from:)` が
+        // 壊れた値を throw せず `.full` へ倒すので、ここでの `try?` は「キー自体が
+        // 型として読めない」（数値や文字列が来た等）非常時だけの二重の安全網。
+        let decodedCrop: CropRect?? = try? container.decodeIfPresent(CropRect.self, forKey: .crop)
+        self.crop = (decodedCrop ?? nil) ?? .full
         let version = try container.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? 1
         if version >= 2 {
             self.applyRanges = try container.decode([MosaicApplyRange].self, forKey: .applyRanges)
@@ -86,6 +92,7 @@ extension TimelineState {
         try container.encode(textItems, forKey: .textItems)
         try container.encode(sources, forKey: .sources)
         try container.encode(aspectRatio, forKey: .aspectRatio)
+        try container.encode(crop, forKey: .crop)
         try container.encode(Self.currentSchemaVersion, forKey: .schemaVersion)
     }
 

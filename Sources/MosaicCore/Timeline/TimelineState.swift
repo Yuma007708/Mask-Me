@@ -73,6 +73,17 @@ public struct TimelineState: Codable, Equatable, Sendable {
     /// 座標系への影響は `TimelineAspectRatio` の doc を参照（素材は切り取らず、レターボックスで
     /// 縮んだぶんは `TimelineRenderLayout.remap` が顔座標側にも同じ写像を掛ける）。
     public var aspectRatio: TimelineAspectRatio
+    /// 出力枠（＝画面比率適用後の合成フレーム）に対するクロップ。既定は `.full`（クロップなし）。
+    ///
+    /// **クリップ・適用区間・物体マスク・テキストには一切触らない。** これらは素材フレーム
+    /// （物体マスク）または出力枠固定（テキスト）で保存されており、クロップの座標変換は
+    /// `TimelineRenderLayout` / `RenderPlacement.make` が描画・書き出しの直前に吸収する
+    /// （`aspectRatio` と同じ規約。`TimelineStateAspectRatio` の doc 参照）。
+    ///
+    /// **比率（`aspectRatio`）を変えたらこの値は `.full` へリセットする。** 出力枠の形が
+    /// 変わればクロップが指していた領域の意味も変わるため、不可逆な再計算を持ち込まず
+    /// 作り直させる（結線は配線段で行う）。
+    public var crop: CropRect
 
     public init(clips: [TimelineClip] = [],
                 transitions: [UUID: TransitionSpec] = [:],
@@ -82,7 +93,8 @@ public struct TimelineState: Codable, Equatable, Sendable {
                 audioItems: [AudioItem] = [],
                 textItems: [TextItem] = [],
                 sources: [UUID: TimelineSource] = [:],
-                aspectRatio: TimelineAspectRatio = .source) {
+                aspectRatio: TimelineAspectRatio = .source,
+                crop: CropRect = .full) {
         self.audioItems = audioItems
         self.textItems = textItems
         self.clips = clips
@@ -92,6 +104,7 @@ public struct TimelineState: Codable, Equatable, Sendable {
         self.clipDuckRanges = clipDuckRanges
         self.sources = sources
         self.aspectRatio = aspectRatio
+        self.crop = crop
     }
 
     // MARK: - 永続化スキーマ版
@@ -121,6 +134,12 @@ public struct TimelineState: Codable, Equatable, Sendable {
     ///   Codable にキーが増えただけなので `TimelineStateCodable` 側の移行処理は要らない
     ///   （`orientation` と同じ規約。キーが無い v6 以前の下書きは `ColorGrade.identity` =
     ///   無補正で復元される）。ダッキング側もキーの有無だけで後方互換を取る。
+    ///   その後 `TimelineClip.transform`（クリップ単位の拡大縮小・位置）も同じ v7 へ
+    ///   合流した（3 つ目。同じくキーの有無だけで後方互換を取るので移行処理は要らない。
+    ///   キーが無い下書きは `ClipTransform.identity` = 無変形で復元される）。
+    /// - `crop`（出力枠のクロップ）が 4 つ目として合流。`aspectRatio` と同じくトップ
+    ///   レベルのキーが増えただけで意味の反転が無いため、**スキーマ版は上げない**
+    ///   （キーが無ければ `.full`＝クロップなしで復元する）。
     public static let currentSchemaVersion = 7
 
     // MARK: - 素材種別（写真クリップの時刻規則）

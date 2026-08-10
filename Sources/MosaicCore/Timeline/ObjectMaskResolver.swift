@@ -73,9 +73,13 @@ public enum ObjectMaskResolver {
                                   clipID: UUID?, sourceTime: Double,
                                   layout: TimelineRenderLayout) -> [ObjectMaskPlacement] {
         guard let clipID else {
-            // 静止画編集には時間軸が無いので追跡もない。
+            // 静止画編集には時間軸が無いので追跡もない。**`layout.remapStill` を経由すること**
+            // （`layout.remap` は `clipID: nil` を単位矩形として扱うため、直接呼ぶと静止画専用の
+            // `stillPlacement` / `stillOrientation` を無視してしまう。`clipID: nil` を
+            // sentinel として流用しない、という `ObjectMask.Anchor` の doc の規約と同じ理由）。
             return masks.filter(\.anchor.isStill).map {
-                ObjectMaskPlacement(rect: $0.rect(atSourceTime: 0), angle: $0.angle(atSourceTime: 0))
+                ObjectMaskPlacement(rect: layout.remapStill($0.rect(atSourceTime: 0)),
+                                    angle: layout.remapStillAngle($0.angle(atSourceTime: 0)))
             }
         }
         return masks.filter { $0.anchor.clipID == clipID }.map { mask in

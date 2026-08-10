@@ -77,16 +77,18 @@ final class TimelineStateFreezeTests: XCTestCase {
         XCTAssertTrue(frozen.validate())
     }
 
-    /// 元クリップの `applyRanges` / `orientation` / `rate` は変わらない。
-    func test_元クリップのapplyRangesとorientationとrateが不変() {
+    /// 元クリップの `applyRanges` / `orientation` / `rate` / `transform` は変わらない。
+    func test_元クリップのapplyRangesとorientationとrateと変形が不変() {
         var state = makeState()
         let clipA = state.clips[0]
         state.clips[0].orientation = ClipOrientation(rotation: .right90)
         state.clips[0].rate = 2.0
+        state.clips[0].transform = ClipTransform(scale: 1.6, offset: CGPoint(x: 0.1, y: -0.2))
         state.applyRanges = [MosaicApplyRange(clipID: clipA.id, sourceID: sourceA,
                                              sourceStart: 0.5, sourceEnd: 3.0)]
         let originalOrientation = state.clips[0].orientation
         let originalRate = state.clips[0].rate
+        let originalTransform = state.clips[0].transform
 
         // rate=2.0 で A の合成尺は 2.0 秒（= (4-0)/2）に縮む。表示時刻 1.0 秒は
         // 素材時刻換算で m=2.0（= 1.0 * rate）となり、分割点は変えずに済む。
@@ -98,6 +100,8 @@ final class TimelineStateFreezeTests: XCTestCase {
         XCTAssertEqual(back.orientation, originalOrientation)
         XCTAssertEqual(front.rate, originalRate, accuracy: 1e-9)
         XCTAssertEqual(back.rate, originalRate, accuracy: 1e-9)
+        XCTAssertEqual(front.transform, originalTransform)
+        XCTAssertEqual(back.transform, originalTransform)
         // 元の適用区間 [0.5, 3.0) は分割点 2.0 をまたぐので front/back へ振り分けられるが、
         // 消えたり値が変わったりはしない（既存の分割経路の契約）。
         XCTAssertTrue(frozen.applyRanges.contains {

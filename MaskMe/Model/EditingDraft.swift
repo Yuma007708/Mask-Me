@@ -96,6 +96,16 @@ struct EditingDraft: Codable, Identifiable, Equatable {
     ///
     /// nil は「情報なし」（この機能より前の下書き）。
     let personProfiles: [PersonProfile]?
+    /// 写真モードの編集状態（色調補正。写真モード底上げ 第1段）。動画下書きでは
+    /// 常に nil のまま保存される（動画モードには写真タブの UI が無く、
+    /// `MosaicEditorModel.photoEdit` は常に `.identity` のままで、`saveVideoDraft` は
+    /// この値を一切渡さないため）。写真下書きは `DraftStore.savePhotoDraft` /
+    /// `EditorView.persistDraft()` が `MosaicEditorModel.photoEdit` を渡して保存する。
+    ///
+    /// nil は「この機能より前の下書き」＝ `.identity`（無編集）として扱う
+    /// （`faceSelections` の nil/`[]` 使い分けと同じ判断規則。こちらは値が 1 種類しか
+    /// 無いぶん単純で、nil を identity へ落として困る情報の非対称性が無い）。
+    let photoEdit: PhotoEditState?
     let thumbnailFileName: String?
     let updatedAt: Date
 
@@ -114,6 +124,7 @@ struct EditingDraft: Codable, Identifiable, Equatable {
         legacyManualRects: [CGRect] = [],
         faceSelections: [DraftFaceSelection]? = nil,
         personProfiles: [PersonProfile]? = nil,
+        photoEdit: PhotoEditState? = nil,
         thumbnailFileName: String?,
         updatedAt: Date = Date()
     ) {
@@ -131,6 +142,7 @@ struct EditingDraft: Codable, Identifiable, Equatable {
         self.legacyManualRects = legacyManualRects
         self.faceSelections = faceSelections
         self.personProfiles = personProfiles
+        self.photoEdit = photoEdit
         self.thumbnailFileName = thumbnailFileName
         self.updatedAt = updatedAt
     }
@@ -147,7 +159,7 @@ struct EditingDraft: Codable, Identifiable, Equatable {
         case legacyManualRects = "manualRects"
         case objectMasks
         case faceMosaicOn, objectMosaicOn, backgroundMosaicOn, faceBlockSize, backgroundBlockSize
-        case sources, timeline, faceSelections, personProfiles
+        case sources, timeline, faceSelections, personProfiles, photoEdit
     }
 
     // 旧スキーマ（後方互換デコード専用）。
@@ -185,6 +197,10 @@ struct EditingDraft: Codable, Identifiable, Equatable {
         // 人物（新フィールド）。キー無しの下書きは nil＝「情報なし」で、目印の personID も
         // 揃って nil になるため、復元は従来どおり重心照合だけで進む。
         personProfiles = try c.decodeIfPresent([PersonProfile].self, forKey: .personProfiles)
+
+        // 写真編集（新フィールド）。キー無しの下書きは nil＝「この機能より前」で、
+        // 復元側が `.identity` として扱う（`photoEdit` の doc 参照）。
+        photoEdit = try c.decodeIfPresent(PhotoEditState.self, forKey: .photoEdit)
 
         // 旧フィールド（存在すれば）。
         let legacy = try? decoder.container(keyedBy: LegacyKeys.self)

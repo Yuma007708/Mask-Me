@@ -143,6 +143,49 @@ final class RenderLayoutInverseRemapTests: XCTestCase {
         }
     }
 
+    /// **全 8 向き × クリップ変形（scale/offset）を掛けた配置矩形でも往復すること。**
+    ///
+    /// `VideoCompositionFactory.make` は `AspectFit.placement(...)` の結果へ
+    /// `ClipTransform.applied(to:)` を 1 回だけ掛けた `rect` を `TimelineRenderLayout` へ
+    /// 渡す。`remap`/`inverseRemap` 自身は「配置矩形がどう作られたか」を知らないので、
+    /// 変形後の矩形（scale で拡大・offset で平行移動）でも往復が崩れないことを固定する
+    /// （`test_全ての向きとレターボックスで往復する` に scale/offset を足した版）。
+    func test_全8向きと変形で往復する() {
+        let clipID = UUID()
+        let basePlacements: [CGRect] = [
+            CGRect(x: 0, y: 0, width: 1, height: 1),          // 全面
+            CGRect(x: 0, y: 0.25, width: 1, height: 0.5),     // 上下に黒帯
+            CGRect(x: 0.2, y: 0, width: 0.6, height: 1)       // 左右に黒帯
+        ]
+        let transforms = [
+            ClipTransform(scale: 1.0, offset: .zero),
+            ClipTransform(scale: 2.0, offset: CGPoint(x: 0.1, y: -0.15)),
+            ClipTransform(scale: 0.5, offset: CGPoint(x: -0.2, y: 0.2))
+        ]
+        let orientations: [ClipOrientation] = ClipRotation.allCases.flatMap { rotation in
+            [ClipOrientation(rotation: rotation, isMirrored: false),
+             ClipOrientation(rotation: rotation, isMirrored: true)]
+        }
+        let original = [face(cx: 0.3, cy: 0.7), face(cx: 0.6, cy: 0.2)]
+        for basePlacement in basePlacements {
+            for transform in transforms {
+                let placement = transform.applied(to: basePlacement)
+                for orientation in orientations {
+                    let layout = TimelineRenderLayout(placements: [clipID: placement],
+                                                      orientations: [clipID: orientation])
+                    let round = layout.inverseRemap(layout.remap(original, clipID: clipID),
+                                                    clipID: clipID)
+                    for (index, face) in original.enumerated() {
+                        XCTAssertEqual(round[index].points[0].x, face.points[0].x, accuracy: 1e-5,
+                                       "\(orientation) \(basePlacement) \(transform)")
+                        XCTAssertEqual(round[index].points[0].y, face.points[0].y, accuracy: 1e-5,
+                                       "\(orientation) \(basePlacement) \(transform)")
+                    }
+                }
+            }
+        }
+    }
+
     /// 件数と順序を変えないこと（呼び出し側が `signatures` と添字で対応させている）。
     func test_inverseRemapPreservesCountAndOrder() {
         let clipID = UUID()

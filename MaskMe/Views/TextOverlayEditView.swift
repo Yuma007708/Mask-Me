@@ -42,6 +42,10 @@ struct TextOverlayEditView: View {
     /// 見た目設定シートを開く対象。シート本体は `EditorView` が持つ
     /// （複数の画面領域から開けるようにするため、提示条件だけをここから渡す）。
     @Binding var styleSheetItemID: UUID?
+    /// 画像・他オーバーレイと共有する換算。**ここでは作らない**——生成箇所は
+    /// `EditorView+Preview.swift` の 1 箇所だけにする（`.swiftlint.yml` の
+    /// `preview_geometry_single_construction` が番をしている）。
+    let geometry: PreviewImageGeometry
 
     /// ドラッグ中の下書き。`@GestureState` なのでキャンセルで自動的に nil へ戻り、
     /// 中断（他のジェスチャに割り込まれた等）で下書きが取り残されない
@@ -59,13 +63,12 @@ struct TextOverlayEditView: View {
     private static let minimumHitSide: CGFloat = 44
 
     var body: some View {
-        GeometryReader { geo in
-            ZStack {
-                ForEach(visibleItems) { item in
-                    hitRegion(for: item, in: geo.size)
-                }
+        ZStack {
+            ForEach(visibleItems) { item in
+                hitRegion(for: item)
             }
         }
+        .frame(width: geometry.containerSize.width, height: geometry.containerSize.height)
         // **矩形ツールが ON の間はテキストの当たり判定を切る。**
         //
         // 矩形ツールを ON にしたのは「今から矩形を描く」という明示的な意図表明なので、
@@ -89,21 +92,16 @@ struct TextOverlayEditView: View {
 
     private var selectedID: UUID? { model.timelineSelection.layerID(of: .text) }
 
-    private func geometry(in size: CGSize) -> PreviewImageGeometry {
-        PreviewImageGeometry(containerSize: size, imageSize: model.previewImage?.size)
-    }
-
     @ViewBuilder
-    private func hitRegion(for item: TextItem, in size: CGSize) -> some View {
+    private func hitRegion(for item: TextItem) -> some View {
         let isSelected = selectedID == item.id
-        let geo = geometry(in: size)
-        let base = geo.screenPoint(from: CGPoint(x: item.center.x, y: item.center.y))
+        let base = geometry.screenPoint(from: CGPoint(x: item.center.x, y: item.center.y))
         // **`@ViewBuilder` の中で `if`/`else` を「文」として書かないこと。**
         // ViewBuilder はそれを View の分岐として解釈しようとし、
         // 「type '()' cannot conform to 'View'」で落ちる。値の分岐は式で書く。
         let drag = (dragState?.id == item.id ? dragState?.translation : nil) ?? .zero
         let shown = CGPoint(x: base.x + drag.width, y: base.y + drag.height)
-        let hit = hitSize(for: item, in: geo)
+        let hit = hitSize(for: item, in: geometry)
 
         // **当たり判定（`.contentShape` とジェスチャ）は `.frame` より前に置く。**
         // `RectangleDrawingOverlay.frameBody` → `maskOverlay` と同じ順序
@@ -116,7 +114,7 @@ struct TextOverlayEditView: View {
                          style: StrokeStyle(lineWidth: 2, dash: [5, 3]))
             .background(Color.yellow.opacity(isSelected ? 0.05 : 0.0001))
             .contentShape(Rectangle())
-            .gesture(hitGesture(for: item, in: size, isSelected: isSelected))
+            .gesture(hitGesture(for: item, isSelected: isSelected))
             .frame(width: hit.width, height: hit.height)
             .overlay(alignment: .topTrailing) {
                 if isSelected { styleButton(for: item) }
@@ -134,7 +132,7 @@ struct TextOverlayEditView: View {
     /// 同じ面へ重ねると、どちらが勝つかが実機で安定しない（`TimelineLayerTrackView.moveGesture`
     /// の `onEnded` で「移動とみなせる量に達しなければ選択」という同じ手筋を使っている。
     /// それに揃える）。
-    private func hitGesture(for item: TextItem, in size: CGSize, isSelected: Bool) -> some Gesture {
+    private func hitGesture(for item: TextItem, isSelected: Bool) -> some Gesture {
         DragGesture(minimumDistance: 2, coordinateSpace: .local)
             .updating($dragState) { value, state, _ in
                 // **未選択のテキストは下書きを一切作らない。** 矩形ツールでの新規作成中に
@@ -145,7 +143,7 @@ struct TextOverlayEditView: View {
             .onEnded { value in
                 let moved = max(abs(value.translation.width), abs(value.translation.height))
                 if isSelected, moved > Self.dragCommitThreshold {
-                    commitDrag(item: item, translation: value.translation, in: size)
+                    commitDrag(item: item, translation: value.translation)
                 } else {
                     select(item.id)
                 }
@@ -159,14 +157,13 @@ struct TextOverlayEditView: View {
     /// 指を離した最終位置だけをモデルへ確定する（ドラッグ中は `@GestureState` の
     /// 下書きだけを動かし、`applyTimelineEdit` は呼ばない。連続適用すると 1 ドラッグで
     /// undo 履歴が何十件も積まれる）。
-    private func commitDrag(item: TextItem, translation: CGSize, in size: CGSize) {
-        let geo = geometry(in: size)
-        let base = geo.screenPoint(from: CGPoint(x: item.center.x, y: item.center.y))
+    private func commitDrag(item: TextItem, translation: CGSize) {
+        let base = geometry.screenPoint(from: CGPoint(x: item.center.x, y: item.center.y))
         let moved = CGPoint(x: base.x + translation.width, y: base.y + translation.height)
         // **`rawNormalizedPoint` を使う。** `normalizedPoint(from:)` は画像の外で nil を返す
         // （タップの当たり判定向け）ため、画面端までドラッグしたテキストを見失う。
         // 0...1 の外に出た分は `TimelineState.settingTextCenter` 側でクランプされる。
-        guard let normalized = geo.rawNormalizedPoint(from: moved) else { return }
+        guard let normalized = geometry.rawNormalizedPoint(from: moved) else { return }
         model.setTextCenter(id: item.id, center: NormalizedPoint(x: normalized.x, y: normalized.y))
     }
 

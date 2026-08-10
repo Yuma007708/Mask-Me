@@ -47,6 +47,15 @@ public struct TimelineClip: Identifiable, Hashable, Sendable, Codable {
     /// （`orientation` と同じく、値型自身が不変条件を守る設計）。
     public var colorGrade: ColorGrade
 
+    /// クリップに掛ける拡大縮小・位置（変形）。既定は無変形。
+    ///
+    /// **これは AVFoundation 合成段（`VideoCompositionFactory.make`）で、Metal の
+    /// モザイク段より前に効く。** `AspectFit.placement(of:in:)` が作る配置矩形へ
+    /// この変形を 1 回だけ掛け、その結果を映像側（`fitTransform`）と顔座標の写像
+    /// （`layoutRects` → `TimelineRenderLayout`）の両方へ渡すことで、映像とモザイクが
+    /// 構造的に一致する（`orientation` と同じ「共有した写像から作る」設計）。
+    public var transform: ClipTransform
+
     public init(id: UUID = UUID(),
                 sourceID: UUID,
                 sourceStart: Double,
@@ -54,7 +63,8 @@ public struct TimelineClip: Identifiable, Hashable, Sendable, Codable {
                 originalAudioVolume: Float = 1.0,
                 rate: Double = 1.0,
                 orientation: ClipOrientation = .identity,
-                colorGrade: ColorGrade = .identity) {
+                colorGrade: ColorGrade = .identity,
+                transform: ClipTransform = .identity) {
         self.id = id
         self.sourceID = sourceID
         self.sourceStart = sourceStart
@@ -64,6 +74,7 @@ public struct TimelineClip: Identifiable, Hashable, Sendable, Codable {
         self.rate = Self.clampedRate(rate)
         self.orientation = orientation
         self.colorGrade = colorGrade
+        self.transform = transform
     }
 
     /// このクリップが合成タイムライン上で占める長さ（秒）。
@@ -87,17 +98,25 @@ public struct TimelineClip: Identifiable, Hashable, Sendable, Codable {
 
     private enum CodingKeys: String, CodingKey {
         case id, sourceID, sourceStart, sourceEnd, originalAudioVolume, rate, orientation, colorGrade
+        case transform
     }
 
     /// `rate` キーを持たない旧 JSON（rate 導入前に保存された下書き）も
     /// 等速（1.0）としてデコードできるようにする。`orientation` も同じ規約で、
     /// キーが無い旧下書きは**回転なし・反転なし**（`ClipOrientation.identity`）になる。
     /// `colorGrade`（v7 で追加）も同じ規約で、キーが無い v6 以前の下書きは
-    /// **無補正**（`ColorGrade.identity`）になる。
+    /// **無補正**（`ColorGrade.identity`）になる。`transform`（v7 に合流）も同じ規約で、
+    /// キーが無い下書きは**無変形**（`ClipTransform.identity`）になる。
     ///
     /// **`init(from:)` は didSet を経由しない**ため、`rate`・`originalAudioVolume` の
     /// どちらも明示的にクランプする（壊れた下書きから範囲外の値が入るのを防ぐ）。
     /// `colorGrade` 自身のクランプは `ColorGrade.init(from:)` が別途行う。
+    ///
+    /// **`transform` キーは `try?` で包んで decode する。** `ClipTransform.init(from:)`
+    /// 自身は成分ごとの型不一致を握り潰すが、`"transform"` の値そのものが JSON オブジェクト
+    /// でない（例: 文字列・数値）場合は `decoder.container(keyedBy:)` の時点で throw する。
+    /// これを伝播させると `TimelineClip` ごとデコードが失敗し下書きが丸ごと消えるため、
+    /// ここでも二重に握り潰して `.identity` へ倒す。
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.id = try container.decode(UUID.self, forKey: .id)
@@ -111,5 +130,7 @@ public struct TimelineClip: Identifiable, Hashable, Sendable, Codable {
             ClipOrientation.self, forKey: .orientation) ?? .identity
         self.colorGrade = try container.decodeIfPresent(
             ColorGrade.self, forKey: .colorGrade) ?? .identity
+        self.transform = (try? container.decodeIfPresent(
+            ClipTransform.self, forKey: .transform)) ?? .identity
     }
 }

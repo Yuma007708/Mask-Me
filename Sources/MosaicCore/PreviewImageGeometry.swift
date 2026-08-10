@@ -13,14 +13,27 @@ public struct PreviewImageGeometry: Equatable, Sendable {
     public let containerSize: CGSize
     /// 表示している画像の実寸。nil ならコンテナ全体を使う。
     public let imageSize: CGSize?
+    /// 現在のピンチズーム／パン。
+    ///
+    /// **既定値を置かない。** 呼び出し側（`FacePickOverlay` / `RectangleDrawingOverlay` /
+    /// `TextOverlayEditView`）が「ズームを知らない geometry」を黙って作れてしまうと、
+    /// ズームの結線を1箇所忘れてもコンパイルが素通りして気づけない。ズームを使わない
+    /// 場合は明示的に `.identity` を渡す。
+    public let zoom: PreviewZoom
 
-    public init(containerSize: CGSize, imageSize: CGSize?) {
+    public init(containerSize: CGSize, imageSize: CGSize?, zoom: PreviewZoom) {
         self.containerSize = containerSize
         self.imageSize = imageSize
+        self.zoom = zoom
     }
 
-    /// コンテナ内で画像が占める矩形（レターボックス込み）。
-    public var imageRect: CGRect {
+    /// `scaledToFit` の矩形（ズーム無し）。**ズームの有無で不変**。
+    ///
+    /// この矩形の中心は常にコンテナ中心と一致する（`imageSize` が nil のときも
+    /// コンテナ全体を使うため、その場合も一致する）。そのため `imageRect` を
+    /// 「コンテナ中心まわりに `scale` 倍する」と「`fittedRect` 自身の中心まわりに
+    /// `scale` 倍する」は同じ結果になる。この一致に `imageRect` の実装が依存している。
+    public var fittedRect: CGRect {
         guard let imageSize, imageSize.width > 0, imageSize.height > 0,
               containerSize.width > 0, containerSize.height > 0 else {
             return CGRect(origin: .zero, size: containerSize)
@@ -31,6 +44,24 @@ public struct PreviewImageGeometry: Equatable, Sendable {
         return CGRect(x: (containerSize.width - fitted.width) / 2,
                       y: (containerSize.height - fitted.height) / 2,
                       width: fitted.width, height: fitted.height)
+    }
+
+    /// コンテナ内で画像が実際に占める矩形（レターボックス込み・ズーム適用済み）。
+    ///
+    /// `fittedRect` をコンテナ中心まわりに `zoom.scale` 倍し、クランプ済みの
+    /// `zoom.offset` を足す。**クランプはここで必ず通す。** 呼び出し側が可動域を
+    /// 超えた古い `offset` を持っていても、読み出し時にクランプすれば画像が
+    /// コンテナの外へ飛んで見えることはない（`PreviewZoomMath.clampedOffset`）。
+    public var imageRect: CGRect {
+        let fitted = fittedRect
+        let scale = PreviewZoomMath.clampedScale(zoom.scale)
+        let offset = PreviewZoomMath.clampedOffset(zoom.offset, scale: scale,
+                                                    fittedSize: fitted.size, containerSize: containerSize)
+        let scaledSize = CGSize(width: fitted.width * scale, height: fitted.height * scale)
+        let center = CGPoint(x: containerSize.width / 2, y: containerSize.height / 2)
+        return CGRect(x: center.x - scaledSize.width / 2 + offset.width,
+                      y: center.y - scaledSize.height / 2 + offset.height,
+                      width: scaledSize.width, height: scaledSize.height)
     }
 
     /// 正規化座標 → 画面座標。

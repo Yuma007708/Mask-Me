@@ -143,7 +143,8 @@ final class DraftStore: ObservableObject {
         backgroundBlockSize: Float,
         objectMasks: [ObjectMask],
         faceSelections: [DraftFaceSelection]? = nil,
-        personProfiles: [PersonProfile]? = nil
+        personProfiles: [PersonProfile]? = nil,
+        photoEdit: PhotoEditState = .identity
     ) {
         let id = existing ?? photoDraft?.id ?? UUID()
         let fileName = "photo-\(id.uuidString).jpg"
@@ -162,6 +163,7 @@ final class DraftStore: ObservableObject {
             objectMasks: objectMasks,
             faceSelections: faceSelections,
             personProfiles: personProfiles,
+            photoEdit: photoEdit,
             thumbnailFileName: nil
         )
         savePhotoIndex()

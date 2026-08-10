@@ -230,7 +230,30 @@ extension MosaicEditorModel {
     /// 保存され、描画・書き出しの直前に `renderLayout` が同じ写像を掛ける
     /// （`TimelineAspectRatio` の doc 参照）。
     public func setOutputAspectRatio(_ ratio: TimelineAspectRatio) {
-        applyTimelineEdit { $0.settingAspectRatio(ratio) }
+        // **比率を変えたらクロップを `.full` へリセットする**（親の裁定）。クロップ矩形は
+        // 「画面比率適用後の枠」に対する正規化座標（`CropRect` 型 doc 参照）なので、
+        // 比率を変えると枠の縦横比自体が変わり、既存のクロップ矩形が指す範囲の意味が
+        // 変わってしまう。追従させる不可逆な再計算は持ち込まず、単純にリセットする。
+        // 1 回の `applyTimelineEdit` にまとめることで undo が 1 操作に戻る。
+        applyTimelineEdit { $0.settingAspectRatio(ratio).settingCrop(.full) }
+    }
+
+    // MARK: - 出力枠のクロップ
+
+    /// 出力枠（画面比率適用後の合成フレーム）のクロップを設定する。
+    ///
+    /// `applyTimelineEdit` 経由なので、undo/redo（`EditSnapshot.timeline` が
+    /// `TimelineState` を丸ごと持つため追加登録は不要）・下書き（`TimelineState` の
+    /// Codable）・Composition 再構築（`replaceTimeline` が積む）にそのまま載る。
+    /// **クロップは合成の装着を強制する**（`VideoCompositionConditions.hasCrop`）ので、
+    /// 装着なし構成の忠実度（`CompositionFidelityTests`）は `.full` を渡す限り壊れない。
+    public func setCrop(_ crop: CropRect) {
+        applyTimelineEdit { $0.settingCrop(crop) }
+    }
+
+    /// クロップを全面（クロップなし）へ戻す。
+    public func resetCrop() {
+        setCrop(.full)
     }
 
     // MARK: - 描画ゲート（S10）
@@ -440,6 +463,8 @@ extension MosaicEditorModel {
             .filter { sourcesSnapshot[$0.sourceID] != nil }
         // 出力の画面比率も await を跨ぐ前に閉じ込める（他のスナップショットと同じ理由）。
         let aspectRatioSnapshot = timeline.aspectRatio
+        // 出力枠のクロップも他のスナップショットと同じ位置（await を跨ぐ前）で閉じ込める。
+        let cropSnapshot = timeline.crop
         let muteRangesSnapshot = timeline.clipAudioMuteRanges
         // BGM ダッキング（E2-3）の根拠も他のスナップショットと同じ位置（await を跨ぐ前）で
         // 閉じ込める（`TimelineCompositionBuilder.build(clipDuckRanges:)` の doc 参照）。
@@ -451,6 +476,7 @@ extension MosaicEditorModel {
                        aspectRatio: aspectRatioSnapshot,
                        clipAudioMuteRanges: muteRangesSnapshot,
                        clipDuckRanges: duckRangesSnapshot,
+                       crop: cropSnapshot,
                        isPro: entitlements.isPro)
             guard generation == timelineGeneration else { return }  // 古い世代の結果は破棄
             apply(built: built, generation: generation)

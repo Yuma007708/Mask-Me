@@ -9,10 +9,12 @@ import XCTest
 final class PreviewImageGeometryTests: XCTestCase {
     /// 横長コンテナに縦長画像 → 左右に黒帯。
     private let pillarboxed = PreviewImageGeometry(containerSize: CGSize(width: 400, height: 200),
-                                                   imageSize: CGSize(width: 100, height: 200))
+                                                   imageSize: CGSize(width: 100, height: 200),
+                                                   zoom: .identity)
     /// 縦長コンテナに横長画像 → 上下に黒帯。
     private let letterboxed = PreviewImageGeometry(containerSize: CGSize(width: 200, height: 400),
-                                                   imageSize: CGSize(width: 200, height: 100))
+                                                   imageSize: CGSize(width: 200, height: 100),
+                                                   zoom: .identity)
 
     // MARK: - 画像の占める矩形
 
@@ -23,24 +25,24 @@ final class PreviewImageGeometryTests: XCTestCase {
 
     func test_imageRect_fillsContainerWhenAspectMatches() {
         let exact = PreviewImageGeometry(containerSize: CGSize(width: 200, height: 100),
-                                         imageSize: CGSize(width: 400, height: 200))
+                                         imageSize: CGSize(width: 400, height: 200), zoom: .identity)
         XCTAssertEqual(exact.imageRect, CGRect(x: 0, y: 0, width: 200, height: 100))
     }
 
     /// 画像がまだ無いときはコンテナ全体（換算を破綻させない）。
     func test_imageRect_withoutImage_isWholeContainer() {
         let loading = PreviewImageGeometry(containerSize: CGSize(width: 300, height: 100),
-                                           imageSize: nil)
+                                           imageSize: nil, zoom: .identity)
         XCTAssertEqual(loading.imageRect, CGRect(x: 0, y: 0, width: 300, height: 100))
     }
 
     /// 潰れた入力でも 0 除算にしない。
     func test_imageRect_withDegenerateSizes_doesNotDivideByZero() {
         let zeroImage = PreviewImageGeometry(containerSize: CGSize(width: 100, height: 100),
-                                             imageSize: CGSize(width: 0, height: 0))
+                                             imageSize: CGSize(width: 0, height: 0), zoom: .identity)
         XCTAssertEqual(zeroImage.imageRect, CGRect(x: 0, y: 0, width: 100, height: 100))
         let zeroContainer = PreviewImageGeometry(containerSize: .zero,
-                                                 imageSize: CGSize(width: 100, height: 100))
+                                                 imageSize: CGSize(width: 100, height: 100), zoom: .identity)
         XCTAssertEqual(zeroContainer.imageRect, .zero)
     }
 
@@ -151,7 +153,108 @@ final class PreviewImageGeometryTests: XCTestCase {
 
     /// 潰れた画像（0 除算）では nil。
     func test_rawNormalizedPoint_withDegenerateImage_isNil() {
-        let zero = PreviewImageGeometry(containerSize: .zero, imageSize: CGSize(width: 100, height: 100))
+        let zero = PreviewImageGeometry(containerSize: .zero, imageSize: CGSize(width: 100, height: 100),
+                                        zoom: .identity)
         XCTAssertNil(zero.rawNormalizedPoint(from: CGPoint(x: 10, y: 10)))
+    }
+
+    // MARK: - ズーム
+
+    /// 等倍では `imageRect == fittedRect`（従来の振る舞いをそのまま保つ）。
+    func test_imageRect_atIdentityZoom_matchesFittedRect() {
+        XCTAssertEqual(pillarboxed.imageRect, pillarboxed.fittedRect)
+        XCTAssertEqual(letterboxed.imageRect, letterboxed.fittedRect)
+    }
+
+    /// 2 倍で幅・高さが 2 倍、中心はコンテナ中心のまま。
+    func test_imageRect_atDoubleZoom_scalesAroundContainerCenter() {
+        let square = PreviewImageGeometry(containerSize: CGSize(width: 200, height: 200),
+                                          imageSize: CGSize(width: 200, height: 200),
+                                          zoom: PreviewZoom(scale: 2, offset: .zero))
+        let rect = square.imageRect
+        XCTAssertEqual(rect.width, 400, accuracy: 1e-9)
+        XCTAssertEqual(rect.height, 400, accuracy: 1e-9)
+        XCTAssertEqual(rect.midX, 100, accuracy: 1e-9)
+        XCTAssertEqual(rect.midY, 100, accuracy: 1e-9)
+    }
+
+    /// 範囲外の offset を持つ `PreviewZoom` を渡しても `imageRect` はコンテナを覆う。
+    func test_imageRect_withOutOfRangeOffset_stillCoversContainer() {
+        let square = PreviewImageGeometry(containerSize: CGSize(width: 200, height: 200),
+                                          imageSize: CGSize(width: 200, height: 200),
+                                          zoom: PreviewZoom(scale: 2, offset: CGSize(width: 9999, height: -9999)))
+        let container = CGRect(origin: .zero, size: CGSize(width: 200, height: 200))
+        XCTAssertTrue(square.imageRect.contains(container),
+                      "クランプ後もコンテナ全体を覆っているはず: \(square.imageRect)")
+    }
+
+    /// `screenRect` → `normalizedRect` の往復が、倍率・オフセット 5 通りで元の正規化矩形に一致すること
+    /// （保存値が絶対に変わらないことの本丸）。
+    func test_screenRect_andNormalizedRect_roundTrip_acrossZoomVariants() {
+        let normalized = CGRect(x: 0.2, y: 0.3, width: 0.4, height: 0.3)
+        let zooms = [
+            PreviewZoom.identity,
+            PreviewZoom(scale: 2, offset: .zero),
+            PreviewZoom(scale: 3, offset: CGSize(width: 0, height: 50)),
+            PreviewZoom(scale: 1.5, offset: CGSize(width: 0, height: 30)),
+            PreviewZoom(scale: 8, offset: CGSize(width: 100, height: 700))
+        ]
+        for zoom in zooms {
+            let geometry = PreviewImageGeometry(containerSize: CGSize(width: 400, height: 200),
+                                                imageSize: CGSize(width: 100, height: 200), zoom: zoom)
+            let screen = geometry.screenRect(from: normalized)
+            let back = geometry.normalizedRect(from: screen)
+            XCTAssertEqual(back.origin.x, normalized.origin.x, accuracy: 1e-9, "scale=\(zoom.scale)")
+            XCTAssertEqual(back.origin.y, normalized.origin.y, accuracy: 1e-9, "scale=\(zoom.scale)")
+            XCTAssertEqual(back.width, normalized.width, accuracy: 1e-9, "scale=\(zoom.scale)")
+            XCTAssertEqual(back.height, normalized.height, accuracy: 1e-9, "scale=\(zoom.scale)")
+        }
+    }
+
+    /// 画面 40pt の移動が正規化座標に与える影響は、ズーム倍率に反比例する
+    /// （2 倍で等倍時の 1/2、4 倍で等倍時の 1/4）。これがこの機能の目的そのもの。
+    func test_screenMovement_normalizedDelta_isInverselyProportionalToScale() {
+        let containerSize = CGSize(width: 200, height: 200)
+        let imageSize = CGSize(width: 200, height: 200)
+        func normalizedDeltaX(scale: CGFloat) -> CGFloat {
+            let geometry = PreviewImageGeometry(containerSize: containerSize, imageSize: imageSize,
+                                                zoom: PreviewZoom(scale: scale, offset: .zero))
+            let a = geometry.rawNormalizedPoint(from: CGPoint(x: 100, y: 100))!
+            let b = geometry.rawNormalizedPoint(from: CGPoint(x: 140, y: 100))!
+            return b.x - a.x
+        }
+        let base = normalizedDeltaX(scale: 1)
+        let atDouble = normalizedDeltaX(scale: 2)
+        let atQuadruple = normalizedDeltaX(scale: 4)
+        XCTAssertEqual(atDouble, base / 2, accuracy: 1e-9)
+        XCTAssertEqual(atQuadruple, base / 4, accuracy: 1e-9)
+    }
+
+    /// 顔タップの写像（`normalizedPoint` ⇄ `screenPoint`）がズーム下でも逆写像になっていること。
+    func test_normalizedPoint_andScreenPoint_roundTrip_underZoom() {
+        let geometry = PreviewImageGeometry(containerSize: CGSize(width: 200, height: 400),
+                                            imageSize: CGSize(width: 200, height: 100),
+                                            zoom: PreviewZoom(scale: 2, offset: CGSize(width: 0, height: 40)))
+        let normalized = CGPoint(x: 0.4, y: 0.6)
+        let screen = geometry.screenPoint(from: normalized)
+        let back = geometry.normalizedPoint(from: screen)
+        XCTAssertEqual(back?.x ?? .nan, normalized.x, accuracy: 1e-9)
+        XCTAssertEqual(back?.y ?? .nan, normalized.y, accuracy: 1e-9)
+    }
+
+    /// 拡大してコンテナ外へはみ出した矩形が、**画像の外へ出ていない限り切り落とされない**。
+    /// `intersection` の相手が画像であってコンテナでないことの確認
+    /// （コンテナ基準で切っていたら、この screen rect は途中で潰れてしまう）。
+    func test_normalizedRect_withZoom_intersectsAgainstImageNotContainer() {
+        let geometry = PreviewImageGeometry(containerSize: CGSize(width: 200, height: 200),
+                                            imageSize: CGSize(width: 200, height: 200),
+                                            zoom: PreviewZoom(scale: 2, offset: .zero))
+        // imageRect は x: -100...300, y: -100...300。コンテナ（0...200）を大きくはみ出す範囲。
+        let screen = CGRect(x: -50, y: -50, width: 300, height: 300)
+        let result = geometry.normalizedRect(from: screen)
+        XCTAssertEqual(result.origin.x, 0.125, accuracy: 1e-9)
+        XCTAssertEqual(result.origin.y, 0.125, accuracy: 1e-9)
+        XCTAssertEqual(result.width, 0.75, accuracy: 1e-9)
+        XCTAssertEqual(result.height, 0.75, accuracy: 1e-9)
     }
 }

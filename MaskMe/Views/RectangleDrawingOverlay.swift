@@ -11,6 +11,15 @@ import SwiftUI
 /// 消す手段が無くなる。
 struct RectangleDrawingOverlay: View {
     @ObservedObject var model: MosaicEditorModel
+    /// 画像・他オーバーレイと共有する換算。**ここでは作らない**——生成箇所は
+    /// `EditorView+Preview.swift` の 1 箇所だけにする（`.swiftlint.yml` の
+    /// `preview_geometry_single_construction` が番をしている）。
+    let geometry: PreviewImageGeometry
+    /// 2 本指のピンチ／パンが進行中かどうか（`EditorView.isPinchZooming`。
+    /// `@GestureState` なのでジェスチャの異常終了でも自動で戻る）。
+    /// true になった瞬間、進行中の編集を確定せずに捨て、当たり判定を切る
+    /// （`body` の `onChange` / `allowsHitTesting` 参照）。
+    let isZoomGestureActive: Bool
     /// ドラッグ中の矩形（画面座標）
     @State private var dragging: CGRect?
     @State private var startLocation: CGPoint = .zero
@@ -36,48 +45,61 @@ struct RectangleDrawingOverlay: View {
     private static let stateLabelInset: CGFloat = 10
 
     var body: some View {
-        GeometryReader { geo in
-            ZStack {
-                // ドラッグ中の矩形プレビュー
-                if let rect = dragging {
-                    RoundedRectangle(cornerRadius: 4)
-                        .stroke(Color.red, lineWidth: 2)
-                        .background(Color.red.opacity(0.1))
-                        .frame(width: rect.width, height: rect.height)
-                        .position(x: rect.midX, y: rect.midY)
-                }
-
-                // 検出中インジケーター
-                if isDetecting {
-                    ProgressView()
-                        .padding(8)
-                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
-                }
-
-                // ドラッグジェスチャー（透明レイヤー）。**ツール ON のときだけ張る。**
-                if model.isRectangleToolActive {
-                    drawingSurface(in: geo.size)
-                }
-
-                // 既存の物体マスクをオーバーレイ表示。**描画面より上に置く**ので、
-                // 矩形ツール ON でもマスクの上のドラッグは「移動」になる
-                // （空いている所をドラッグすれば従来どおり新規作成）。
-                //
-                // **`objectMasks` を直接 `ForEach` しないこと**: 矩形はキーフレーム補間で
-                // 時刻ごとに変わるので、シークしても枠が動かなくなる。
-                ForEach(model.visibleObjectMasks, id: \.id) { mask in
-                    maskOverlay(id: mask.id, rect: mask.rect, angle: mask.angle,
-                               state: mask.state, in: geo.size)
-                }
-
-                // 追えているかのラベル。**`maskOverlay` の中に入れない。** あそこは
-                // `.frame` → `.rotationEffect` → `.position` の連鎖と `.global` 座標の
-                // ドラッグが噛み合っており、子を足すと当たり判定が動く。枠より上に
-                // 別の `ForEach` として重ねる。
-                ForEach(model.visibleObjectMasks, id: \.id) { mask in
-                    stateLabel(for: mask, in: geo.size)
-                }
+        ZStack {
+            // ドラッグ中の矩形プレビュー
+            if let rect = dragging {
+                RoundedRectangle(cornerRadius: 4)
+                    .stroke(Color.red, lineWidth: 2)
+                    .background(Color.red.opacity(0.1))
+                    .frame(width: rect.width, height: rect.height)
+                    .position(x: rect.midX, y: rect.midY)
             }
+
+            // 検出中インジケーター
+            if isDetecting {
+                ProgressView()
+                    .padding(8)
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+            }
+
+            // ドラッグジェスチャー（透明レイヤー）。**ツール ON のときだけ張る。**
+            if model.isRectangleToolActive {
+                drawingSurface(in: geometry)
+            }
+
+            // 既存の物体マスクをオーバーレイ表示。**描画面より上に置く**ので、
+            // 矩形ツール ON でもマスクの上のドラッグは「移動」になる
+            // （空いている所をドラッグすれば従来どおり新規作成）。
+            //
+            // **`objectMasks` を直接 `ForEach` しないこと**: 矩形はキーフレーム補間で
+            // 時刻ごとに変わるので、シークしても枠が動かなくなる。
+            ForEach(model.visibleObjectMasks, id: \.id) { mask in
+                maskOverlay(id: mask.id, rect: mask.rect, angle: mask.angle,
+                           state: mask.state, in: geometry)
+            }
+
+            // 追えているかのラベル。**`maskOverlay` の中に入れない。** あそこは
+            // `.frame` → `.rotationEffect` → `.position` の連鎖と `.global` 座標の
+            // ドラッグが噛み合っており、子を足すと当たり判定が動く。枠より上に
+            // 別の `ForEach` として重ねる。
+            ForEach(model.visibleObjectMasks, id: \.id) { mask in
+                stateLabel(for: mask, in: geometry)
+            }
+        }
+        .frame(width: geometry.containerSize.width, height: geometry.containerSize.height)
+        .allowsHitTesting(!isZoomGestureActive)
+        // **ピンチが始まった瞬間、進行中の編集を確定せずに捨てる。** これをやらないと
+        // 「ピンチしたら矩形が 1 個できた」「掴んでいた矩形が指 1 本ぶんだけ飛んだ」が起きる
+        // （2 本指のうち先に着いた 1 本を単独ドラッグとして拾ってしまうため）。
+        .onChange(of: isZoomGestureActive) { active in
+            guard active else { return }
+            dragging = nil
+            movingMaskID = nil
+            moveOffset = .zero
+            resizingMaskID = nil
+            resizeDelta = .zero
+            rotatingMaskID = nil
+            rotationPreview = 0
         }
     }
 
@@ -90,14 +112,14 @@ struct RectangleDrawingOverlay: View {
     /// - Parameter angle: 傾き（ラジアン）。枠もつまみも**まとめて回す**ので、
     ///   傾いた矩形でも「右下のつまみ」は見た目どおり右下にある。
     private func maskOverlay(id: UUID, rect: CGRect, angle: Double,
-                             state: ObjectMaskFollowState, in size: CGSize) -> some View {
-        let base = previewRect(from: rect, in: size)
+                             state: ObjectMaskFollowState, in geometry: PreviewImageGeometry) -> some View {
+        let base = previewRect(from: rect, in: geometry)
         let shown = shownRect(for: id, base: base)
         let shownAngle = rotatingMaskID == id ? rotationPreview : angle
 
         return ZStack {
-            frameBody(id: id, shown: shown, angle: shownAngle, state: state, in: size)
-            handles(id: id, base: base, shown: shown, angle: shownAngle, in: size)
+            frameBody(id: id, shown: shown, angle: shownAngle, state: state, in: geometry)
+            handles(id: id, base: base, shown: shown, angle: shownAngle, in: geometry)
         }
         .frame(width: shown.width, height: shown.height)
         // **枠とつまみを一緒に回す。** 枠だけ回すと、傾けた矩形のつまみが
@@ -137,7 +159,7 @@ struct RectangleDrawingOverlay: View {
     /// 色は顔検出の青枠（`FacePickOverlay`）に揃える。線種は `state` に従う
     /// （追跡中・固定＝実線、解析中・追跡なし＝破線。`ObjectMaskStateStyle` 参照）。
     private func frameBody(id: UUID, shown: CGRect, angle: Double,
-                           state: ObjectMaskFollowState, in size: CGSize) -> some View {
+                           state: ObjectMaskFollowState, in geometry: PreviewImageGeometry) -> some View {
         let dashed = ObjectMaskStateStyle.isDashed(state)
         return RoundedRectangle(cornerRadius: 4)
             .stroke(Color.blue,
@@ -158,14 +180,14 @@ struct RectangleDrawingOverlay: View {
                         moveOffset = .zero
                         commit(id: id, rect: shown.offsetBy(dx: value.translation.width,
                                                             dy: value.translation.height),
-                               angle: angle, in: size)
+                               angle: angle, in: geometry)
                     }
             )
     }
 
     /// ✕（消す）・↘（大きさ）・↻（傾き）。
     private func handles(id: UUID, base: CGRect, shown: CGRect,
-                         angle: Double, in size: CGSize) -> some View {
+                         angle: Double, in geometry: PreviewImageGeometry) -> some View {
         ZStack {
             handleButton(systemImage: "xmark.circle.fill", tint: .red)
                 .position(x: shown.width, y: 0)
@@ -189,7 +211,7 @@ struct RectangleDrawingOverlay: View {
                             resizeDelta = .zero
                             commit(id: id,
                                    rect: RectangleHandleMath.resizedAroundCenter(base, byLocal: delta),
-                                   angle: angle, in: size)
+                                   angle: angle, in: geometry)
                         }
                 )
                 .accessibilityIdentifier("editor.objectMask.resize")
@@ -197,7 +219,7 @@ struct RectangleDrawingOverlay: View {
 
             handleButton(systemImage: "rotate.right.fill", tint: .blue)
                 .position(x: shown.width / 2, y: shown.height + Self.rotateHandleGap)
-                .gesture(rotationGesture(id: id, shown: shown, angle: angle, in: size))
+                .gesture(rotationGesture(id: id, shown: shown, angle: angle, in: geometry))
                 .accessibilityIdentifier("editor.objectMask.rotate")
                 .accessibilityLabel("矩形を傾ける")
         }
@@ -205,7 +227,7 @@ struct RectangleDrawingOverlay: View {
 
     /// 中心から指への角度で回す。**掴んだ時点との差**を足すので、指を置いた瞬間は動かない。
     private func rotationGesture(id: UUID, shown: CGRect,
-                                 angle: Double, in size: CGSize) -> some Gesture {
+                                 angle: Double, in geometry: PreviewImageGeometry) -> some Gesture {
         DragGesture(minimumDistance: 1, coordinateSpace: .global)
             .onChanged { value in
                 let center = CGPoint(x: shown.midX, y: shown.midY)
@@ -225,7 +247,7 @@ struct RectangleDrawingOverlay: View {
                 guard rotatingMaskID == id else { return }
                 let settled = rotationPreview
                 rotatingMaskID = nil
-                commit(id: id, rect: shown, angle: settled, in: size)
+                commit(id: id, rect: shown, angle: settled, in: geometry)
             }
     }
 
@@ -239,13 +261,13 @@ struct RectangleDrawingOverlay: View {
     }
 
     /// 画面の矩形をモデルへ書き戻す（正規化して渡すのはここ 1 箇所）。
-    private func commit(id: UUID, rect: CGRect, angle: Double, in size: CGSize) {
-        model.setObjectMaskKeyframe(id, compositionRect: normalizedRect(from: rect, in: size),
+    private func commit(id: UUID, rect: CGRect, angle: Double, in geometry: PreviewImageGeometry) {
+        model.setObjectMaskKeyframe(id, compositionRect: normalizedRect(from: rect, in: geometry),
                                     angle: angle)
     }
 
     /// 矩形を描く面（ツール ON のときだけ張る）。
-    private func drawingSurface(in size: CGSize) -> some View {
+    private func drawingSurface(in geometry: PreviewImageGeometry) -> some View {
         ZStack {
             Color.clear
                 .contentShape(Rectangle())
@@ -268,7 +290,7 @@ struct RectangleDrawingOverlay: View {
                                 return
                             }
                             dragging = nil
-                            let normalized = normalizedRect(from: rect, in: size)
+                            let normalized = normalizedRect(from: rect, in: geometry)
                             isDetecting = true
                             Task {
                                 await model.detectInRegion(normalized)
@@ -297,18 +319,15 @@ struct RectangleDrawingOverlay: View {
 
     // 換算の実体は `PreviewImageGeometry`（MosaicCore、`swift test` で固定）。
     // **ここに式を書き戻さないこと。** 顔の枠（`FacePickOverlay`）が同じ換算を使うので、
-    // 片方だけ直すと「矩形は合っているのに顔の枠だけずれる」ことになる。
+    // 片方だけ直すと「矩形は合っているのに顔の枠だけずれる」ことになる。`geometry` は
+    // 格納プロパティ（`EditorView+Preview.swift` から渡される）で、ここでは作らない。
 
-    private func geometry(in size: CGSize) -> PreviewImageGeometry {
-        PreviewImageGeometry(containerSize: size, imageSize: model.previewImage?.size)
+    private func previewRect(from normalized: CGRect, in geometry: PreviewImageGeometry) -> CGRect {
+        geometry.screenRect(from: normalized)
     }
 
-    private func previewRect(from normalized: CGRect, in size: CGSize) -> CGRect {
-        geometry(in: size).screenRect(from: normalized)
-    }
-
-    private func normalizedRect(from rect: CGRect, in containerSize: CGSize) -> CGRect {
-        geometry(in: containerSize).normalizedRect(from: rect)
+    private func normalizedRect(from rect: CGRect, in geometry: PreviewImageGeometry) -> CGRect {
+        geometry.normalizedRect(from: rect)
     }
 
     /// 「追えているか」のラベル。**枠より上に、別の `ForEach` として**重ねる
@@ -318,10 +337,10 @@ struct RectangleDrawingOverlay: View {
     ///   連続ドラッグでラベルが明滅しないよう、掴んでいる最中は出さない。
     /// - ラベルは**回転させない**（傾いた矩形でも文字が読めるように）。`shownRect` は
     ///   回転前の画面座標そのものなので、ここではそのまま使う。
-    private func stateLabel(for mask: VisibleObjectMask, in size: CGSize) -> some View {
+    private func stateLabel(for mask: VisibleObjectMask, in geometry: PreviewImageGeometry) -> some View {
         let isDragging = movingMaskID == mask.id || resizingMaskID == mask.id
             || rotatingMaskID == mask.id
-        let shown = shownRect(for: mask.id, base: previewRect(from: mask.rect, in: size))
+        let shown = shownRect(for: mask.id, base: previewRect(from: mask.rect, in: geometry))
         return Group {
             if !isDragging, let text = ObjectMaskStateStyle.label(mask.state) {
                 Text(text)

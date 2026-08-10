@@ -41,6 +41,21 @@ struct VideoCompositionConditions: Equatable {
     /// 回転・反転が**映像にだけ効かない**（`TimelineRenderLayout` には入るので
     /// モザイクだけが回り、顔が素通しになる）。ここは必ず装着側へ倒す。
     var hasClipOrientation = false
+    /// ユーザーが掛けたクリップの変形（`TimelineClip.transform`）がある。
+    ///
+    /// 無装着経路は配置矩形を常にアスペクトフィットのまま（無変形）使うので、
+    /// 装着しないと拡大縮小・位置の変更が**映像にだけ効かない**（`hasClipOrientation` と
+    /// 同じ事故: `TimelineRenderLayout` には入るのでモザイクだけが動き、顔が素通しになる）。
+    /// 単一クリップ・同一フォーマットで変形だけを掛けたタイムラインでもここが真にならないと
+    /// `VideoCompositionPlan.decide` が `.none` に倒れ、変形が映像にもモザイクにも
+    /// 無言で効かなくなる。
+    var hasClipTransform = false
+    /// 出力枠のクロップ（`TimelineState.crop`）が全面（`.full`）でない。
+    ///
+    /// 無装着経路は配置矩形を常にアスペクトフィットのまま（クロップなし）使うので、
+    /// 装着しないとクロップが**映像にだけ効かない**（`hasClipOrientation` / `hasClipTransform`
+    /// と同じ事故: `TimelineRenderLayout` には入るのでモザイクだけが動き、顔が素通しになる）。
+    var hasCrop = false
     /// 出力解像度を先頭クリップの自然サイズから強制的に変える必要がある
     /// （無料プランの解像度制限による縮小。`ExportRestrictionPolicy` 参照）。
     /// これが真のときだけの単一クリップ・無変換タイムラインでも装着を強制しないと、
@@ -50,6 +65,7 @@ struct VideoCompositionConditions: Equatable {
     /// build 中に集めたクリップ情報から判定材料を求める唯一の入口。
     static func from(placements: [ClipPlacement],
                      overlaps: [TimelineMapping.Overlap],
+                     crop: CropRect = .full,
                      forcesRenderSize: Bool = false) -> VideoCompositionConditions {
         let reference = placements.first?.format
         return VideoCompositionConditions(
@@ -57,6 +73,8 @@ struct VideoCompositionConditions: Equatable {
             hasRateChange: placements.contains { $0.clip.rate != 1.0 },
             hasMixedFormats: placements.contains { $0.format != reference },
             hasClipOrientation: placements.contains { !$0.clip.orientation.isIdentity },
+            hasClipTransform: placements.contains { !$0.clip.transform.isIdentity },
+            hasCrop: !crop.isFull,
             forcesRenderSize: forcesRenderSize)
     }
 }
@@ -79,6 +97,8 @@ enum VideoCompositionPlan: Equatable {
             || conditions.hasMixedFormats
             || conditions.forcesRenderSize
             || conditions.hasClipOrientation
+            || conditions.hasClipTransform
+            || conditions.hasCrop
         return needsComposition ? .attach : .none
     }
 }
@@ -103,35 +123,68 @@ enum VideoCompositionFactory {
     /// フレームレート不明時の既定値。
     static let defaultFrameRate: Double = 30
 
-    /// - Parameter renderSizeOverride: 非 nil のとき、先頭クリップから求まる自然な
-    ///   `renderSize(for:)` の代わりにこのサイズを使う（無料プランの解像度制限による
-    ///   縮小。`ExportRestrictionPolicy.clampedResolution` の結果を渡すこと）。
+    /// - Parameter crop: 出力枠のクロップ（`TimelineState.crop`）。`.full`（既定）は
+    ///   従来どおりクロップなし。非 `.full` は他の条件が無くても装着を強制する
+    ///   （`VideoCompositionConditions.hasCrop`）。
+    /// - Parameter preCropFrameOverride: 非 nil のとき、先頭クリップから求まる自然な
+    ///   `renderSize(for:)` の代わりにこのサイズを「クロップ**前**の出力枠」として使う
+    ///   （画面比率を選んでいるときの `TimelineAspectRatio.renderSize` の結果を渡すこと）。
+    ///   **クロップはこの枠に対して掛かる**（`CropRect` 型 doc の確定した適用順序:
+    ///   向き → AspectFit → CropRect → ClipTransform）。無料プランの解像度制限（後述の
+    ///   `renderSizeOverride`）はここに含めないこと——制限はクロップの**後**に効く。
+    /// - Parameter renderSizeOverride: 非 nil のとき、実際に書き出す最終ピクセルサイズ
+    ///   （クロップ・無料プランの解像度制限まで適用した後のサイズ）として使う
+    ///   （`ExportRestrictionPolicy.clampedResolution` の結果、またはクロップだけを
+    ///   適用した `CropRect.outputSize(fittingFrame:)` の結果を渡すこと）。
     ///   これを渡すと、他の条件が無くても装着が強制される（`forcesRenderSize`）。
+    ///   nil のときは `crop.isFull` なら `preCropFrameOverride` をそのまま、
+    ///   そうでなければ `crop.outputSize(fittingFrame:)` を自前で計算する。
     /// - Returns: 装着する `AVMutableVideoComposition`（`.none` 判定なら nil）と、
     ///   顔座標を合成フレーム基準へ写すためのレイアウト（装着しないときは恒等）。
     static func make(placements: [ClipPlacement],
                      overlaps: [TimelineMapping.Overlap],
                      totalDuration: Double,
+                     crop: CropRect = .full,
+                     preCropFrameOverride: CGSize? = nil,
                      renderSizeOverride: CGSize? = nil)
     -> (videoComposition: AVMutableVideoComposition?, layout: TimelineRenderLayout) {
         let conditions = VideoCompositionConditions.from(
-            placements: placements, overlaps: overlaps,
+            placements: placements, overlaps: overlaps, crop: crop,
             forcesRenderSize: renderSizeOverride != nil)
         guard VideoCompositionPlan.decide(conditions: conditions) == .attach,
               let first = placements.first else {
             return (nil, .identity)
         }
 
+        let naturalFirst = renderSize(for: first.format, orientation: first.clip.orientation)
+        // クロップ**前**の出力枠（画面比率適用後）。フォールバックの優先順位は
+        // 「明示された pre-crop 枠 → 明示された最終サイズ（旧・単一パラメータ時代の互換）→
+        // 自然サイズ」。クロップが無いときは `AspectFit` の正規化結果はこの枠の絶対値に
+        // 依存しない（比例不変）ため、既存の呼び出し（`renderSizeOverride` だけを渡す）の
+        // 挙動は変えない。
+        let preCropFrame = preCropFrameOverride ?? renderSizeOverride ?? naturalFirst
+        // 実際に書き出す最終キャンバス（クロップ＋無料プランの制限まで適用した後）。
         let renderSize = renderSizeOverride
-            ?? renderSize(for: first.format, orientation: first.clip.orientation)
+            ?? (crop.isFull ? preCropFrame : crop.outputSize(fittingFrame: preCropFrame))
         var layoutRects: [UUID: CGRect] = [:]
         var orientations: [UUID: ClipOrientation] = [:]
         var transforms: [UUID: CGAffineTransform] = [:]
         for placement in placements {
             let orientation = placement.clip.orientation
-            // **配置は「向きを掛けた後」のサイズで求める**（90 度回転で縦横が入れ替わる）。
-            let display = displaySize(of: placement.format, orientation: orientation)
-            let rect = AspectFit.placement(of: display, in: renderSize)
+            // **`RenderPlacement.make` が fit → crop の合成の唯一の場所。** 向きを掛ける
+            // 前のサイズ + 向きを渡すこと（`RenderPlacement.make` が内部で向きを掛けるため、
+            // ここで先に向きを掛けた `displaySize(of:orientation:)` を渡すと二重適用になる）。
+            let sourceDisplay = sourceDisplaySize(of: placement.format)
+            let fitted = RenderPlacement.make(displaySize: sourceDisplay, orientation: orientation,
+                                              frame: preCropFrame, crop: crop)
+            // **変形の適用点はここ 1 箇所だけ。** `RenderPlacement.make`（fit → crop）の
+            // 結果へ `ClipTransform.applied(to:)` を 1 回だけ掛け、その結果を映像側
+            // （`fitTransform` の `placement` 引数）とモザイク側（`layoutRects` →
+            // `TimelineRenderLayout`）の両方へ渡す。ここ以外で scale/offset の算術を
+            // 書くと、映像とモザイクが別々に進化して顔が素通しになる
+            // （`ClipTransformParityTests` が唯一の呼び出し元であることを固定している）。
+            // 適用順序は 向き → AspectFit → CropRect → ClipTransform で確定している。
+            let rect = placement.clip.transform.applied(to: fitted)
             layoutRects[placement.clip.id] = rect
             orientations[placement.clip.id] = orientation
             transforms[placement.clip.id] = fitTransform(format: placement.format,
@@ -207,6 +260,14 @@ enum VideoCompositionFactory {
     /// 出力枠は変わらず、回った結果がこの枠へレターボックスされる。
     /// 「先頭クリップが主素材」という既存の規則をそのまま延長したもので、
     /// 回転を「主素材の見せ方の変更」として扱うのが最も予測しやすい。
+    ///
+    /// **クリップの変形（`TimelineClip.transform`）はここに渡さない（意図的）。**
+    /// 先頭クリップを 2 倍に拡大したからといって出力解像度が 2 倍になるのは誤りである
+    /// —— 変形は「出力枠の中でどう配置されるか」（レターボックス配置矩形そのもの）を
+    /// 変えるだけで、出力枠自体（`renderSize`）の大きさを決める要素ではない。
+    /// `orientation` が縦横比を変える（＝出力枠の形そのものが変わる）のとは性質が違う。
+    /// 変形は `make(placements:overlaps:totalDuration:renderSizeOverride:)` 内で
+    /// `AspectFit.placement(...)` の結果へ後から掛かる（型 doc 参照）。
     static func renderSize(for format: TimelineCompositionBuilder.VideoFormat,
                            orientation: ClipOrientation = .identity) -> CGSize {
         let display = displaySize(of: format, orientation: orientation)

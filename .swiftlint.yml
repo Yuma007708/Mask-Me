@@ -43,3 +43,32 @@ type_body_length:
 file_length:
   warning: 500
   error: 800
+
+custom_rules:
+  # プレビューの画像・オーバーレイが同じ `PreviewImageGeometry` から描かれることを
+  # 機械的に守る番人。`EditorView+Preview.swift` の doc 参照: 生成箇所が複数に増えると
+  # 「矩形は合っているのに顔の枠だけずれる」食い違いが起こり得る。
+  preview_geometry_single_construction:
+    included: "MaskMe/Views/.*"
+    excluded: ".*EditorView\\+Preview\\.swift"
+    regex: "PreviewImageGeometry\\s*\\("
+    match_kinds:
+      - identifier
+    message: "PreviewImageGeometry を作るのは EditorView+Preview.swift の 1 箇所だけ。ここでは受け取った geometry を使うこと。"
+    severity: error
+  # プレビュー画像は `imageRect` から描くこと。`.scaledToFit()` / `.scaleEffect` へ戻すと、
+  # 絵と枠（オーバーレイ）が食い違う経路が復活する。
+  preview_image_uses_geometry_rect:
+    included: ".*EditorView\\+Preview\\.swift"
+    regex: "scaledToFit|scaleEffect"
+    message: "プレビュー画像は imageRect から .frame + .position で描くこと（.scaledToFit / .scaleEffect へ戻さない）。"
+    severity: error
+  # プレビューのズームは「どこを見ているか」であって編集ではない。モデルへ載せると
+  # (1) EditSnapshot へ足す誘引が強く undo が視点を引き戻す (2) editVersion →
+  # scheduleAutosave() に直結しピンチ 1 回で下書き書き込みが何十回も走る
+  # (3) モデルの全観測者が 60fps で再描画される。
+  zoom_state_stays_out_of_the_model:
+    included: "MaskMe/Model/.*"
+    regex: "PreviewZoom"
+    message: "PreviewZoom / PreviewZoomSession は MosaicEditorModel（Model 層）へ置かない。View 層（EditorView）の @State/@GestureState に留める。"
+    severity: error

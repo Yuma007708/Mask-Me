@@ -48,6 +48,9 @@ public final class MosaicEditorModel: ObservableObject {
         /// （`MosaicEditorModel.trimRange` の doc 参照）。常に `0...1`。
         var trimRange: ClosedRange<Double>
         var timeline: TimelineState
+        /// 写真モードの編集状態（色調補正）。undo/redo 対象（写真モード底上げ 第1段）。
+        /// 動画モードでは常に `.identity`（写真タブの UI が無いので触られない）。
+        var photoEdit: PhotoEditState
     }
 
     // プレビュー
@@ -284,6 +287,13 @@ public final class MosaicEditorModel: ObservableObject {
     @Published public var backgroundMosaicOn = false
     @Published public var faceBlockSize: Float = 28
     @Published public var backgroundBlockSize: Float = 28
+    /// 写真モードの編集状態（色調補正。写真モード底上げ 第1段）。
+    ///
+    /// **書き換えは `applyPhotoEdit`（`MosaicEditorModel+Photo.swift`）からだけ行うこと。**
+    /// 直接代入すると `renderPreview()` / `commitEdit()` が呼ばれず、スライダーを
+    /// 動かしても絵が変わらない・undo に積まれない事故になる。
+    /// 動画モードでは写真タブの UI が無いため常に `.identity` のまま（触られない）。
+    @Published public var photoEdit: PhotoEditState = .identity
     /// 選択中タブ（nil＝未選択：調整バーは非表示）。
     @Published public var activeTab: EffectTab? {
         didSet {
@@ -837,6 +847,7 @@ public final class MosaicEditorModel: ObservableObject {
                            audioItems: audioItems, sources: sources,
                            aspectRatio: timeline.aspectRatio,
                            clipAudioMuteRanges: timeline.clipAudioMuteRanges,
+                           crop: timeline.crop,
                            isPro: entitlements.isPro)
                 let isStale = loadGeneration != timelineGeneration
                 if !isStale {
@@ -1569,35 +1580,28 @@ public final class MosaicEditorModel: ObservableObject {
         guard let renderer, let tex = sourceTexture else { return }
         applyControls(to: renderer)
 
-        var current = tex
-
         // 顔モザイク（立体メッシュ）＋手動矩形。
         // **両者は独立して ON/OFF する。** 顔を切っても矩形は残る（逆も同じ）。
-        // 1 回の `renderToNewTexture` に両方渡すのは従来どおり（2 回描くと
-        // 重なった部分だけ二重にブロック化されて濃さが変わる）。
         let landmarks = faceMosaicOn ? detectedFaces.filter(\.isSelected).map(\.landmarks) : []
         let extra = objectMosaicOn
             ? objectMaskPaths(for: CGSize(width: tex.width, height: tex.height),
                               atComposition: compositionTimeForOverlay)
             : []
-        if !landmarks.isEmpty || !extra.isEmpty {
-            if let result = renderer.renderToNewTexture(
-                input: current, landmarkSets: landmarks, additionalPaths: extra
-            ) {
-                current = result.texture
-            }
-        }
 
-        // 背景モザイク（平面）。人物前景を反転したマスクで背景だけを処理。
-        if backgroundMosaicOn, let mask = backgroundMask {
-            if let out = renderer.renderBackgroundToNewTexture(
-                input: current,
-                mask: mask,
-                block: backgroundBlockSize
-            ) {
-                current = out
-            }
-        }
+        // 色調補正・モザイクの合成は `PhotoRenderPipeline` の 1 呼び出しに閉じる
+        // （写真専用の合成器を新設しない。動画モードでは `photoEdit` が常に
+        // `.identity` なので色調補正パスはゼロコストで素通りし、従来と同じ絵になる）。
+        let current = PhotoRenderPipeline.render(
+            source: tex,
+            photoEdit: photoEdit,
+            renderer: renderer,
+            mosaic: PhotoRenderPipeline.MosaicInput(
+                landmarkSets: landmarks,
+                additionalPaths: extra,
+                backgroundMask: backgroundMosaicOn ? backgroundMask : nil,
+                backgroundBlockSize: backgroundBlockSize
+            )
+        )
 
         if let cg = MetalTextureUtilities.cgImage(from: current) {
             previewImage = UIImage(cgImage: cg)
@@ -1846,7 +1850,10 @@ public final class MosaicEditorModel: ObservableObject {
         objectMasks: [ObjectMask],
         legacyManualRects: [CGRect] = [],
         faceSelections: [DraftFaceSelection]? = nil,
-        personProfiles: [PersonProfile]? = nil
+        personProfiles: [PersonProfile]? = nil,
+        /// 写真モードの編集状態（色調補正）。この項目より前の下書きには無いので、
+        /// 既定は `.identity`（＝復元前と同じ「無編集」の見た目のまま）。
+        photoEdit: PhotoEditState = .identity
     ) {
         // 人物は**目印より先に**台帳へ戻す。目印は人物 ID で顔を指しており、
         // 台帳に居ない人物 ID はどの顔とも結び付かない（＝位置照合へ落ちる）。
@@ -1861,6 +1868,11 @@ public final class MosaicEditorModel: ObservableObject {
         self.faceBlockSize = faceBlockSize
         self.backgroundBlockSize = backgroundBlockSize
         self.objectMasks = objectMasks
+        // 写真の色調補正も他のパラメータと同じ扱い: **直接代入**（`applyPhotoEdit` は
+        // 通さない）。復元は編集ではないので `commitEdit()` を呼ばず、末尾の
+        // `resetHistory()` が復元後の状態をそのまま履歴の起点にする
+        // （`faceMosaicOn` 等、この関数の他のフィールドと同じ流儀）。
+        self.photoEdit = photoEdit
         migrateLegacyManualRects(legacyManualRects)
         // 顔選択は resetHistory より**前**に復元する（復元後の状態が履歴の起点になる。
         // ここで直さないと、末尾の resetHistory で undo からも取り戻せなくなる）。
@@ -2054,7 +2066,8 @@ public final class MosaicEditorModel: ObservableObject {
             selectedFaceIDs: Set(detectedFaces.filter(\.isSelected).map(\.id)),
             objectMasks: objectMasks,
             trimRange: trimRange,
-            timeline: timeline
+            timeline: timeline,
+            photoEdit: photoEdit
         )
     }
 
@@ -2073,6 +2086,7 @@ public final class MosaicEditorModel: ObservableObject {
         }
         objectMasks = snap.objectMasks
         trimRange = snap.trimRange
+        photoEdit = snap.photoEdit
         // タイムラインの復元。差分があるときだけ `replaceTimeline` が世代トークン付きの
         // 非同期 rebuild を起動する（undo 連打では古い世代の合成結果が
         // `rebuildComposition(generation:)` の照合で破棄される。新規機構は作らない）。

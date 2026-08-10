@@ -129,6 +129,11 @@ struct TimelineCompositionBuilder {
     ///   （`timeline.clipDuckRanges`）。既定値 `[]`（ダッキングなし）は
     ///   `clipAudioMuteRanges` と同じ理由で安全に既定化できる。実アプリの 2 経路は必ず
     ///   `timeline.clipDuckRanges` を渡す。
+    /// - Parameter crop: 出力枠のクロップ（`timeline.crop`）。既定値 `.full`（クロップなし）は
+    ///   `aspectRatio` と同じく、クロップを意識しない既存の呼び出し（テスト等）の挙動を
+    ///   変えないための後方互換値。実アプリの 2 経路は必ず `timeline.crop` を渡す。
+    ///   段の順序は `outputSizing(placements:aspectRatio:crop:isPro:totalDuration:)` の doc 参照
+    ///   （自然な枠 → 画面比率 → クロップ → 無料プランの上限）。
     func build(clips: [TimelineClip],
                transitions: [UUID: TransitionSpec] = [:],
                audioItems: [AudioItem] = [],
@@ -136,6 +141,7 @@ struct TimelineCompositionBuilder {
                aspectRatio: TimelineAspectRatio = .source,
                clipAudioMuteRanges: [ClipAudioMuteRange] = [],
                clipDuckRanges: [ClipDuckRange] = [],
+               crop: CropRect = .full,
                isPro: Bool) async throws -> Built {
         let mapping = TimelineMapping(clips: clips, transitions: transitions)
         // 重なりがあるときだけ 2 トラックへ交互配置する。重なりが無い構成では
@@ -210,15 +216,17 @@ struct TimelineCompositionBuilder {
                                 compositionSeconds.isFinite ? compositionSeconds : 0)
 
         let sizing = Self.outputSizing(placements: placements, aspectRatio: aspectRatio,
-                                       isPro: isPro, totalDuration: totalDuration)
+                                       crop: crop, isPro: isPro, totalDuration: totalDuration)
         let naturalOutputSize = sizing.natural
         let clampedOutputSize = sizing.clamped
         let exportRestriction = sizing.restriction
         let renderSizeOverride = sizing.renderSizeOverride
+        let preCropFrameOverride = sizing.preCropFrameOverride
 
         let (videoComposition, layout) = VideoCompositionFactory.make(
             placements: placements, overlaps: mapping.overlaps,
-            totalDuration: totalDuration, renderSizeOverride: renderSizeOverride)
+            totalDuration: totalDuration, crop: crop,
+            preCropFrameOverride: preCropFrameOverride, renderSizeOverride: renderSizeOverride)
         let audioMix = AudioMixFactory.make(
             placements: placements, overlaps: mapping.overlaps, tracks: survivingAudio,
             mapping: mapping, muteRanges: clipAudioMuteRanges, backgroundItems: background.items,
@@ -437,61 +445,6 @@ struct TimelineCompositionBuilder {
 
 // MARK: - 出力サイズの決定
 //
-// extension に置いてあるのは `function_body_length` 対策（`build` が上限に達したため）。
-
-extension TimelineCompositionBuilder {
-    /// 出力枠のサイズ決定を 1 箇所にまとめたもの。
-    ///
-    /// **段の順序に意味がある**（自然な値 → 向き → 画面比率 → 無料プランの上限）ので、
-    /// 呼び出し側でばらして書かないこと。ばらすと片方の経路だけ順序が違う、という
-    /// 種類の欠陥ができる。
-    struct OutputSizing {
-        /// 先頭クリップの向きまで含めた「自然な」出力枠。
-        let natural: CGSize
-        /// 画面比率と無料プランの上限まで掛けた、実際に書き出す枠。
-        let clamped: CGSize
-        let restriction: ExportRestriction
-        /// 自然な枠と同じなら nil（＝合成の装着を強制しない）。
-        let renderSizeOverride: CGSize?
-    }
-
-    static func outputSizing(placements: [ClipPlacement],
-                             aspectRatio: TimelineAspectRatio,
-                             isPro: Bool,
-                             totalDuration: Double) -> OutputSizing {
-        // 出力解像度の**自然な**値の算出は `VideoCompositionFactory.renderSize(for:)` の
-        // 単一実装を使う（コア層に再実装しない。表示と実出力が食い違う二重管理を作らない
-        // ため。`TimelineOutputSummary` の doc 参照）。
-        // **先頭クリップの向き（回転・反転）も渡す。** 渡し忘れると回した縦動画の
-        // 出力枠だけが横のままになり、映像が枠に収まらない。
-        let natural = placements.first.map {
-            VideoCompositionFactory.renderSize(for: $0.format, orientation: $0.clip.orientation)
-        } ?? .zero
-        // 画面比率の適用は、自然な値の**結果に掛ける後処理**（`TimelineAspectRatio` の doc）。
-        // `.source` は入力をそのまま返すので、この 1 行は従来経路を一切変えない。
-        // 向きを掛けた**後**のサイズへ適用する（回した縦動画に 16:9 を選んだとき、
-        // 回す前の横向きサイズを基準にすると枠が二重に倒れる）。
-        let aspect = aspectRatio.renderSize(fittingSourceSize: natural)
-        // 無料プランの制限は「実際に書き出す解像度」＝比率を適用した**後**のサイズで判定する。
-        //
-        // **順序の効き方を正確に書いておく。** 現在の採寸規則
-        // （`TimelineAspectRatio.renderSize` は短辺を据え置き、長辺だけを比率から導く）では
-        // 比率の前後で短辺が変わらないので、この順序は**結果を一切変えない**。
-        // それでも後段に置くのは、採寸規則を長辺基準などへ変えたときに上限がすり抜けるのを
-        // 防ぐためであって、「いますり抜けるから」ではない。ここを「すり抜ける」と書くと、
-        // 採寸規則を変える人が誤った根拠で安心する。
-        let restriction = ExportRestrictionPolicy.decide(
-            isPro: isPro, durationSeconds: totalDuration, resolution: aspect)
-        let clamped: CGSize
-        if case .exceedsResolution(let limit) = restriction {
-            clamped = ExportRestrictionPolicy.clampedResolution(aspect, shortSideLimit: limit)
-        } else {
-            clamped = aspect
-        }
-        // 自然な出力枠と同じサイズになったなら override を渡さない（＝装着を強制しない）。
-        // 素材がちょうどその比率だった場合に無変換タイムラインの忠実度
-        // （`CompositionFidelityTests` の bit 同一契約）を壊さないため。
-        return OutputSizing(natural: natural, clamped: clamped, restriction: restriction,
-                            renderSizeOverride: clamped == natural ? nil : clamped)
-    }
-}
+// `OutputSizing` / `outputSizing(placements:aspectRatio:crop:isPro:totalDuration:)` は
+// `TimelineCompositionBuilder+OutputSizing.swift` へ分けてある（`function_body_length` /
+// `file_length` 対策。`build` とこのファイルが上限に達したため）。

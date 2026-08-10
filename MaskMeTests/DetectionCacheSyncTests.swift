@@ -790,4 +790,125 @@ final class DetectionCacheSyncTests: XCTestCase {
         XCTAssertNil(model.regionSeedTask, "awaitRegionSeeding から戻ったのにタスクが残っている")
         XCTAssertNil(model.regionSeedProgress, "走査終了後も regionSeedProgress が nil に戻っていない")
     }
+
+    // MARK: - クリップ変形（拡大）と再検出（被覆台帳）
+
+    // `ClipTransform.scale > 1` はこのアプリで初めて「フレーム外への切り取り」を作る
+    // （従来の `AspectFit` は必ず内接で素材が切れなかった）。拡大中のライブ検出は
+    // フレーム外の顔を見られないので、そのバケットを素材全体まで「検出済み」と記録すると、
+    // 縮小に戻したときに `shouldDetectPreviewFrame` が永久にスキップし、端にいた顔が
+    // 素通しのまま固定される。判定は「記録済み可視領域 ⊇ いま見えている領域」で行う。
+
+    /// 拡大率 `scale` のクリップ変形が掛かった状態のレイアウト（配置は変形後の配置矩形）。
+    private func transformedLayout(clipID: UUID, scale: Double) -> TimelineRenderLayout {
+        TimelineRenderLayout(placements: [
+            clipID: ClipTransform(scale: scale).applied(to: TimelineRenderLayout.unitRect)
+        ])
+    }
+
+    /// **最重要（プライバシー）**: 拡大中に埋めたバケットは、縮小に戻したら再検出されること。
+    func test_拡大中に検出したバケットは縮小後に再検出される() {
+        let model = makeModel()
+        // `faceMosaicOn` は初期化直後 false（宣言時の既定 true とは別に init が倒す）。
+        // `shouldDetectPreviewFrame` の最初の guard で弾かれるので、明示的に立てる。
+        model.faceMosaicOn = true
+        let source = model.currentSourceID
+        let clip = TimelineClip(sourceID: source, sourceStart: 0, sourceEnd: 10)
+        model.setClipsForTesting([clip])
+        model.renderLayout = transformedLayout(clipID: clip.id, scale: 2)
+
+        XCTAssertTrue(model.shouldDetectPreviewFrame(at: 3.0), "前提が崩れている: まだ未検出のはず")
+        // 2 倍に拡大した状態でライブ検出が走り、そのバケットが埋まる
+        // （見えているのは素材中央の 1/2 × 1/2 だけ）。
+        model.storeLiveDetection(
+            LiveDetectionResult(faces: [fakeFace(cx: 0.5, cy: 0.5)], bridgedByFlow: false),
+            at: 3.0, source: UIImage(), generation: model.timelineGeneration)
+        XCTAssertFalse(model.shouldDetectPreviewFrame(at: 3.0),
+                       "同じ拡大率のままなのに再検出が走っている（毎フレーム再走査の退行）")
+
+        // 等倍へ戻す＝素材の端が新しく見えるようになった。
+        model.renderLayout = transformedLayout(clipID: clip.id, scale: 1)
+        XCTAssertTrue(model.shouldDetectPreviewFrame(at: 3.0),
+                      "縮小して新しく見えた領域が再検出されない（端の顔が素通しのまま固定される）")
+    }
+
+    /// 空エントリ（検出したが顔なし）でも同じであること。
+    /// 空エントリは `hasEntry` を真にしてライブ検出を永久停止させる力を持つので、
+    /// 被覆を無視すると最も重い形で穴になる。
+    func test_拡大中の空エントリも縮小後に再検出される() {
+        let model = makeModel()
+        // `faceMosaicOn` は初期化直後 false（宣言時の既定 true とは別に init が倒す）。
+        // `shouldDetectPreviewFrame` の最初の guard で弾かれるので、明示的に立てる。
+        model.faceMosaicOn = true
+        let source = model.currentSourceID
+        let clip = TimelineClip(sourceID: source, sourceStart: 0, sourceEnd: 10)
+        model.setClipsForTesting([clip])
+        model.renderLayout = transformedLayout(clipID: clip.id, scale: 3)
+
+        model.recordScannedEmptyForTesting(at: 3.0)
+        XCTAssertFalse(model.shouldDetectPreviewFrame(at: 3.0), "前提が崩れている: 空エントリが入っていない")
+
+        model.renderLayout = transformedLayout(clipID: clip.id, scale: 1)
+        XCTAssertTrue(model.shouldDetectPreviewFrame(at: 3.0),
+                      "拡大中の空エントリが縮小後も検出済み扱いされている（永久スキップ）")
+    }
+
+    /// **性能の回帰防止**: 拡大していく方向（可視領域が縮む方向）では再検出を要求しない。
+    /// ここが false にならないと、ピンチのたびに全編の再走査が走る。
+    func test_縮小方向への変形は再検出を要求しない() {
+        let model = makeModel()
+        // `faceMosaicOn` は初期化直後 false（宣言時の既定 true とは別に init が倒す）。
+        // `shouldDetectPreviewFrame` の最初の guard で弾かれるので、明示的に立てる。
+        model.faceMosaicOn = true
+        let source = model.currentSourceID
+        let clip = TimelineClip(sourceID: source, sourceStart: 0, sourceEnd: 10)
+        model.setClipsForTesting([clip])
+
+        // 等倍（素材全体が見えている）で検出済みにする。
+        model.renderLayout = transformedLayout(clipID: clip.id, scale: 1)
+        model.storeLiveDetection(
+            LiveDetectionResult(faces: [fakeFace(cx: 0.5, cy: 0.5)], bridgedByFlow: false),
+            at: 4.0, source: UIImage(), generation: model.timelineGeneration)
+
+        for scale in [1.5, 2.0, 4.0] {
+            model.renderLayout = transformedLayout(clipID: clip.id, scale: scale)
+            XCTAssertFalse(model.shouldDetectPreviewFrame(at: 4.0),
+                           "scale=\(scale)（可視領域が縮む方向）で再検出が走っている")
+        }
+
+        // 拡大中に書いたエントリも、さらに拡大する方向では再検出を要求しない。
+        model.renderLayout = transformedLayout(clipID: clip.id, scale: 2)
+        model.storeLiveDetection(
+            LiveDetectionResult(faces: [fakeFace(cx: 0.5, cy: 0.5)], bridgedByFlow: false),
+            at: 5.0, source: UIImage(), generation: model.timelineGeneration)
+        model.renderLayout = transformedLayout(clipID: clip.id, scale: 4)
+        XCTAssertFalse(model.shouldDetectPreviewFrame(at: 5.0),
+                       "拡大 → さらに拡大で再検出が走っている（ピンチのたびに全再走査になる）")
+    }
+
+    /// 既存挙動の不変: 無変形（従来のタイムライン）なら、一度検出したバケットは
+    /// 何度問い合わせても再検出しない。
+    func test_無変形のままなら従来どおり一度検出したら再検出しない() {
+        let model = makeModel()
+        // `faceMosaicOn` は初期化直後 false（宣言時の既定 true とは別に init が倒す）。
+        // `shouldDetectPreviewFrame` の最初の guard で弾かれるので、明示的に立てる。
+        model.faceMosaicOn = true
+        let source = model.currentSourceID
+        let clip = TimelineClip(sourceID: source, sourceStart: 0, sourceEnd: 10)
+        model.setClipsForTesting([clip])
+        // renderLayout は `.identity`（＝装着なし・全面）のまま＝従来のタイムライン。
+
+        XCTAssertTrue(model.shouldDetectPreviewFrame(at: 6.0))
+        model.storeLiveDetection(
+            LiveDetectionResult(faces: [fakeFace(cx: 0.5, cy: 0.5)], bridgedByFlow: false),
+            at: 6.0, source: UIImage(), generation: model.timelineGeneration)
+        for _ in 0..<5 {
+            XCTAssertFalse(model.shouldDetectPreviewFrame(at: 6.0),
+                           "無変形なのに再検出が走っている（毎フレーム全再走査の退行）")
+        }
+        // 明示的に無変形の配置（単位矩形）を入れても同じ。
+        model.renderLayout = transformedLayout(clipID: clip.id, scale: 1)
+        XCTAssertFalse(model.shouldDetectPreviewFrame(at: 6.0),
+                       "無変形の配置矩形を入れただけで再検出が走っている")
+    }
 }

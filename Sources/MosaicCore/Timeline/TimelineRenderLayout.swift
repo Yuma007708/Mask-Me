@@ -58,6 +58,31 @@ public enum ClipRenderTransform {
     }
 }
 
+/// クリップの表示サイズ・向き・出力枠・クロップから、配置矩形（`AspectFit.placement` に
+/// クロップを合成したもの）を作る**唯一の場所**。
+///
+/// 「fit → crop.expand」の合成をここへ閉じることで、アプリ層にも写真側にも同じ数式を
+/// 書き写させない。**クロップを実際の枠へ適用するときの正しい手順はここだけが知っている**
+/// （`CropRect.expand` の doc 参照——丸め前の生のクロップ矩形を分母に使うと、
+/// 偏差が偶数ピクセルへのスナップと食い違って 1px 以上ずれる）。
+public enum RenderPlacement {
+    /// - Parameters:
+    ///   - displaySize: `preferredTransform` 適用後・**向きを掛ける前**の素材表示サイズ。
+    ///   - orientation: クリップの向き（90 度回転 + 左右反転）。
+    ///   - frame: 出力枠（合成フレーム）のピクセルサイズ。
+    ///   - crop: 出力枠に対するクロップ。`.full` なら `AspectFit.placement` をそのまま返す
+    ///     （クロップ無しタイムラインの忠実度を保つ）。
+    public static func make(displaySize: CGSize, orientation: ClipOrientation,
+                            frame: CGSize, crop: CropRect) -> CGRect {
+        let oriented = orientation.displaySize(displaySize)
+        let fitted = AspectFit.placement(of: oriented, in: frame)
+        // 偶数スナップ込みの手順は `CropRect.expandSnapped` に実体化してある。
+        // **ここで手順を書き下さないこと。** 書き下すと同じ数式が 2 箇所になり、
+        // 片方だけ直る（この案件で色調補正が実際にそうなった）。
+        return crop.expandSnapped(fitted, inFrame: frame)
+    }
+}
+
 /// クリップ id → 合成フレーム内の配置（正規化矩形）。
 ///
 /// 検出キャッシュに入っている顔ランドマークは**素材フレーム基準**の正規化座標なので、
@@ -83,16 +108,32 @@ public struct TimelineRenderLayout: Equatable, Sendable {
     /// レターボックスの位置が合わず、映像とモザイクが食い違う。
     public let orientations: [UUID: ClipOrientation]
 
+    /// **静止画編集（時間軸なし）専用**の配置矩形・向き。既定は単位矩形・無変換。
+    ///
+    /// `ObjectMask.Anchor.isStill` のマスクは `clipID` を持たないため、`placements` /
+    /// `orientations`（クリップ id 引き）では表現できない。かといって
+    /// `placement(for: nil)` に静止画の値を返させると、動画経路で `clipID` の解決に
+    /// 失敗して `nil` が来たときに**静止画の配置を掴む**取り違えを作る
+    /// （`placement(for: nil)` の意味は「クリップが未登録＝単位矩形」のまま変えない）。
+    /// そのため専用のスロットを別に持つ。
+    public var stillPlacement: CGRect
+    public var stillOrientation: ClipOrientation
+
     /// 全クリップが合成フレーム全面（レターボックスなし）・無変換の恒等レイアウト。
     public static let identity = TimelineRenderLayout(placements: [:])
 
     public init(placements: [UUID: CGRect],
-                orientations: [UUID: ClipOrientation] = [:]) {
+                orientations: [UUID: ClipOrientation] = [:],
+                stillPlacement: CGRect = TimelineRenderLayout.unitRect,
+                stillOrientation: ClipOrientation = .identity) {
         self.placements = placements
         self.orientations = orientations
+        self.stillPlacement = stillPlacement
+        self.stillOrientation = stillOrientation
     }
 
-    /// クリップの配置矩形（未登録は単位矩形）。
+    /// クリップの配置矩形（未登録は単位矩形）。**`clipID: nil` は静止画の意味ではない**
+    /// （常に単位矩形。静止画の配置は `stillPlacement` / `remapStill` を使うこと）。
     public func placement(for clipID: UUID?) -> CGRect {
         guard let clipID, let rect = placements[clipID] else { return Self.unitRect }
         return rect
@@ -202,5 +243,48 @@ public struct TimelineRenderLayout: Equatable, Sendable {
                                  width: min(clipped.width / place.width, 1 - originX),
                                  height: min(clipped.height / place.height, 1 - originY))
         return orientation.inverseMap(inPlacement)
+    }
+
+    // MARK: - 静止画専用の写像
+
+    /// 素材フレーム基準の正規化矩形を、合成フレーム基準へ写す（静止画編集専用）。
+    /// `remap(_ rect:clipID:)` の静止画版で、`stillPlacement` / `stillOrientation` を使う。
+    public func remapStill(_ rect: CGRect) -> CGRect {
+        let oriented = stillOrientation.map(rect)
+        guard stillPlacement != Self.unitRect else { return oriented }
+        return CGRect(x: stillPlacement.minX + oriented.minX * stillPlacement.width,
+                      y: stillPlacement.minY + oriented.minY * stillPlacement.height,
+                      width: oriented.width * stillPlacement.width,
+                      height: oriented.height * stillPlacement.height)
+    }
+
+    /// `remapStill(_:)` の逆写像。挙動は `inverseRemap(_ rect:clipID:)` と同一
+    /// （はみ出しは配置矩形と交差させて切り落とす）で、`stillPlacement` / `stillOrientation`
+    /// を使う。
+    public func inverseRemapStill(_ rect: CGRect) -> CGRect? {
+        guard stillPlacement != Self.unitRect else { return stillOrientation.inverseMap(rect) }
+        guard stillPlacement.width > 0, stillPlacement.height > 0 else { return nil }
+        let clipped = rect.standardized.intersection(stillPlacement)
+        guard !clipped.isNull, clipped.width > 0, clipped.height > 0 else { return nil }
+        let originX = min(max((clipped.minX - stillPlacement.minX) / stillPlacement.width, 0), 1)
+        let originY = min(max((clipped.minY - stillPlacement.minY) / stillPlacement.height, 0), 1)
+        let inPlacement = CGRect(x: originX,
+                                 y: originY,
+                                 width: min(clipped.width / stillPlacement.width, 1 - originX),
+                                 height: min(clipped.height / stillPlacement.height, 1 - originY))
+        return stillOrientation.inverseMap(inPlacement)
+    }
+
+    /// 素材フレーム基準のピクセル空間の傾きを合成フレーム基準へ写す（静止画編集専用）。
+    /// `remapAngle(_:clipID:)` の静止画版。
+    public func remapStillAngle(_ angle: Double) -> Double {
+        guard !stillOrientation.isIdentity else { return angle }
+        return stillOrientation.mapAngle(angle)
+    }
+
+    /// `remapStillAngle(_:)` の逆写像。
+    public func inverseRemapStillAngle(_ angle: Double) -> Double {
+        guard !stillOrientation.isIdentity else { return angle }
+        return stillOrientation.inverseMapAngle(angle)
     }
 }

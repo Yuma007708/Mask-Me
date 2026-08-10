@@ -17,15 +17,18 @@ import SwiftUI
 /// 起きない枠は出ない**（そういう枠が 1 つでもあると、他の枠まで信用されなくなる）。
 struct FacePickOverlay: View {
     @ObservedObject var model: MosaicEditorModel
+    /// 画像・他オーバーレイと共有する換算。**ここでは作らない**——生成箇所は
+    /// `EditorView+Preview.swift` の 1 箇所だけにする（`.swiftlint.yml` の
+    /// `preview_geometry_single_construction` が番をしている）。
+    let geometry: PreviewImageGeometry
 
     var body: some View {
-        GeometryReader { geo in
-            let geometry = PreviewImageGeometry(containerSize: geo.size,
-                                                imageSize: model.previewImage?.size)
+        ZStack {
             ForEach(model.pickableFaces(at: model.compositionTimeForOverlay)) { face in
                 frame(for: face, in: geometry)
             }
         }
+        .frame(width: geometry.containerSize.width, height: geometry.containerSize.height)
         .allowsHitTesting(isActive)
         .opacity(isActive ? 1 : 0)
     }

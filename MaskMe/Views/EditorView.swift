@@ -27,8 +27,23 @@ struct EditorView: View {
     /// テキストの見た目設定シート（E3-3b）の提示対象。プレビュー上の選択から開く。
     /// **`private` にしないこと**（`model` と同じ理由。`EditorView+Preview.swift` が使う）。
     @State var textStyleItemID: UUID?
+    /// プレビューのピンチズーム／パンの状態機械。**`private` にしないこと**（`model` /
+    /// `textStyleItemID` と同じ理由。`EditorView+Preview.swift` が結線する）。
+    /// **`MosaicEditorModel` へは絶対に載せない**（理由は `.swiftlint.yml` の
+    /// `zoom_state_stays_out_of_the_model` のコメント参照）。
+    @State var zoomSession = PreviewZoomSession()
+    /// 「いま 2 本指ピンチが進行中か」。**`RectangleDrawingOverlay` の当たり判定を
+    /// 切る信号はこちらを使う**（`zoomSession.isActive` ではない）。`@GestureState` は
+    /// ジェスチャが（システムの割り込み等で）異常終了しても自動で `false` へ戻るが、
+    /// `zoomSession.isActive` は `began()`/`ended()` を手で呼んで管理する値なので、
+    /// `ended()` が呼ばれずに終わると立ちっぱなしになり、以後 1 本指編集が永久に
+    /// 効かなくなる。**`private` にしないこと**（`model` と同じ理由。
+    /// `EditorView+Preview.swift` が結線する）。
+    @GestureState var isPinchZooming = false
     /// 自動保存のデバウンス用タスク（最新 1 件のみ生かす）。
     @State private var autosaveTask: Task<Void, Never>?
+    /// 写真の色調補正シート（`TimelineColorGradeSheet`、動画側と共通）の提示条件。
+    @State private var showPhotoColorGradeSheet = false
 
     struct ResumeContext {
         let draftID: UUID
@@ -74,6 +89,12 @@ struct EditorView: View {
         .toolbar { toolbarContent }
         .task { loadMedia() }
         .overlay { exportOverlay }
+        .sheet(isPresented: $showPhotoColorGradeSheet) {
+            TimelineColorGradeSheet(
+                initialGrade: model.photoEdit.colorGrade,
+                onApply: { model.setPhotoColorGrade($0) },
+                onApplyToAll: { model.setPhotoColorGrade($0) })
+        }
         .onAppear {
             if model.mode == .photo { photoEditingActive = true }
         }
@@ -188,6 +209,9 @@ struct EditorView: View {
                     .transition(.move(edge: .bottom))
             }
 
+            // 色調補正（写真モード底上げ 第1段）。`EffectTabBar`（顔／背景の ON/OFF 効果）
+            // とは別の道具列として横並びに置く（`PhotoTool` の doc 参照）。
+            PhotoToolBar(model: model, showColorGradeSheet: $showPhotoColorGradeSheet)
             EffectTabBar(model: model)
         }
         .frame(maxWidth: .infinity)
@@ -393,7 +417,8 @@ extension EditorView {
                 backgroundBlockSize: model.backgroundBlockSize,
                 objectMasks: model.draftObjectMasks,
                 faceSelections: model.selectedFaceAnchors,
-                personProfiles: model.selectedPersonProfilesForDraft
+                personProfiles: model.selectedPersonProfilesForDraft,
+                photoEdit: model.photoEdit
             )
             photoEditingActive = true
         case .video:

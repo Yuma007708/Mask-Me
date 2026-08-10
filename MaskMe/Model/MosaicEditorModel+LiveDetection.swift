@@ -44,16 +44,41 @@ extension MosaicEditorModel {
     ///   （480px 簡易経路）の誤検知を消すため。空エントリは DetectionBridge が
     ///   無視するので追従率には影響せず、nearestCachedFaces のホールド抑止
     ///   （体への貼り付き防止）には効く。
+    /// - Note: プリスキャンは `AVAssetImageGenerator` で**素材フレームそのもの**を取り出す
+    ///   （合成フレームではない）。クリップの拡大・切り抜きに切り取られないので、
+    ///   被覆は常に素材全体（`DetectionCoverage.full`）を主張してよい。
     func storePreScanResult(_ faces: [FaceLandmarkSet], at rawTime: Double) {
         let (sourceID, sourceTime) = resolveSourceTime(atComposition: rawTime)
-        cacheStore.store(faces, sourceID: sourceID, time: sourceTime)
+        cacheStore.store(faces, sourceID: sourceID, time: sourceTime,
+                         visibleRect: DetectionCoverage.full)
+    }
+
+    /// **いまプレビューで素材のどの範囲が見えているか**（素材正規化座標）。
+    ///
+    /// ライブ検出は `videoComposition` を装着した合成フレームを見るので、クリップを拡大
+    /// （`ClipTransform.scale > 1`）すると**フレーム外へ切り取られた領域の顔は見えない**。
+    /// 見えていない範囲まで「検出済み」と記録すると、縮小に戻したときに
+    /// `shouldDetectPreviewFrame` がそのバケットを永久にスキップし、端にいた顔が
+    /// 素通しのまま固定される。そこで検出エントリにこの矩形を被覆として添えて記録し、
+    /// 判定は `DetectionCacheStore.hasEntry(sourceID:time:covering:)` で行う。
+    ///
+    /// **向き（`ClipOrientation`）を戻すこと。** 可視領域は出力座標系の配置矩形から
+    /// 求まるが、検出キャッシュ（＝被覆の比較相手）は**素材座標**である。向きを戻さないと、
+    /// 90 度回した状態で拡大したときに被覆が素材上の別の場所を指す。
+    func visibleSourceRect(forClip clipID: UUID?) -> CGRect {
+        let visible = ClipTransform.visibleSourceRect(placement: renderLayout.placement(for: clipID))
+        let orientation = renderLayout.orientation(for: clipID)
+        guard !orientation.isIdentity else { return visible }
+        return orientation.inverseMap(visible)
     }
 
     /// テスト専用: 「この時刻（合成時刻）をスキャンしたが顔は無かった」状態を再現する。
     /// ライブ検出の空エントリ記録（storeLiveDetection）と同じ意味のキャッシュ状態を作る。
+    /// 被覆（`visibleSourceRect(forClip:)`）も本番と同じく現在の見え方で記録する。
     func recordScannedEmptyForTesting(at timeSec: Double) {
-        let (sourceID, sourceTime) = resolveSourceTime(atComposition: timeSec)
-        cacheStore.store([], sourceID: sourceID, time: sourceTime)
+        let resolved = resolveSourceLocation(atComposition: timeSec)
+        cacheStore.store([], sourceID: resolved.sourceID, time: resolved.time,
+                         visibleRect: visibleSourceRect(forClip: resolved.clipID))
     }
 
     /// 動画読み込み・顔追加時にライブ検出の集計状態をリセットする。
@@ -92,11 +117,18 @@ extension MosaicEditorModel {
     /// 再検出が要る」ことになる。この契約は
     /// `TimelineEditingModelTests.test_shouldDetectPreviewFrame_ignoresApplyRangeGate` が
     /// 固定している（冒頭に `guard isMosaicActive(...)` を足すと落ちる）。
+    ///
+    /// **「エントリがあるか」だけで判定してはならない（被覆）。** クリップの拡大
+    /// （`ClipTransform.scale > 1`）はフレーム外への切り取りを作るため、拡大中に書いた
+    /// エントリは素材の端を見ていない。縮小に戻したときに再検出させるため、
+    /// 判定は「記録済み可視領域 ⊇ いま見えている領域」で行う
+    /// （`visibleSourceRect(forClip:)` / `DetectionCoverage` の doc 参照）。
     func shouldDetectPreviewFrame(at timeSec: Double) -> Bool {
         guard mode == .video, faceMosaicOn, !liveDetectionInFlight else { return false }
         guard mapping.sourceLocations(at: timeSec).count < 2 else { return false }
-        let (sourceID, sourceTime) = resolveSourceTime(atComposition: timeSec)
-        return !cacheStore.hasEntry(sourceID: sourceID, time: sourceTime)
+        let resolved = resolveSourceLocation(atComposition: timeSec)
+        return !cacheStore.hasEntry(sourceID: resolved.sourceID, time: resolved.time,
+                                    covering: visibleSourceRect(forClip: resolved.clipID))
     }
 
     /// プレビューのデコード済みフレーム（検出用に縮小済み CGImage）を受け取り、
@@ -200,7 +232,9 @@ extension MosaicEditorModel {
         // 合成 → 素材。`liveFlowCache` も `cacheStore` と同じ座標系でなければならない
         // （`lookupFaces` は両者を同列に返し、呼び出し側は区別せず `remap` を掛ける）。
         let sourceFaces = renderLayout.inverseRemap(detection.faces, clipID: resolved.clipID)
-        cacheStore.store([], sourceID: sourceID, time: sourceTime)
+        // 被覆は**この検出が見ていた範囲**（拡大中はフレーム外が欠ける）。
+        cacheStore.store([], sourceID: sourceID, time: sourceTime,
+                         visibleRect: visibleSourceRect(forClip: resolved.clipID))
         liveFlowCache[DetectionCacheKey(sourceID: sourceID, time: sourceTime, bucketFPS: liveBucketFPS)] =
             sourceFaces
         #if DEBUG
@@ -267,7 +301,11 @@ extension MosaicEditorModel {
         // 「体にモザイクが乗る／モザイクがずれる」誤描画になる。また、空を記録する
         // ことで shouldDetectPreviewFrame が同じ顔なしフレームを再スキャンし続ける
         // 無駄も止まる（DetectionBridge / nearestCachedFaces は空エントリを無視する）。
-        cacheStore.store(sourceFaces, sourceID: sourceID, time: sourceTime)
+        // **被覆（そのとき見えていた素材範囲）を必ず添えて書く。** 拡大中の検出は
+        // フレーム外の顔を見ていないので、素材全体を検出済みと主張してはならない
+        // （縮小に戻したときに再検出させるため。`visibleSourceRect(forClip:)` の doc 参照）。
+        cacheStore.store(sourceFaces, sourceID: sourceID, time: sourceTime,
+                         visibleRect: visibleSourceRect(forClip: resolved.clipID))
         // 署名は顔と**同じ瞬間・同じキー**でしか書かない（添字がずれると別人の署名で
         // 判定してしまう）。件数が合わない呼び出しは `FaceSignatureCache` 側が弾く。
         // 署名は**素材座標の顔**に結ぶ（`FaceSignatureSample.centroid` の doc どおり）。

@@ -14,8 +14,8 @@ public enum TimelineEditOperations {
     ///
     /// 分割点の素材時刻 m により [sourceStart, m) と [m, sourceEnd) に分け、
     /// 前半は元クリップの `id` を維持、後半は新しい `id` を持つ。
-    /// 両者は同じ `sourceID`・`rate`・`originalAudioVolume`・`orientation` を引き継ぐ
-    /// （素材基準の検出キャッシュを分割後も共有するため）。
+    /// 両者は同じ `sourceID`・`rate`・`originalAudioVolume`・`orientation`・`colorGrade`・
+    /// `transform` を引き継ぐ（素材基準の検出キャッシュを分割後も共有するため）。
     ///
     /// **`orientation` の引き継ぎを落とさないこと。** 落とすと「回した動画を分割したら
     /// 後半だけ向きが戻る」だけでなく、後半の顔・矩形モザイクの写像も変わるため、
@@ -42,7 +42,8 @@ public enum TimelineEditOperations {
                                 originalAudioVolume: clip.originalAudioVolume,
                                 rate: clip.rate,
                                 orientation: clip.orientation,
-                                colorGrade: clip.colorGrade)
+                                colorGrade: clip.colorGrade,
+                                transform: clip.transform)
         var result = clips
         result.replaceSubrange(index...index, with: [front, back])
         return result
@@ -143,19 +144,33 @@ public enum TimelineEditOperations {
         return result
     }
 
+    /// 指定したクリップの変形（拡大縮小・位置）を設定する。
+    ///
+    /// クランプは `ClipTransform` 自身が担うので、ここでは代入するだけでよい。
+    /// 成功時、素材使用範囲・倍率・音量・向き・色調補正と他クリップは保存される
+    /// （合成尺は変わらない）。`clipID` が見つからない場合は元の配列を返す
+    /// （`setRate` と同じ契約）。
+    public static func setTransform(clips: [TimelineClip], clipID: UUID,
+                                    transform: ClipTransform) -> [TimelineClip] {
+        guard let index = clips.firstIndex(where: { $0.id == clipID }) else { return clips }
+        var result = clips
+        result[index].transform = transform
+        return result
+    }
+
     /// 指定したクリップを複製し、複製先を元クリップの**直後**に挿入する。
     ///
     /// 複製先は新規発番の `id` を持ち、`sourceID`・`sourceStart`・`sourceEnd`・
-    /// `rate`・`originalAudioVolume`・`orientation`・`colorGrade` は元クリップと同じ値を
-    /// 引き継ぐ（素材使用範囲・速度・音量・向き・色調補正の設定を引き継ぐ、という
-    /// 一般的な編集アプリの挙動）。`clipID` が見つからない場合は元の配列を返す
-    /// （他の編集操作と同じ「失敗時は無変更」契約）。
+    /// `rate`・`originalAudioVolume`・`orientation`・`colorGrade`・`transform` は
+    /// 元クリップと同じ値を引き継ぐ（素材使用範囲・速度・音量・向き・色調補正・変形の
+    /// 設定を引き継ぐ、という一般的な編集アプリの挙動）。`clipID` が見つからない場合は
+    /// 元の配列を返す（他の編集操作と同じ「失敗時は無変更」契約）。
     ///
     /// **クリップに設定項目を足したら、ここへ足すのを忘れないこと。** 複製と向きは
     /// 別々の機能として実装されたため、マージした時点では `orientation` が引き継がれず、
     /// 回したクリップを複製すると複製先だけ向きが戻っていた（`split` は
-    /// 引き継いでいたので、複製だけが漏れていた）。`colorGrade` も同じ前科を踏まないよう
-    /// 最初から明示的に列挙してある。
+    /// 引き継いでいたので、複製だけが漏れていた）。`colorGrade` / `transform` も
+    /// 同じ前科を踏まないよう最初から明示的に列挙してある。
     public static func duplicate(clips: [TimelineClip], clipID: UUID) -> [TimelineClip] {
         guard let index = clips.firstIndex(where: { $0.id == clipID }) else { return clips }
         let original = clips[index]
@@ -165,7 +180,8 @@ public enum TimelineEditOperations {
                                 originalAudioVolume: original.originalAudioVolume,
                                 rate: original.rate,
                                 orientation: original.orientation,
-                                colorGrade: original.colorGrade)
+                                colorGrade: original.colorGrade,
+                                transform: original.transform)
         var result = clips
         result.insert(copy, at: index + 1)
         return result
