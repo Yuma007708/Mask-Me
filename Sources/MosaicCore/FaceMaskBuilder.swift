@@ -101,6 +101,7 @@ public struct FaceMaskBuilder: Sendable {
                   ) else {
                 return false
             }
+            Self.flipToTopDown(context, height: height)
             let size = CGSize(width: width, height: height)
             for region in regionPaths(for: landmarks, in: size) {
                 context.addPath(region.path)
@@ -149,6 +150,7 @@ public struct FaceMaskBuilder: Sendable {
                   ) else {
                 return false
             }
+            Self.flipToTopDown(context, height: height)
             for face in facesWithDilation {
                 let paths = regionPaths(for: face.landmarks, in: size,
                                         dilationOverride: face.dilation)
@@ -166,6 +168,24 @@ public struct FaceMaskBuilder: Sendable {
             return true
         }
         return success ? (bytes, bytesPerRow) : nil
+    }
+
+    /// マスク用 `CGContext` の座標系を **y-down（左上原点）** へ揃える。
+    ///
+    /// **これが無いとマスクが上下反転する。** `CGContext` の原点は左下だが、
+    /// このマスクに描くパスはすべて y-down の正規化座標にピクセル寸法を掛けただけ
+    /// （`rectPath` / `FaceLandmarks.point(in:)` のどちらも y を反転しない）。
+    /// 一方で消費側は完全に y-down——`MosaicRenderer` はバイト行 0 をテクスチャ行 0 へ
+    /// `replace` し、シェーダーは `uv = (gid + 0.5) / size` で同じ行を引く。
+    ///
+    /// 反転すると「ユーザーが囲った場所と隠れる場所が上下で入れ替わる」。
+    /// 実際に次の 3 つが露出していた（手動矩形／部分メッシュの顔／カメラのフロー
+    /// 外挿中の顔——`CameraMosaicPipeline` が `forceConvexHull` でこの経路へ降格させる）。
+    /// フルメッシュの顔だけが無事だったのは、`FaceMeshMosaicRenderer` が正規化座標を
+    /// そのまま UV としてシェーダーへ渡し、`CGContext` を通らないため。
+    private static func flipToTopDown(_ context: CGContext, height: Int) {
+        context.translateBy(x: 0, y: CGFloat(height))
+        context.scaleBy(x: 1, y: -1)
     }
 
     /// 正規化矩形（0-1）をピクセル座標の CGPath に変換する。
