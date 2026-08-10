@@ -21,6 +21,7 @@ struct CropSheet: View {
                     Text("選び直すと、いまの枠の中心を保ったまま最大の大きさへ調整されます。")
                 }
             }
+            .appSheetBackground()
             .navigationTitle("クロップ比率")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {

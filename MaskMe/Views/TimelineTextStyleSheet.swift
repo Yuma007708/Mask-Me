@@ -71,6 +71,7 @@ struct TimelineTextStyleSheet: View {
             }
             .padding(24)
         }
+        .appSheetBackground()
         .presentationDetents(role == .sticker ? [.height(420)] : [.height(620), .large])
     }
 

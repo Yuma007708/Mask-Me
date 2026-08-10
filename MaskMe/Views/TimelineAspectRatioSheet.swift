@@ -28,6 +28,7 @@ struct TimelineAspectRatioSheet: View {
                          + "（余白は黒帯になります）。")
                 }
             }
+            .appSheetBackground()
             .navigationTitle("画面比率")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {

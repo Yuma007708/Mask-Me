@@ -88,6 +88,11 @@ struct EditorView: View {
             }
             dock
         }
+        // **画面の地はアプリと同じ濃紺**（`AppTheme` の型 doc 参照）。ここを黒のままに
+        // すると、ホームは濃紺・編集画面だけ黒という段差が出る。プレビューの中
+        // （`EditorView+Preview.swift` の `Color.black`）は黒のままでよい——あちらは
+        // 映像の周りの余白で、映像の色を正しく見るための地。
+        .background(AppTheme.background.ignoresSafeArea())
         .navigationTitle(model.mode == .photo ? "写真編集" : "動画編集")
         .navigationBarTitleDisplayMode(.inline)
         .navigationBarBackButtonHidden(true)

@@ -104,6 +104,7 @@ struct TimelineColorGradeSheet: View {
                 .buttonStyle(.borderedProminent)
         }
         .padding(24)
+        .appSheetBackground()
         .presentationDetents([.height(560)])
     }
 

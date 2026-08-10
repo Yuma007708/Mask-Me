@@ -240,6 +240,7 @@ struct TimelineVolumeSheet: View {
                 .buttonStyle(.borderedProminent)
         }
         .padding(24)
+        .appSheetBackground()
         .presentationDetents([.height(sheetHeight)])
     }
 

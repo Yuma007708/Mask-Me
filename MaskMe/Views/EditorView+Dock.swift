@@ -30,7 +30,7 @@ extension EditorView {
                 CropControlBar(model: model)
                     .frame(height: 52)
                     .frame(maxWidth: .infinity)
-                    .background(Color.black)
+                    .background(AppTheme.surfaceDim)
             } else {
                 photoDock
             }

@@ -14,6 +14,7 @@ struct SettingsView: View {
                 parametersSection
                 resetSection
             }
+            .appSheetBackground()
             .navigationTitle("設定")
             .navigationBarTitleDisplayMode(.large)
         }

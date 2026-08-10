@@ -15,7 +15,7 @@ struct VideoControlsView: View {
             // この下が `EditorDockView`（唯一のツールバー）で、画面の最下段になる。
             VideoTimelineView(model: model)
         }
-        .background(.black.opacity(0.35))
+        .background(AppTheme.surfaceDim)
     }
 
     /// 再生行。**時刻行と再生行を 1 段に統合**してある（約 20pt の回収）。
