@@ -91,6 +91,8 @@ public struct TimelineSelection: Equatable, Sendable {
             switch layer.kind {
             case .mosaic:
                 stillExists = state.applyRanges.contains { $0.id == layer.id }
+            case .audio:
+                stillExists = state.audioItems.contains { $0.id == layer.id }
             }
             if !stillExists { self.layer = nil }
         }

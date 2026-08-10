@@ -24,6 +24,12 @@ enum TimelinePalette {
         Color.accentColor.opacity(isSelected ? 0.9 : 0.55)
     }
 
+    /// BGM（E2）。**モザイクと明確に違う色にする**。同じ段の仕組みに乗るので、
+    /// 色だけが「どちらの帯を掴んでいるか」の手がかりになる。
+    static func audioFill(isSelected: Bool) -> Color {
+        Color(red: 0.35, green: 0.72, blue: 0.55).opacity(isSelected ? 0.95 : 0.6)
+    }
+
     /// 編集の目印（継ぎ目ボタン・キーフレーム）。
     static let structure = Color(red: 1.0, green: 0.78, blue: 0.35)
 

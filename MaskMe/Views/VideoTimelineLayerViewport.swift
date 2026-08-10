@@ -70,9 +70,26 @@ extension VideoTimelineView {
                     .accessibilityElement(children: .contain)
                     .accessibilityIdentifier("timeline.applyTrack")
             }
-        case .audio, .text:
-            // **器だけ。** 中身（音声の取り込み・テキストの描画）は未実装なので
-            // 押しても何もしない。段を出すのは「ここに置ける」を見せるため。
+        case .audio:
+            if audioSpans.isEmpty {
+                // 空段を押したら音楽ファイルを選ぶ（`.mosaic` と同じ「押せば置ける」）。
+                TimelineEmptyLayerRow(kind: .audio, width: contentWidth) {
+                    showAudioPicker = true
+                }
+            } else {
+                TimelineLayerTrackView(
+                    geometry: geometry, spans: audioSpans, totalDuration: totalDuration,
+                    layouts: clipLayouts, playheadTime: playheadTime,
+                    trimPreviewRelay: trimPreviewRelay,
+                    selectedRangeID: rangeSelection, onCommit: commit,
+                    onVerticalDrag: updateLayerScroll(translationHeight:),
+                    onVerticalDragEnded: endLayerScrollDrag)
+                    .accessibilityElement(children: .contain)
+                    .accessibilityIdentifier("timeline.audioTrack")
+            }
+        case .text:
+            // **器だけ。** テキストの描画は E3。押しても何もしない
+            // （押せる見た目のまま無反応にすると「壊れている」と読まれる）。
             TimelineEmptyLayerRow(kind: kind, width: contentWidth, onTap: nil)
         }
     }

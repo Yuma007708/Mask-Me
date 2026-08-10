@@ -186,7 +186,12 @@ extension MosaicEditorModel {
         guard let clipSpan = mapping.clipSpans.first(where: { $0.clip.id == clip.id }) else { return false }
         let allSpans: [TimelineApplySpan] = TimelineBandLayout.applySpans(
             ranges: effectiveApplyRanges, mapping: mapping, photoSourceIDs: timeline.photoSourceIDs)
-        let clipSpans: [TimelineApplySpan] = allSpans.filter { $0.clipID == clip.id }
+        // `applySpans` の結果はすべて `.mosaic`（`anchorClipID` は非 nil）だが、
+        // 被覆の判定に BGM が紛れ込むことは絶対に避けたいので種でも絞る。
+        // **モザイクの被覆を「何かの帯があるか」で測らない**（`testing.md` の教訓）。
+        let clipSpans: [TimelineApplySpan] = allSpans.filter {
+            $0.kind == .mosaic && $0.anchorClipID == clip.id
+        }
         let spans: [TimelineApplySpan] = clipSpans.sorted { $0.start < $1.start }
         guard !spans.isEmpty else { return false }
         var coveredEnd = clipSpan.start

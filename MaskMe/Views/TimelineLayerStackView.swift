@@ -13,7 +13,7 @@ enum TimelineLayerRowKind: String, CaseIterable, Identifiable {
     /// 識別子（`timeline.layer.mosaic.empty` 等）の素で、UI テストが掴んでいる。
     /// 帯の名前が「エフェクト」に変わったのは見え方の話なので、識別子は動かさない。
     case mosaic
-    /// BGM・効果音。**まだ器だけ**（音声の取り込みは未実装）。
+    /// BGM・効果音（E2 で実装済み）。
     case audio
     /// 画面に置く文字。**まだ器だけ**。
     case text
@@ -50,8 +50,8 @@ enum TimelineLayerRowKind: String, CaseIterable, Identifiable {
     /// （押せる見た目のまま無反応にすると「壊れている」と読まれる）。
     var isImplemented: Bool {
         switch self {
-        case .mosaic: return true
-        case .audio, .text: return false
+        case .mosaic, .audio: return true
+        case .text: return false
         }
     }
 }

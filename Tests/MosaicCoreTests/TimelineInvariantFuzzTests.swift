@@ -8,27 +8,36 @@ import XCTest
 /// （例: トランジションを設定してから rate を 10 倍にしてクリップを縮める、
 /// 分割してから並べ替えて写真をトリムする）に条件が破れる経路は、
 /// 組み合わせを実際に踏まないと出てこない。
-final class TimelineInvariantFuzzTests: XCTestCase {
-    /// 決定的な線形合同法（seed を変えれば別系列。失敗時は seed を報告する）。
-    private struct Random {
-        private var state: UInt64
-        init(seed: UInt64) { state = seed &* 6_364_136_223_846_793_005 &+ 1 }
-        mutating func next(_ upperBound: Int) -> Int {
-            state = state &* 6_364_136_223_846_793_005 &+ 1_442_695_040_888_963_407
-            return Int((state >> 33) % UInt64(max(1, upperBound)))
-        }
-        mutating func double(_ range: ClosedRange<Double>) -> Double {
-            state = state &* 6_364_136_223_846_793_005 &+ 1_442_695_040_888_963_407
-            let unit = Double((state >> 11) % 1_000_000) / 1_000_000
-            return range.lowerBound + unit * (range.upperBound - range.lowerBound)
-        }
+/// 決定的な線形合同法（seed を変えれば別系列。失敗時は seed を報告する）。
+///
+/// **テストクラスの外に置いてある**のは、クラス本体の行数が SwiftLint の
+/// `type_body_length` を超えたため。中身は乱数だけで、テストの意味には関わらない。
+private struct Random {
+    private var state: UInt64
+    init(seed: UInt64) { state = seed &* 6_364_136_223_846_793_005 &+ 1 }
+    mutating func next(_ upperBound: Int) -> Int {
+        state = state &* 6_364_136_223_846_793_005 &+ 1_442_695_040_888_963_407
+        return Int((state >> 33) % UInt64(max(1, upperBound)))
     }
+    mutating func double(_ range: ClosedRange<Double>) -> Double {
+        state = state &* 6_364_136_223_846_793_005 &+ 1_442_695_040_888_963_407
+        let unit = Double((state >> 11) % 1_000_000) / 1_000_000
+        return range.lowerBound + unit * (range.upperBound - range.lowerBound)
+    }
+}
 
+final class TimelineInvariantFuzzTests: XCTestCase {
     /// `validate()` が見ていない写像側の不変条件も含めて総点検する。
     private func assertInvariants(_ state: TimelineState, step: Int, seed: UInt64, op: String) {
         let context = "seed=\(seed) step=\(step) op=\(op)"
         XCTAssertTrue(state.validate(), "validate() が false: \(context)")
+        assertTransitionAndMappingInvariants(state, context: context)
+        assertApplyRangeInvariants(state, context: context)
+        assertAudioInvariants(state, context: context)
+    }
 
+    /// トランジション・合成尺・クリップ配置。
+    private func assertTransitionAndMappingInvariants(_ state: TimelineState, context: String) {
         // トランジションのキーは実在する非末尾クリップで、長さは両隣の半分以下。
         for (key, spec) in state.transitions {
             guard let index = state.clips.firstIndex(where: { $0.id == key }) else {
@@ -74,7 +83,10 @@ final class TimelineInvariantFuzzTests: XCTestCase {
             XCTAssertLessThanOrEqual(span.start, cursor + 1e-9, "クリップ配置に隙間: \(context)")
             cursor = max(cursor, span.end)
         }
+    }
 
+    /// 適用区間（素材時刻アンカー）。
+    private func assertApplyRangeInvariants(_ state: TimelineState, context: String) {
         // 適用区間は生きているクリップだけを指し、写真は必ず [0, ...) から始まること。
         let clipIDs = Set(state.clips.map(\.id))
         let photoSourceIDs = state.photoSourceIDs
@@ -105,12 +117,108 @@ final class TimelineInvariantFuzzTests: XCTestCase {
         }
     }
 
+    /// BGM（合成時刻アンカー）。
+    ///
+    /// 生データは合成尺の外にあってよい（温存の規則）が、
+    /// **実効（`effectiveAudioItems`）は必ず尺の内側に収まる**。ここが破れると
+    /// composition の `insertTimeRange` がタイムラインの外へ挿入しにいく。
+    private func assertAudioInvariants(_ state: TimelineState, context: String) {
+        let totalDuration = state.mapping.totalDuration
+        for item in state.effectiveAudioItems(totalDuration: totalDuration) {
+            XCTAssertGreaterThanOrEqual(item.compositionStart, -1e-9,
+                                        "実効 BGM が負の時刻から始まっている: \(context)")
+            XCTAssertLessThanOrEqual(item.compositionEnd, totalDuration + 1e-9,
+                                     "実効 BGM が合成尺をはみ出している: \(context)")
+            XCTAssertGreaterThanOrEqual(item.sourceStart, -1e-9,
+                                        "実効 BGM の素材時刻が負: \(context)")
+            XCTAssertGreaterThanOrEqual(item.duration, AudioItem.minimumDuration - 1e-9,
+                                        "実効 BGM が最小長を下回っている: \(context)")
+        }
+    }
+
     /// 1 手ぶんの編集操作（名前つき）。switch を巨大化させず、操作の追加も
     /// この配列に 1 行足すだけで済むようにテーブルで持つ。
     private typealias EditOp = (name: String,
                                 apply: (TimelineState, UUID?, inout Random) -> TimelineState)
 
-    private func editOperations(videoSources: [UUID], photoSource: UUID) -> [EditOp] {
+    private func editOperations(videoSources: [UUID], photoSource: UUID,
+                                audioSource: UUID) -> [EditOp] {
+        clipOperations(videoSources: videoSources, photoSource: photoSource)
+            + applyRangeOperations()
+            + audioOperations(audioSource: audioSource)
+    }
+
+    /// モザイク適用区間（素材時刻アンカー）の操作。
+    private func applyRangeOperations() -> [EditOp] {
+        [
+            ("applyRange", { state, _, random in
+                let total = max(0.1, state.mapping.totalDuration)
+                let from = random.double(0...total)
+                return state.addingApplyRange(fromCompositionTime: from,
+                                              to: random.double(from...total))
+            }),
+            ("moveApplyRange", { state, _, random in
+                guard !state.applyRanges.isEmpty else { return state }
+                let target = state.applyRanges[random.next(state.applyRanges.count)]
+                return state.movingApplyRange(id: target.id, clipID: target.clipID,
+                                              byCompositionDelta: random.double(-6...6))
+            }),
+            ("replaceApplyRange", { state, _, random in
+                guard !state.applyRanges.isEmpty else { return state }
+                let target = state.applyRanges[random.next(state.applyRanges.count)]
+                let total = max(0.1, state.mapping.totalDuration)
+                let from = random.double(0...total)
+                let interval = CompositionInterval(start: from, end: random.double(from...total))
+                return state.replacingApplyRange(id: target.id, clipID: target.clipID,
+                                                 compositionInterval: interval)
+            }),
+            ("removeApplyRange", { state, _, random in
+                guard !state.applyRanges.isEmpty else { return state }
+                let target = state.applyRanges[random.next(state.applyRanges.count)]
+                return state.removingApplyRange(id: target.id)
+            })
+        ]
+    }
+
+    /// BGM（合成時刻アンカー）の操作。
+    private func audioOperations(audioSource: UUID) -> [EditOp] {
+        [
+            ("addAudio", { state, _, random in
+                let total = max(0.1, state.mapping.totalDuration)
+                return state.addingAudioItem(sourceID: audioSource,
+                                             sourceDuration: random.double(0.05...12),
+                                             atCompositionTime: random.double(0...total))
+            }),
+            ("removeAudio", { state, _, random in
+                guard !state.audioItems.isEmpty else { return state }
+                return state.removingAudioItem(
+                    id: state.audioItems[random.next(state.audioItems.count)].id)
+            }),
+            ("moveAudio", { state, _, random in
+                guard !state.audioItems.isEmpty else { return state }
+                let target = state.audioItems[random.next(state.audioItems.count)]
+                return state.movingAudioItem(id: target.id,
+                                             byCompositionDelta: random.double(-8...8))
+            }),
+            ("trimAudio", { state, _, random in
+                guard !state.audioItems.isEmpty else { return state }
+                let target = state.audioItems[random.next(state.audioItems.count)]
+                return state.trimmingAudioItem(
+                    id: target.id, edge: random.next(2) == 0 ? .start : .end,
+                    byCompositionDelta: random.double(-6...6),
+                    sourceDuration: random.double(0.05...20))
+            }),
+            ("audioVolume", { state, _, random in
+                guard !state.audioItems.isEmpty else { return state }
+                let target = state.audioItems[random.next(state.audioItems.count)]
+                return state.settingAudioVolume(id: target.id,
+                                                volume: Float(random.double(-0.5...1.5)))
+            })
+        ]
+    }
+
+    /// クリップ列そのものを変える操作。
+    private func clipOperations(videoSources: [UUID], photoSource: UUID) -> [EditOp] {
         [
             ("split", { state, _, random in
                 state.splitting(at: random.double(0...max(0.1, state.mapping.totalDuration)))
@@ -149,32 +257,6 @@ final class TimelineInvariantFuzzTests: XCTestCase {
                 guard let pick else { return state }
                 return state.removingTransition(afterClipID: pick)
             }),
-            ("applyRange", { state, _, random in
-                let total = max(0.1, state.mapping.totalDuration)
-                let from = random.double(0...total)
-                return state.addingApplyRange(fromCompositionTime: from,
-                                              to: random.double(from...total))
-            }),
-            ("moveApplyRange", { state, _, random in
-                guard !state.applyRanges.isEmpty else { return state }
-                let target = state.applyRanges[random.next(state.applyRanges.count)]
-                return state.movingApplyRange(id: target.id, clipID: target.clipID,
-                                              byCompositionDelta: random.double(-6...6))
-            }),
-            ("replaceApplyRange", { state, _, random in
-                guard !state.applyRanges.isEmpty else { return state }
-                let target = state.applyRanges[random.next(state.applyRanges.count)]
-                let total = max(0.1, state.mapping.totalDuration)
-                let from = random.double(0...total)
-                let interval = CompositionInterval(start: from, end: random.double(from...total))
-                return state.replacingApplyRange(id: target.id, clipID: target.clipID,
-                                                 compositionInterval: interval)
-            }),
-            ("removeApplyRange", { state, _, random in
-                guard !state.applyRanges.isEmpty else { return state }
-                let target = state.applyRanges[random.next(state.applyRanges.count)]
-                return state.removingApplyRange(id: target.id)
-            }),
             ("appendPhoto", { state, _, random in
                 state.appending(
                     clip: TimelineClip(sourceID: photoSource, sourceStart: 0,
@@ -196,13 +278,16 @@ final class TimelineInvariantFuzzTests: XCTestCase {
     func test_randomEditSequences_neverBreakInvariants() {
         let videoSources = (0..<3).map { _ in UUID() }
         let photoSource = UUID()
-        let operations = editOperations(videoSources: videoSources, photoSource: photoSource)
+        let audioSource = UUID()
+        let operations = editOperations(videoSources: videoSources, photoSource: photoSource,
+                                        audioSource: audioSource)
         var operationCounts: [String: Int] = [:]
 
         for seed in UInt64(1)...12 {
             var random = Random(seed: seed)
-            var sources: [UUID: TimelineSource] = [photoSource: TimelineSource(id: photoSource,
-                                                                               kind: .photo)]
+            var sources: [UUID: TimelineSource] = [
+                photoSource: TimelineSource(id: photoSource, kind: .photo),
+                audioSource: TimelineSource(id: audioSource, kind: .audio)]
             for id in videoSources { sources[id] = TimelineSource(id: id, kind: .video) }
             var state = TimelineState(
                 clips: [TimelineClip(sourceID: videoSources[0], sourceStart: 0, sourceEnd: 8)],
@@ -238,40 +323,53 @@ final class TimelineInvariantFuzzTests: XCTestCase {
         state = state.replacingApplyRangesForTest(
             MosaicApplyGate.fullCoverRanges(for: state.clips, photoSourceIDs: state.photoSourceIDs))
 
+        let audioSource = UUID()
+        state.sources[audioSource] = TimelineSource(id: audioSource, kind: .audio)
+
         for step in 0..<120 {
-            switch random.next(6) {
-            case 5:
-                // 区間の移動（本体ドラッグの確定）も往復に含める。素材時刻アンカーが
-                // 移動後も正しく書き戻っていなければ、ここで往復が壊れる。
-                if let target = state.applyRanges.first {
-                    state = state.movingApplyRange(id: target.id, clipID: target.clipID,
-                                                   byCompositionDelta: random.double(-3...3))
-                }
-            case 0: state = state.splitting(at: random.double(0...max(0.1, state.mapping.totalDuration)))
-            case 1:
-                state = state.appending(
-                    clip: TimelineClip(sourceID: photoSource, sourceStart: 0,
-                                       sourceEnd: random.double(0.5...15)),
-                    source: TimelineSource(id: photoSource, kind: .photo))
-            case 2:
-                if let id = state.clips.last?.id {
-                    state = state.settingRate(clipID: id, rate: random.double(0.1...10))
-                }
-            case 3:
-                if state.clips.count > 1, let id = state.clips.first?.id {
-                    state = state.settingTransition(afterClipID: id, kind: .crossfade,
-                                                    duration: random.double(0.1...2))
-                }
-            default:
-                let total = max(0.1, state.mapping.totalDuration)
-                let from = random.double(0...total)
-                state = state.addingApplyRange(fromCompositionTime: from,
-                                               to: random.double(from...total))
-            }
+            state = roundTripEdit(state, random: &random,
+                                  photoSource: photoSource, audioSource: audioSource)
             let data = try JSONEncoder().encode(state)
             let decoded = try JSONDecoder().decode(TimelineState.self, from: data)
             XCTAssertEqual(decoded, state, "Codable 往復で状態が変わった step=\(step)")
             XCTAssertTrue(decoded.validate(), "往復後の状態が不変条件を破っている step=\(step)")
+        }
+    }
+
+    /// 往復テスト 1 手ぶんの編集（`test_randomStates_surviveCodableRoundTrip` 専用）。
+    private func roundTripEdit(_ state: TimelineState, random: inout Random,
+                               photoSource: UUID, audioSource: UUID) -> TimelineState {
+        switch random.next(7) {
+        case 6:
+            // BGM（v3 で追加）。合成時刻アンカーが往復で保たれること。
+            return state.addingAudioItem(sourceID: audioSource,
+                                         sourceDuration: random.double(0.2...8),
+                                         atCompositionTime: random.double(0...20))
+        case 5:
+            // 区間の移動（本体ドラッグの確定）も往復に含める。素材時刻アンカーが
+            // 移動後も正しく書き戻っていなければ、ここで往復が壊れる。
+            guard let target = state.applyRanges.first else { return state }
+            return state.movingApplyRange(id: target.id, clipID: target.clipID,
+                                          byCompositionDelta: random.double(-3...3))
+        case 0:
+            return state.splitting(at: random.double(0...max(0.1, state.mapping.totalDuration)))
+        case 1:
+            return state.appending(
+                clip: TimelineClip(sourceID: photoSource, sourceStart: 0,
+                                   sourceEnd: random.double(0.5...15)),
+                source: TimelineSource(id: photoSource, kind: .photo))
+        case 2:
+            guard let id = state.clips.last?.id else { return state }
+            return state.settingRate(clipID: id, rate: random.double(0.1...10))
+        case 3:
+            guard state.clips.count > 1, let id = state.clips.first?.id else { return state }
+            return state.settingTransition(afterClipID: id, kind: .crossfade,
+                                           duration: random.double(0.1...2))
+        default:
+            let total = max(0.1, state.mapping.totalDuration)
+            let from = random.double(0...total)
+            return state.addingApplyRange(fromCompositionTime: from,
+                                          to: random.double(from...total))
         }
     }
 }

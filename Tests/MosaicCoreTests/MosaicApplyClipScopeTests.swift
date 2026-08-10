@@ -35,7 +35,7 @@ final class MosaicApplyClipScopeTests: XCTestCase {
         // B のセグメントは帯にも出ない（I1・I2）。
         let spans = TimelineBandLayout.applySpans(ranges: onlyA, mapping: mapping, photoSourceIDs: [])
         XCTAssertEqual(spans.count, 1, "1 本の区間が 2 セグメントに写っている（I2 違反）")
-        XCTAssertEqual(spans[0].clipID, clipA.id)
+        XCTAssertEqual(spans[0].anchorClipID, clipA.id)
 
         // B の素材時刻 1.5 は区間の素材範囲に入るが、clipID が違うので OFF のまま。
         XCTAssertFalse(MosaicApplyGate.isActive(ranges: effective, clipID: clipB.id,

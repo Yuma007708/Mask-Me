@@ -52,6 +52,12 @@ struct TimelineCompositionBuilder {
         /// 出力枠より大きく、縮小されて収まるクリップの id（UI の注意表示用）。
         /// 判定は `TimelineOutputSummary.downscaledIndices`（コア層の純関数）。
         let downscaledClipIDs: Set<UUID>
+        /// BGM（E2）を実際に 1 曲でも載せたか。
+        ///
+        /// **書き出しの音声経路の判定に必ず渡すこと**
+        /// （`AudioExportPipeline.decide(isTrimming:hasAudioMix:hasBackgroundAudio:conditions:)`）。
+        /// BGM がある構成を圧縮パススルーで書き出してはならない。
+        let hasBackgroundAudio: Bool
     }
 
     /// 映像トラックの混在判定用フォーマット（naturalSize / preferredTransform）。
@@ -75,8 +81,13 @@ struct TimelineCompositionBuilder {
     ///   - transitions: クリップ境界のトランジション（キーは先行クリップ id）。
     ///     指定があるとその境界でクリップが重なり、A/B トラックへ交互配置される。
     ///   - sources: 素材IDから AVAsset への対応表。
+    /// - Parameter audioItems: BGM（E2）。**`TimelineState.effectiveAudioItems(totalDuration:)`
+    ///   を通した実効の列を渡すこと**（生の `audioItems` を渡すと、クリップを消して縮んだ
+    ///   タイムラインの外へ挿入しにいく）。既定値 `[]` は `transitions` と同じ流儀だが、
+    ///   アプリ本体の 2 経路（プレビュー再構築・書き出し）は必ず渡す。
     func build(clips: [TimelineClip],
                transitions: [UUID: TransitionSpec] = [:],
+               audioItems: [AudioItem] = [],
                sources: [UUID: AVAsset]) async throws -> Built {
         let mapping = TimelineMapping(clips: clips, transitions: transitions)
         // 重なりがあるときだけ 2 トラックへ交互配置する。重なりが無い構成では
@@ -134,6 +145,11 @@ struct TimelineCompositionBuilder {
             }
         }
 
+        // BGM（E2）。**videoComposition を作る前に挿入する**（後にすると、丸めで
+        // composition 尺が伸びたぶん instruction の被覆が足りなくなる）。
+        let backgroundTrack = try await insertBackgroundAudio(audioItems, sources: sources,
+                                                              into: composition)
+
         // instruction の被覆に使う尺は「写像の合計」と「実際の composition 尺」の大きい方。
         // 挿入は timescale 600 へ丸められるため composition 尺が写像の合計より数 ms
         // 長くなり得る。短い方を使うと末尾に instruction の隙間ができ、AVFoundation の
@@ -145,7 +161,9 @@ struct TimelineCompositionBuilder {
                                compositionSeconds.isFinite ? compositionSeconds : 0))
         let audioMix = AudioMixFactory.make(placements: placements,
                                             overlaps: mapping.overlaps,
-                                            tracks: survivingAudio)
+                                            tracks: survivingAudio,
+                                            backgroundItems: audioItems,
+                                            backgroundTrack: backgroundTrack)
         // 出力解像度の算出は `VideoCompositionFactory.renderSize(for:)` の単一実装を使う
         // （コア層に再実装しない。表示と実出力が食い違う二重管理を作らないため。
         // `TimelineOutputSummary` の doc 参照）。
@@ -156,7 +174,58 @@ struct TimelineCompositionBuilder {
             displaySizes: placements.map { VideoCompositionFactory.displaySize(of: $0.format) })
         return Built(composition: composition, videoComposition: videoComposition,
                      audioMix: audioMix, layout: layout, outputSize: outputSize,
-                     downscaledClipIDs: Set(downscaled.map { placements[$0].clip.id }))
+                     downscaledClipIDs: Set(downscaled.map { placements[$0].clip.id }),
+                     hasBackgroundAudio: backgroundTrack != nil)
+    }
+
+    /// BGM を専用トラック 1 本へ差し込む（E2）。
+    ///
+    /// **曲どうしは重ならない**（不変条件 I-A1）ので**トラックは 1 本で足りる**。
+    /// 置く位置は合成時刻そのもの（BGM は合成時刻アンカー）。曲間・先頭の隙間は
+    /// `insertTimeRange(_:of:at:)` が empty edit として残すので、こちらで埋めない
+    /// （`fillGap` のような明示的な穴埋めは要らないし、むしろ empty edit が残ることで
+    /// `AudioExportPipeline` が圧縮パススルーを避ける方向に働く）。
+    ///
+    /// **素材の実尺へクランプする。** 尺を超える区間は `insertTimeRange` が失敗して
+    /// 書き出しごと落ちる。編集操作の側でもクランプしているが、下書きの復元や
+    /// 音源ファイルの差し替えでは超え得るので、実データを触るここでも守る。
+    ///
+    /// 1 曲も載らなかったらトラックごと除去して nil を返す（空セグメントだけの
+    /// 音声トラックを writer へ渡さない、という既存の規約と同じ）。
+    private func insertBackgroundAudio(_ items: [AudioItem],
+                                       sources: [UUID: AVAsset],
+                                       into composition: AVMutableComposition) async throws
+        -> AVMutableCompositionTrack? {
+        guard !items.isEmpty,
+              let track = composition.addMutableTrack(
+                withMediaType: .audio,
+                preferredTrackID: kCMPersistentTrackID_Invalid) else { return nil }
+        var inserted = false
+        for item in items {
+            guard let asset = sources[item.sourceID] else {
+                throw BuildError.missingSource(item.sourceID)
+            }
+            // 音声トラックの無い素材（映像だけの mp4 を選んだ等）は黙って飛ばす。
+            // ここで throw すると、選び直すまで書き出しもプレビューも一切できなくなる。
+            guard let sourceTrack = try await asset.loadTracks(withMediaType: .audio).first
+            else { continue }
+            let sourceSeconds = CMTimeGetSeconds(asset.duration)
+            let end = sourceSeconds.isFinite && sourceSeconds > 0
+                ? min(item.sourceEnd, sourceSeconds) : item.sourceEnd
+            guard end - item.sourceStart >= AudioItem.minimumDuration else { continue }
+            let range = CMTimeRange(
+                start: CMTime(seconds: item.sourceStart, preferredTimescale: 600),
+                duration: CMTime(seconds: end - item.sourceStart, preferredTimescale: 600))
+            try track.insertTimeRange(
+                range, of: sourceTrack,
+                at: CMTime(seconds: item.compositionStart, preferredTimescale: 600))
+            inserted = true
+        }
+        guard inserted else {
+            composition.removeTrack(track)
+            return nil
+        }
+        return track
     }
 
     /// A/B いずれかのトラック組（同じスロットの映像トラックと音声トラック）。

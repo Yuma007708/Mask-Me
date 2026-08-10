@@ -71,9 +71,10 @@ public enum TimelineItemDrag {
     /// - Parameter isEdgeAdjustable == false: 写真クリップ由来のセグメント。伸縮・移動とも
     ///   no-op（入力をそのまま返す）。写真の素材時刻は常に 0 へ丸められるため、動かしても
     ///   確定時に必ず元へ戻る（`TimelineApplySpan.isEdgeAdjustable` の doc 参照）。
-    /// - Parameter kind: `.move` では掴んだ区間が属するクリップの帯（`context.layouts` から
-    ///   `span.clipID` で引く）を移動可能域に使う。帯が見つからない場合は移動不可として
-    ///   入力をそのまま返す。
+    /// - Parameter kind: `.move` の可動域は**アンカーで決まる**。素材時刻アンカー
+    ///   （`span.anchorClipID != nil`。モザイク適用区間）は属するクリップの合成区間に
+    ///   閉じ、帯が見つからなければ移動不可として入力をそのまま返す。合成時刻アンカー
+    ///   （`anchorClipID == nil`。BGM）は**タイムライン全体**が可動域になる。
     public static func snappedDraft(span: TimelineApplySpan,
                                     kind: TimelineItemDragKind,
                                     translationPixels: Double,
@@ -106,8 +107,21 @@ public enum TimelineItemDrag {
             return TimelineItemDragResult(start: span.start, end: end, snappedTo: snapped.snappedTo)
 
         case .move:
-            guard let band = layouts.first(where: { $0.clipID == span.clipID }) else {
-                return TimelineItemDragResult(start: span.start, end: span.end, snappedTo: nil)
+            // 可動域はアンカーで決まる。
+            //
+            // - `.mosaic`（素材時刻アンカー）: 属するクリップの合成区間に閉じる。
+            //   区間はクリップに紐づくので、クリップの外へは出られない。
+            // - `.audio`（合成時刻アンカー = `anchorClipID == nil`）: **タイムライン全体**。
+            //   BGM はどのクリップにも属さないので、クリップ境界で止める理由が無い。
+            //   ここでクリップ帯を要求すると、BGM が「掴めるのに 1mm も動かない」になる。
+            let bounds: (lower: Double, upper: Double)
+            if let anchor = span.anchorClipID {
+                guard let band = layouts.first(where: { $0.clipID == anchor }) else {
+                    return TimelineItemDragResult(start: span.start, end: span.end, snappedTo: nil)
+                }
+                bounds = (band.spanStart, band.spanEnd)
+            } else {
+                bounds = (0, totalDuration)
             }
             let length = span.end - span.start
 
@@ -143,8 +157,8 @@ public enum TimelineItemDrag {
             // `span.end` でクランプする）と可動域が食い違い、トランジションを設定した
             // 後続クリップでだけ「掴んで動かせるのに指を離すと必ず元へ戻る」になる。
             // **可動域の定義は確定側と 1 つに揃える。**
-            let lowerBound = max(0, band.spanStart)
-            let upperBound = max(lowerBound, min(totalDuration, band.spanEnd) - length)
+            let lowerBound = max(0, bounds.lower)
+            let upperBound = max(lowerBound, min(totalDuration, bounds.upper) - length)
             let start = min(max(shiftedStart, lowerBound), upperBound)
             return TimelineItemDragResult(start: start, end: start + length, snappedTo: snappedTo)
         }

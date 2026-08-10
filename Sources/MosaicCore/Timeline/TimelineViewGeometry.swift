@@ -183,6 +183,10 @@ public struct TimelineJointLayout: Equatable, Sendable, Identifiable {
 /// case を足すとその switch がコンパイルエラーになり、対応漏れがビルドで検出できる。
 public enum TimelineLayerKind: Equatable, Sendable, CaseIterable {
     case mosaic
+    /// BGM（E2）。**素材時刻アンカーの `.mosaic` と違い、合成時刻アンカー**である
+    /// （`AudioItem` 型の doc）。この違いは `TimelineApplySpan.anchorClipID` が
+    /// nil になる形で型に出る。
+    case audio
 }
 
 /// モザイク適用区間 1 本を、それが属するクリップへ写した合成時刻の区間。
@@ -192,10 +196,17 @@ public enum TimelineLayerKind: Equatable, Sendable, CaseIterable {
 /// 旧仕様（素材アンカーのみ）では同じ素材を使うクリップの数だけセグメントが現れた。
 public struct TimelineApplySpan: Equatable, Sendable, Identifiable {
     public let rangeID: UUID
-    public let clipID: UUID
-    /// このセグメントが属するレイヤー種。**現時点では常に `.mosaic`**
-    /// （`TimelineBandLayout.applySpans` の入力が `MosaicApplyRange` のみのため）。
-    /// E2/E3 で音声・テキストのセグメントが同じ段の仕組みに乗るときの受け皿。
+    /// このセグメントが属するクリップ。**`.mosaic` では必ず非 nil、`.audio` では必ず nil。**
+    ///
+    /// アンカーの違いをそのまま型に出している。モザイク適用区間は素材時刻アンカーで
+    /// 特定のクリップに属するが、**BGM は合成時刻アンカーでどのクリップにも属さない**。
+    ///
+    /// **`.audio` に `AudioItem.id` を入れて埋めてはいけない。** clipID で照合している
+    /// 経路（`TimelineItemDrag` の移動域、トリム下書きの追随、確定の分岐）が偶然一致し、
+    /// 「別のものを掴んでいるのに動く」形の取り違えを作る。無いものは nil で表す。
+    public let anchorClipID: UUID?
+    /// このセグメントが属するレイヤー種。確定操作の分岐はこの値で行う
+    /// （`.mosaic` → 適用区間の API、`.audio` → BGM の API）。
     public let kind: TimelineLayerKind
     public let start: Double
     public let end: Double
@@ -208,7 +219,7 @@ public struct TimelineApplySpan: Equatable, Sendable, Identifiable {
     /// UI 側でハンドル自体を出さないことで、この構造的な no-op を明示する。
     public let isEdgeAdjustable: Bool
 
-    public var id: String { "\(rangeID.uuidString)/\(clipID.uuidString)" }
+    public var id: String { "\(rangeID.uuidString)/\(anchorClipID?.uuidString ?? "-")" }
     public var duration: Double { max(0, end - start) }
 
     /// 区間全体を掴んで平行移動できるか。
@@ -220,10 +231,11 @@ public struct TimelineApplySpan: Equatable, Sendable, Identifiable {
     /// 無言の失敗を作れてしまう。`isEdgeAdjustable` から導出する。
     public var isMovable: Bool { isEdgeAdjustable }
 
-    public init(rangeID: UUID, clipID: UUID, kind: TimelineLayerKind, start: Double, end: Double,
+    public init(rangeID: UUID, anchorClipID: UUID?, kind: TimelineLayerKind,
+                start: Double, end: Double,
                 isEdgeAdjustable: Bool = true) {
         self.rangeID = rangeID
-        self.clipID = clipID
+        self.anchorClipID = anchorClipID
         self.kind = kind
         self.start = start
         self.end = end
@@ -311,7 +323,7 @@ public enum TimelineBandLayout {
                 guard let clipped = MosaicApplyGate.clippedInterval(clip: clip, range: range) else { continue }
                 result.append(TimelineApplySpan(
                     rangeID: range.id,
-                    clipID: clip.id,
+                    anchorClipID: clip.id,
                     kind: .mosaic,
                     start: span.start + (clipped.start - clip.sourceStart) / clip.rate,
                     end: span.start + (clipped.end - clip.sourceStart) / clip.rate,
@@ -321,64 +333,6 @@ public enum TimelineBandLayout {
         return result
     }
 
-    /// 端ドラッグ後のクリップ使用範囲（素材時刻）。
-    ///
-    /// ドラッグ量は**合成時刻の差分**で受け取り、`rate` を掛けて素材時刻の差分に写す
-    /// （2x のクリップでは帯を 1 秒縮めると素材は 2 秒縮む）。
-    /// 結果は「最小合成尺（`TimelineEditOperations.minimumClipDuration`）を割らない」
-    /// 範囲へクランプするため、ドラッグが行き過ぎても操作が無反応にならず端で止まる。
-    ///
-    /// **クランプ可能域が空のクリップでは端トリムを拒否して元の範囲を返す。**
-    /// クランプの上下限は「最小合成尺を残す」制約から作るので、合成尺が既に最小尺を
-    /// 割っているクリップ（`.start` 側）や素材末尾に張り付いたクリップ（`.end` 側）では
-    /// 上限 < 下限になる。そのまま `min` / `max` を掛けると**ドラッグと逆方向へ端が飛ぶ**:
-    /// 実測では 10x のクリップ（合成尺 0.05 秒）の左ハンドルを右へ 0.025 秒動かすと
-    /// `sourceStart` が 9.5 → 9.0 へ落ち、前クリップと素材使用範囲が重複した。
-    /// `MosaicEditorModel.trimClip` のクランプは `sourceEnd` 側だけなので素通しする。
-    ///
-    /// - Parameter sourceDuration: 素材の実尺（分かる場合）。`end` 側の上限に使う。
-    public static func trimmedBounds(clip: TimelineClip,
-                                     edge: TimelineTrimEdge,
-                                     deltaCompositionSeconds delta: Double,
-                                     sourceDuration: Double?) -> (sourceStart: Double, sourceEnd: Double) {
-        let original = (sourceStart: clip.sourceStart, sourceEnd: clip.sourceEnd)
-        guard delta.isFinite else { return original }
-        let minimumSourceSpan = TimelineEditOperations.minimumClipDuration * clip.rate
-        switch edge {
-        case .start:
-            let upperBound = clip.sourceEnd - minimumSourceSpan
-            guard upperBound >= 0, upperBound >= clip.sourceStart else { return original }
-            let raw = clip.sourceStart + delta * clip.rate
-            return (min(max(raw, 0), upperBound), clip.sourceEnd)
-        case .end:
-            let lowerBound = clip.sourceStart + minimumSourceSpan
-            var upperBound = Double.infinity
-            if let sourceDuration, sourceDuration.isFinite, sourceDuration > 0 {
-                upperBound = sourceDuration
-            }
-            guard lowerBound <= upperBound else { return original }
-            let raw = clip.sourceEnd + delta * clip.rate
-            return (clip.sourceStart, min(max(raw, lowerBound), upperBound))
-        }
-    }
-
-    /// 長押しドラッグ中のクリップを差し込むべき index。
-    ///
-    /// ドラッグ中クリップの帯の**中心**が移動後にどの帯へ入ったかで判定する
-    /// （指の位置ではなく中心を使うことで、掴んだ場所によらず挙動が一定になる）。
-    /// 端をはみ出した場合は先頭・末尾へ寄せる。`clipID` が無ければ nil。
-    public static func reorderTargetIndex(layouts: [TimelineClipLayout],
-                                          clipID: UUID,
-                                          translationSeconds: Double) -> Int? {
-        guard let current = layouts.first(where: { $0.clipID == clipID }),
-              translationSeconds.isFinite, !layouts.isEmpty else { return nil }
-        let center = (current.bandStart + current.bandEnd) / 2 + translationSeconds
-        if let hit = layouts.firstIndex(where: { center >= $0.bandStart && center < $0.bandEnd }) {
-            return layouts[hit].index
-        }
-        guard let first = layouts.first, let last = layouts.last else { return nil }
-        return center < first.bandStart ? first.index : last.index
-    }
 }
 
 /// クリップ帯 1 本ぶんのサムネイル枠の配置。

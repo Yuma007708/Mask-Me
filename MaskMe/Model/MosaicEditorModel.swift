@@ -507,6 +507,12 @@ public final class MosaicEditorModel: ObservableObject {
     /// `composition` に装着する音声ミックス（S8）。トランジションの音声クロスフェード・
     /// `TimelineClip.originalAudioVolume` があるときだけ非 nil。
     var audioMix: AVMutableAudioMix?
+    /// いま組んである `composition` に BGM（E2）が 1 曲でも載っているか。
+    ///
+    /// **書き出しへ必ず渡すこと**（`VideoMosaicExporter.export(hasBackgroundAudio:)`）。
+    /// BGM がある構成を圧縮パススルーで書き出すと、音量も反映されず結果が
+    /// 素材のフォーマット任せになる（`AudioExportPipeline` の doc 参照）。
+    var hasBackgroundAudio = false
     /// 素材フレーム基準の顔座標を合成フレーム基準へ写すレイアウト（S8）。
     /// 解像度混在（レターボックス）で効く。無変換構成では恒等。
     var renderLayout: TimelineRenderLayout = .identity
@@ -741,8 +747,14 @@ public final class MosaicEditorModel: ObservableObject {
                 // build 中に編集が割り込んだとき旧クリップ列の合成結果へ新世代が
                 // 刻まれ、exportVideo の世代照合が素通しになる（レビューの実測）。
                 let loadGeneration = timelineGeneration
+                // BGM は実効（合成尺で切ったもの）だけを渡す。音源未登録の曲は落とす
+                // （`rebuildComposition` と同じ理由。同ファイルの doc 参照）。
+                let audioItems = timeline
+                    .effectiveAudioItems(totalDuration: TimelineMapping(clips: clips).totalDuration)
+                    .filter { sources[$0.sourceID] != nil }
                 let built = try await TimelineCompositionBuilder()
-                    .build(clips: clips, transitions: timeline.transitions, sources: sources)
+                    .build(clips: clips, transitions: timeline.transitions,
+                           audioItems: audioItems, sources: sources)
                 let isStale = loadGeneration != timelineGeneration
                 if !isStale {
                     apply(built: built, generation: loadGeneration)
@@ -1679,6 +1691,16 @@ public final class MosaicEditorModel: ObservableObject {
             guard let url = (sources[clip.sourceID] as? AVURLAsset)?.url else { continue }
             result.append((clip.sourceID, url))
         }
+        // **BGM の音源も下書きへ持っていく（E2）。**
+        //
+        // ここを漏らすと、下書きを再開したときに帯だけ残って音源が `sources` に無く、
+        // **BGM が黙って鳴らなくなる**（`rebuildComposition` が音源未登録の曲を落とす）。
+        // クリップと違い `timeline.clips` からは辿れないので、別のループが要る。
+        for item in timeline.audioItems where !seen.contains(item.sourceID) {
+            seen.insert(item.sourceID)
+            guard let url = (sources[item.sourceID] as? AVURLAsset)?.url else { continue }
+            result.append((item.sourceID, url))
+        }
         return result
     }
 
@@ -1690,12 +1712,17 @@ public final class MosaicEditorModel: ObservableObject {
     /// undo により復活し得るクリップの素材実体が消える。`DraftStore.saveVideoDraft` の
     /// `sessionSourceIDs` にそのまま渡すこと（アーキテクチャ決定 7
     /// 「素材 GC は下書き保存時のみ。セッション中は undo 用に保持」の担保）。
+    /// **BGM の音源も同じ保護に含める（E2）。** 含めないと「BGM を消して再保存 →
+    /// undo で戻す」で音源の実体だけが GC で消え、帯はあるのに鳴らない状態になる。
     var sessionReferencedSourceIDs: Set<UUID> {
-        var ids = Set(timeline.clips.map(\.sourceID))
-        for snap in undoStack { ids.formUnion(snap.timeline.clips.map(\.sourceID)) }
-        for snap in redoStack { ids.formUnion(snap.timeline.clips.map(\.sourceID)) }
-        if let last = lastCommitted { ids.formUnion(last.timeline.clips.map(\.sourceID)) }
-        return ids
+        func ids(of state: TimelineState) -> Set<UUID> {
+            Set(state.clips.map(\.sourceID)).union(state.audioItems.map(\.sourceID))
+        }
+        var result = ids(of: timeline)
+        for snap in undoStack { result.formUnion(ids(of: snap.timeline)) }
+        for snap in redoStack { result.formUnion(ids(of: snap.timeline)) }
+        if let last = lastCommitted { result.formUnion(ids(of: last.timeline)) }
+        return result
     }
 
     /// 下書き保存用: いま選択されている顔の目印（素材ID＋**素材フレーム基準**の
@@ -2115,6 +2142,7 @@ public final class MosaicEditorModel: ObservableObject {
                 // 差し替わる（`apply(built:generation:)`）ので世代がずれない。
                 videoComposition: videoComposition,
                 audioMix: audioMix,
+                hasBackgroundAudio: hasBackgroundAudio,
                 renderLayout: renderLayout,
                 faceEnabled: faceMosaicOn,
                 objectEnabled: objectMosaicOn,

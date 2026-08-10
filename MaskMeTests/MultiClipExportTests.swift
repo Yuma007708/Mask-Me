@@ -931,6 +931,110 @@ final class MultiClipExportTests: XCTestCase {
         XCTAssertGreaterThan(overlapRMS, 0.01, "重なり区間の音が完全に消えている（フェードが急すぎる）")
     }
 
+    // MARK: - BGM（E2-2）
+
+    /// **無音動画に BGM を載せて書き出すと、実際に音が入る。**
+    ///
+    /// これはレビュー指摘⑦（設計時に想定した穴）そのものの再現テストである。
+    /// 元動画に音声トラックが無いと builder が空の音声トラックを除去するので、
+    /// 合成物の音声トラックは **BGM 1 本だけ**になる。このとき
+    /// `hasMultipleTracks` は false、BGM の音量が既定なら `hasAudioMix` も false、
+    /// BGM が 0 秒から全体を覆えば `hasEmptySegments` も false で、**3 条件すべてを
+    /// すり抜けて圧縮パススルーへ落ちる**。
+    ///
+    /// **このテスト単独では穴を検出できない**（守りを外して実測した: パススルーでも
+    /// 音そのものは鳴るので rms は 0.259 のまま緑になる）。穴を捕まえるのは
+    /// `test_backgroundAudioVolume_isAppliedToOutput` の方で、実害は
+    /// 「BGM の音量が一切効かない」という形で出る。
+    /// ここは「BGM が出力へ到達する経路そのもの」の土台として置いてある。
+    func test_backgroundAudioOnSilentVideo_isAudibleInOutput() async throws {
+        guard MTLCreateSystemDefaultDevice() != nil else {
+            throw XCTSkip("Metal デバイスが無い環境ではスキップ")
+        }
+        // **無音の動画**（withAudio: false）＋ 音のある素材を BGM に使う。
+        let silentURL = try await makeTestVideo(seconds: 3.0, withAudio: false)
+        let musicURL = try await makeTestVideo(seconds: 3.0, withAudio: true)
+        defer {
+            try? FileManager.default.removeItem(at: silentURL)
+            try? FileManager.default.removeItem(at: musicURL)
+        }
+
+        let videoSource = UUID()
+        let audioSource = UUID()
+        let clip = TimelineClip(sourceID: videoSource, sourceStart: 0, sourceEnd: 3)
+        // 0 秒から全体を覆う = empty edit が生まれない（穴の条件をわざと揃える）。
+        let item = AudioItem(sourceID: audioSource, sourceStart: 0, sourceEnd: 3,
+                             compositionStart: 0)
+        let built = try await TimelineCompositionBuilder().build(
+            clips: [clip], audioItems: [item],
+            sources: [videoSource: AVURLAsset(url: silentURL),
+                      audioSource: AVURLAsset(url: musicURL)])
+        XCTAssertTrue(built.hasBackgroundAudio, "前提が崩れている（BGM が載っていない）")
+        XCTAssertEqual(built.composition.tracks(withMediaType: .audio).count, 1,
+                       "前提が崩れている（音声トラックが 1 本でないと穴を再現できない）")
+
+        let exporter = try makeExporter()
+        let outURL = try await exporter.export(
+            asset: built.composition,
+            mapping: TimelineMapping(clips: [clip]),
+            videoComposition: built.videoComposition,
+            audioMix: built.audioMix,
+            hasBackgroundAudio: built.hasBackgroundAudio,
+            renderLayout: built.layout) { _ in }
+        defer { try? FileManager.default.removeItem(at: outURL) }
+
+        let rms = try await audioRMS(url: outURL, window: 0.3...2.5)
+        print("[E2AUDIO] silentVideo+bgm rms=\(rms)")
+        XCTAssertGreaterThan(rms, 0.1, "無音動画に載せた BGM が出力に入っていない")
+    }
+
+    /// **BGM の音量が出力に反映される。** 元音声との音量を別々に持つことの実測。
+    ///
+    /// **レビュー指摘⑦の穴を捕まえる番人はこのテストである。**
+    /// `AudioExportPipeline.decide` の `hasBackgroundAudio` と `AudioMixFactory` の
+    /// BGM 分岐を両方外すと、音は鳴るのに音量だけが効かなくなり、ここが落ちる
+    /// （実測: 音量 1.0 と 0.25 が両方 rms 0.259）。
+    func test_backgroundAudioVolume_isAppliedToOutput() async throws {
+        guard MTLCreateSystemDefaultDevice() != nil else {
+            throw XCTSkip("Metal デバイスが無い環境ではスキップ")
+        }
+        let silentURL = try await makeTestVideo(seconds: 3.0, withAudio: false)
+        let musicURL = try await makeTestVideo(seconds: 3.0, withAudio: true)
+        defer {
+            try? FileManager.default.removeItem(at: silentURL)
+            try? FileManager.default.removeItem(at: musicURL)
+        }
+        let videoSource = UUID()
+        let audioSource = UUID()
+        let clip = TimelineClip(sourceID: videoSource, sourceStart: 0, sourceEnd: 3)
+
+        func exportRMS(volume: Float) async throws -> Double {
+            let item = AudioItem(sourceID: audioSource, sourceStart: 0, sourceEnd: 3,
+                                 compositionStart: 0, volume: volume)
+            let built = try await TimelineCompositionBuilder().build(
+                clips: [clip], audioItems: [item],
+                sources: [videoSource: AVURLAsset(url: silentURL),
+                          audioSource: AVURLAsset(url: musicURL)])
+            let exporter = try makeExporter()
+            let outURL = try await exporter.export(
+                asset: built.composition,
+                mapping: TimelineMapping(clips: [clip]),
+                videoComposition: built.videoComposition,
+                audioMix: built.audioMix,
+                hasBackgroundAudio: built.hasBackgroundAudio,
+                renderLayout: built.layout) { _ in }
+            defer { try? FileManager.default.removeItem(at: outURL) }
+            return try await audioRMS(url: outURL, window: 0.3...2.5)
+        }
+
+        let loud = try await exportRMS(volume: 1.0)
+        let quiet = try await exportRMS(volume: 0.25)
+        print("[E2AUDIO] volume loud=\(loud) quiet=\(quiet)")
+        XCTAssertGreaterThan(loud, 0.1, "音量 1.0 の BGM が載っていない")
+        XCTAssertLessThan(quiet, loud * 0.6, "BGM の音量が出力に反映されていない")
+        XCTAssertGreaterThan(quiet, 0.01, "音量 0.25 で無音になっている（絞りすぎ）")
+    }
+
     /// **トラック B 側クリップの音声全損の回帰ガード（S8 の穴）**。
     ///
     /// `test_transitionCrossfadesAudio` は素材の後半 2s を無音にしているため、
@@ -992,9 +1096,10 @@ final class MultiClipExportTests: XCTestCase {
     /// 「OR に足し忘れ」を検出できない。ここでは期待値を**立っているビットの個数**
     /// （`bits == 0` か否か）だけから決め、条件の列挙に依存させない。
     func test_audioPipelineDecision_passthroughOnlyWhenNoTransform() {
-        for bits in 0..<64 {
+        for bits in 0..<128 {
             let trimming = bits & 1 != 0
             let hasAudioMix = bits & 16 != 0
+            let hasBackgroundAudio = bits & 64 != 0
             let conditions = AudioTrackConditions(hasEmptySegments: bits & 2 != 0,
                                                   hasScaledSegments: bits & 4 != 0,
                                                   hasMixedFormats: bits & 8 != 0,
@@ -1002,10 +1107,30 @@ final class MultiClipExportTests: XCTestCase {
             let expected: AudioExportPipeline = bits == 0 ? .passthrough : .reencode
             XCTAssertEqual(
                 AudioExportPipeline.decide(isTrimming: trimming, hasAudioMix: hasAudioMix,
+                                           hasBackgroundAudio: hasBackgroundAudio,
                                            conditions: conditions),
                 expected,
-                "decide(trim: \(trimming), mix: \(hasAudioMix), conditions: \(conditions)) が期待と違う")
+                "decide(trim: \(trimming), mix: \(hasAudioMix), bgm: \(hasBackgroundAudio), "
+                + "conditions: \(conditions)) が期待と違う")
         }
+    }
+
+    /// **BGM がある構成は、他の条件が 1 つも立っていなくても再エンコードになる。**
+    ///
+    /// これは真理値表テストに含まれているが、単独で 1 本立てておく。ここが
+    /// `.passthrough` に戻ったときに落ちるテストが「64 通りのうちの 1 通り」だと、
+    /// 失敗メッセージから**何の穴が開いたか**が読み取れないためである。
+    ///
+    /// 穴の正体: 元動画に音声トラックが無い構成では合成物の音声トラックが BGM 1 本
+    /// だけになり、`hasMultipleTracks` も `hasAudioMix`（音量が既定なら）も
+    /// `hasEmptySegments`（BGM が 0 秒から全体を覆うなら）も false になる。
+    func test_audioPipelineDecision_backgroundAudioAloneForcesReencode() {
+        XCTAssertEqual(
+            AudioExportPipeline.decide(isTrimming: false, hasAudioMix: false,
+                                       hasBackgroundAudio: true,
+                                       conditions: AudioTrackConditions()),
+            .reencode,
+            "BGM だけの構成が圧縮パススルーへ落ちている（音量も反映されない）")
     }
 
     /// 「条件が 5 個目に増えたのに `decide` の OR へ足し忘れ」を捕まえる契約テスト。
@@ -1028,21 +1153,25 @@ final class MultiClipExportTests: XCTestCase {
             var conditions = AudioTrackConditions()
             conditions[keyPath: keyPath] = true
             XCTAssertEqual(AudioExportPipeline.decide(isTrimming: false, hasAudioMix: false,
+                                                      hasBackgroundAudio: false,
                                                       conditions: conditions),
                            .reencode, "\(name) が単独で再エンコードを選ばせていない")
         }
         XCTAssertEqual(
             AudioExportPipeline.decide(isTrimming: true, hasAudioMix: false,
+                                       hasBackgroundAudio: false,
                                        conditions: AudioTrackConditions()),
             .reencode, "isTrimming が単独で再エンコードを選ばせていない")
         // audioMix（S8）単独でも再エンコード。パススルーは元パケットのコピーなので
         // 音量ランプ・クロスフェードが一切反映されない。
         XCTAssertEqual(
             AudioExportPipeline.decide(isTrimming: false, hasAudioMix: true,
+                                       hasBackgroundAudio: false,
                                        conditions: AudioTrackConditions()),
             .reencode, "hasAudioMix が単独で再エンコードを選ばせていない")
         XCTAssertEqual(
             AudioExportPipeline.decide(isTrimming: false, hasAudioMix: false,
+                                       hasBackgroundAudio: false,
                                        conditions: AudioTrackConditions()),
             .passthrough, "全条件が偽なのにパススルーにならない")
     }

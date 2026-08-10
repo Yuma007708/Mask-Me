@@ -9,7 +9,7 @@ import XCTest
 final class TimelineItemDragTests: XCTestCase {
     private func makeSpan(rangeID: UUID = UUID(), clipID: UUID = UUID(),
                           start: Double, end: Double, isEdgeAdjustable: Bool = true) -> TimelineApplySpan {
-        TimelineApplySpan(rangeID: rangeID, clipID: clipID, kind: .mosaic, start: start, end: end,
+        TimelineApplySpan(rangeID: rangeID, anchorClipID: clipID, kind: .mosaic, start: start, end: end,
                           isEdgeAdjustable: isEdgeAdjustable)
     }
 

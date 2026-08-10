@@ -8,7 +8,7 @@ extension TimelineState {
     // MARK: - Codable（後方互換）
 
     private enum CodingKeys: String, CodingKey {
-        case clips, transitions, applyRanges, sources, schemaVersion
+        case clips, transitions, applyRanges, audioItems, sources, schemaVersion
     }
 
     /// `clipID` を持たない v1 の適用区間（デコード専用）。
@@ -35,6 +35,11 @@ extension TimelineState {
         self.clips = try container.decode([TimelineClip].self, forKey: .clips)
         self.transitions = try container.decode([UUID: TransitionSpec].self, forKey: .transitions)
         self.sources = try container.decodeIfPresent([UUID: TimelineSource].self, forKey: .sources) ?? [:]
+        // BGM（v3 で追加）。v2 以前の JSON には無いので「BGM 無し」で復元する。
+        // **正規化を通すこと。** 手で書き換えられた下書き・将来の不整合が、重なった
+        // BGM としてそのまま実行系（composition の insertTimeRange）へ流れないようにする。
+        self.audioItems = Self.normalizedAudioItems(
+            try container.decodeIfPresent([AudioItem].self, forKey: .audioItems) ?? [])
         let version = try container.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? 1
         if version >= 2 {
             self.applyRanges = try container.decode([MosaicApplyRange].self, forKey: .applyRanges)
@@ -54,6 +59,7 @@ extension TimelineState {
         try container.encode(clips, forKey: .clips)
         try container.encode(transitions, forKey: .transitions)
         try container.encode(applyRanges, forKey: .applyRanges)
+        try container.encode(audioItems, forKey: .audioItems)
         try container.encode(sources, forKey: .sources)
         try container.encode(Self.currentSchemaVersion, forKey: .schemaVersion)
     }

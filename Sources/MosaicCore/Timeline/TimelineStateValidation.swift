@@ -31,6 +31,22 @@ extension TimelineState {
                   clip.sourceID == range.sourceID else { return false }
             guard sourceKind(of: clip.sourceID) != .photo || range.sourceStart == 0 else { return false }
         }
+        // BGM（E2）: 合成時刻アンカーなので clipID との整合は無い。見るのは
+        // 「有限で長さがあること」「0 秒より前に置かれていないこと」「音量が 0...1」
+        // 「compositionStart 昇順で互いに重ならないこと（I-A1）」の 4 つ。
+        //
+        // **合成尺との関係はここでは見ない。** クリップを消して縮んだタイムラインから
+        // はみ出した BGM は不正ではなく温存対象である（`AudioItem` 型の doc）。
+        var previousEnd = -Double.infinity
+        for item in audioItems {
+            guard item.sourceStart.isFinite, item.sourceEnd.isFinite,
+                  item.compositionStart.isFinite,
+                  item.sourceStart >= 0, item.compositionStart >= 0,
+                  item.duration >= AudioItem.minimumDuration,
+                  item.volume >= 0, item.volume <= 1 else { return false }
+            guard item.compositionStart >= previousEnd - 1e-9 else { return false }
+            previousEnd = item.compositionEnd
+        }
         // 素材メタは「キー = TimelineSource.id」で引く辞書。食い違うと kind の参照が
         // 黙って .video フォールバックに落ちるため、不変条件として明示する。
         for (key, source) in sources where source.id != key {

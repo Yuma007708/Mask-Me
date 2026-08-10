@@ -119,15 +119,34 @@ enum AudioExportPipeline: Equatable {
     ///   合成物では、2 トラック = 重なりあり = audioMix ありなので `hasAudioMix` で
     ///   すでに再エンコードが確定している（この条件は builder 以外の合成物に対する防御）。
     ///
+    /// - `hasBackgroundAudio`: BGM（E2）が 1 曲でも載っている。
+    ///
+    ///   **他の条件では拾えない穴がある。** 元動画に音声トラックが無い構成
+    ///   （無音動画・写真だけのタイムライン）では、builder が空の音声トラックを
+    ///   除去するため合成物の音声トラックは **BGM 1 本だけ**になる。このとき
+    ///   `hasMultipleTracks` は false、BGM の音量が既定なら `hasAudioMix` も false、
+    ///   BGM が 0 秒から全体を覆えば `hasEmptySegments` も false で、
+    ///   **3 条件すべてをすり抜けて `.passthrough` へ落ちる**。
+    ///
+    ///   **実害は「BGM の音量が一切効かなくなる」こと**（守りを外して実測した。
+    ///   `MultiClipExportTests.test_backgroundAudioVolume_isAppliedToOutput`）。
+    ///   音そのものは鳴る（元パケットがそのままコピーされるため）ので、
+    ///   「BGM が無音になる」形では現れず、**音量スライダーだけが黙って効かない**
+    ///   という気づきにくい壊れ方をする。
+    ///   BGM がある時点でパススルーは選ばない、と明示的に決める。
+    ///
     /// 入口はこの 1 つだけにしてある（条件を個別 Bool で受ける素の入口は置かない）。
     /// 呼び出し側が条件の導出（`AudioTrackConditions.from`）をバイパスできると、
     /// 条件が増えたときに渡し忘れが静かに `.passthrough` へ落ちるため。
-    /// `hasAudioMix` に既定値を与えないのも同じ理由（渡し忘れはコンパイルエラーになる）。
+    /// `hasAudioMix` / `hasBackgroundAudio` に既定値を与えないのも同じ理由
+    /// （渡し忘れはコンパイルエラーになる）。
     static func decide(isTrimming: Bool,
                        hasAudioMix: Bool,
+                       hasBackgroundAudio: Bool,
                        conditions: AudioTrackConditions) -> AudioExportPipeline {
         let needsReencode = isTrimming
             || hasAudioMix
+            || hasBackgroundAudio
             || conditions.hasEmptySegments
             || conditions.hasScaledSegments
             || conditions.hasMixedFormats
@@ -453,6 +472,15 @@ public final class VideoMosaicExporter: @unchecked Sendable {
         applyRanges: [MosaicApplyRange] = [],
         videoComposition: AVVideoComposition? = nil,
         audioMix: AVAudioMix? = nil,
+        /// BGM（E2）が 1 曲でも載っているか。真なら音声は必ず再エンコード経路になる。
+        ///
+        /// **既定 `false` は「BGM 無しの素の書き出し」を意味する。** 実アプリの経路
+        /// （`MosaicEditorModel.exportVideo`）は `hasBackgroundAudio` を必ず渡す。
+        /// 渡し忘れても `AudioMixFactory` が BGM のとき必ず mix を返すため
+        /// `hasAudioMix` 側で再エンコードに倒れる（**二重の守り**）が、
+        /// 判定を mix の有無だけに委ねない（mix を作らない最適化を将来入れた瞬間に
+        /// 穴が開く形にしない）。
+        hasBackgroundAudio: Bool = false,
         renderLayout: TimelineRenderLayout = .identity,
         faceEnabled: Bool = true,
         objectEnabled: Bool = true,
@@ -549,7 +577,8 @@ public final class VideoMosaicExporter: @unchecked Sendable {
         // 無音として尊重される（MultiClipExportTests の trim 系・写真中間配置テストが
         // RMS 解析込みで固定している）。映像は従来どおり主リーダー側の timeRange で制限する。
         let audioPipeline = AudioExportPipeline.decide(
-            isTrimming: isTrimming, hasAudioMix: audioMix != nil, conditions: audioConditions)
+            isTrimming: isTrimming, hasAudioMix: audioMix != nil,
+            hasBackgroundAudio: hasBackgroundAudio, conditions: audioConditions)
         var audioOutput: AVAssetReaderOutput?
         var separateAudioReader: AVAssetReader?
         if let audioTrack = audioTracks.first {

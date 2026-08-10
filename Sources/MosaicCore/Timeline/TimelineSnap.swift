@@ -59,7 +59,9 @@ public enum TimelineSnap {
             values.append(layout.bandStart)
             values.append(layout.bandEnd)
         }
-        for span in applySpans where !excluding.contains(span.rangeID) && !excluding.contains(span.clipID) {
+        for span in applySpans
+        where !excluding.contains(span.rangeID)
+            && !(span.anchorClipID.map { excluding.contains($0) } ?? false) {
             values.append(span.start)
             values.append(span.end)
         }

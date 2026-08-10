@@ -32,14 +32,25 @@ public struct TimelineState: Codable, Equatable, Sendable {
     /// したがって区間 0 本は「まだ何も掛けていない」か「ユーザーが全部消した」のどちらかで、
     /// **どちらも掛けない意図として同じに扱ってよい**。
     public var applyRanges: [MosaicApplyRange]
-    /// 素材メタ情報（キーは素材ID = `TimelineClip.sourceID`）。エントリが無い素材は
-    /// 動画（`TimelineSource.Kind.video`）として扱う（kind 導入前のデータとの互換）。
+    /// BGM（E2）。**合成時刻アンカー**で、`compositionStart` 昇順・互いに重ならない
+    /// （不変条件 I-A1。正規化は `normalizedAudioItems`）。
+    ///
+    /// クリップの編集には**追従しない**（`AudioItem` 型の doc 参照）。クリップを消して
+    /// 合成尺が縮んだときに末尾からはみ出したぶんは、適用区間の孤児と同じく
+    /// **データとしては温存**し、表示と書き出しの側で `AudioItem.clipped(toTotalDuration:)`
+    /// が切る。
+    public var audioItems: [AudioItem]
+    /// 素材メタ情報（キーは素材ID = `TimelineClip.sourceID` または `AudioItem.sourceID`）。
+    /// エントリが無い素材は動画（`TimelineSource.Kind.video`）として扱う
+    /// （kind 導入前のデータとの互換）。
     public var sources: [UUID: TimelineSource]
 
     public init(clips: [TimelineClip] = [],
                 transitions: [UUID: TransitionSpec] = [:],
                 applyRanges: [MosaicApplyRange] = [],
+                audioItems: [AudioItem] = [],
                 sources: [UUID: TimelineSource] = [:]) {
+        self.audioItems = audioItems
         self.clips = clips
         self.transitions = transitions
         self.applyRanges = applyRanges
@@ -55,7 +66,9 @@ public struct TimelineState: Codable, Equatable, Sendable {
     ///
     /// - v1: `MosaicApplyRange` に `clipID` が無く、**空 = 全区間適用**だった。
     /// - v2: `MosaicApplyRange` が `clipID` を持ち、**空 = 適用なし（全区間 OFF）**。
-    public static let currentSchemaVersion = 2
+    /// - v3: `audioItems`（BGM）を追加。**v2 以前の JSON は BGM 無しとして読める**
+    ///   （追加しただけで既存キーの意味は変えていない）ので、移行処理は要らない。
+    public static let currentSchemaVersion = 3
 
     // MARK: - 素材種別（写真クリップの時刻規則）
 

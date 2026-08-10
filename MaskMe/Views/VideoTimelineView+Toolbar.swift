@@ -53,7 +53,10 @@ extension VideoTimelineView {
 
     private var volumeItem: TimelineToolItem {
         TimelineToolItem(title: "音量", systemImage: "speaker.wave.2", isEnabled: canSetVolume) {
-            volumeSheetClipID = selectedClipID
+            // **活性判定と同じ純関数で対象を決める**（別々に書くと「押せるのに
+            // 何も起きない」が作れる）。
+            volumeSheetTarget = TimelineVolumeAvailability.target(
+                timeline: model.timeline, selection: model.timelineSelection)
         }
     }
 
@@ -147,6 +150,8 @@ extension VideoTimelineView {
             switch layer.kind {
             case .mosaic:
                 model.removeMosaicApplyRange(id: layer.id)
+            case .audio:
+                model.removeAudioItem(id: layer.id)
             }
         } else if let id = selectedClipID {
             model.removeClip(id: id)
@@ -156,7 +161,8 @@ extension VideoTimelineView {
     /// 音量の活性判定。**写真クリップは除く**（判定の理由は
     /// `TimelineVolumeAvailability` の doc 参照。純関数側に置いてテストで固定してある）。
     private var canSetVolume: Bool {
-        TimelineVolumeAvailability.isEnabled(timeline: model.timeline, clipID: selectedClipID)
+        TimelineVolumeAvailability.target(timeline: model.timeline,
+                                         selection: model.timelineSelection) != nil
     }
 
     private var canAddApplyRange: Bool {

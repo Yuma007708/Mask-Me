@@ -22,12 +22,26 @@ final class MosaicApplyMigrationTests: XCTestCase {
     /// clips / transitions / sources の表現は実エンコーダに任せ、v1 との差分
     /// （`schemaVersion` の除去と `applyRanges` の旧形式化）だけを文字列で当てる。
     /// 手書きすると `[UUID: T]` が配列で符号化される Swift の規則を踏み外す。
+    ///
+    /// **版番号を直書きしないこと。** `"schemaVersion":2` と書いていた間、版を 3 へ
+    /// 上げた瞬間にこのヘルパの除去が空振りして「v1 のつもりの JSON」が作れなくなり、
+    /// 移行テストが 4 本まとめて落ちた（原因が移行ロジックに見える形で、実際は
+    /// テストの前提が古いだけ）。版を上げるたびに落ちるテストは、実質「版を上げるな」
+    /// という縛りになる。
+    ///
+    /// v1 に存在しないキー（v3 の `audioItems`）も落とす。残っていてもデコードは
+    /// 通る（`decodeIfPresent`）が、それでは「v1 の下書き」を再現したことにならない。
     private func legacyJSON(clips: [TimelineClip], applyRanges: String) throws -> Data {
         let current = TimelineState(clips: clips)
         var text = try XCTUnwrap(String(bytes: try JSONEncoder().encode(current), encoding: .utf8))
-        XCTAssertTrue(text.contains("\"schemaVersion\":2"))
-        text = text.replacingOccurrences(of: ",\"schemaVersion\":2", with: "")
-        text = text.replacingOccurrences(of: "\"schemaVersion\":2,", with: "")
+        let versionField = "\"schemaVersion\":\(TimelineState.currentSchemaVersion)"
+        XCTAssertTrue(text.contains(versionField), "encode が現行の版番号を書いていない")
+        text = text.replacingOccurrences(of: ",\(versionField)", with: "")
+        text = text.replacingOccurrences(of: "\(versionField),", with: "")
+        text = text.replacingOccurrences(of: ",\"audioItems\":[]", with: "")
+        text = text.replacingOccurrences(of: "\"audioItems\":[],", with: "")
+        XCTAssertFalse(text.contains("schemaVersion"), "版番号が残っている（v1 になっていない）")
+        XCTAssertFalse(text.contains("audioItems"), "v1 に無いキーが残っている")
         XCTAssertTrue(text.contains("\"applyRanges\":[]"))
         text = text.replacingOccurrences(of: "\"applyRanges\":[]",
                                          with: "\"applyRanges\":[\(applyRanges)]")
@@ -102,15 +116,20 @@ final class MosaicApplyMigrationTests: XCTestCase {
         print("[S11-migrate] どのクリップとも交差しない v1 区間 2 本 → v2 区間 \(decoded.applyRanges.count) 本")
     }
 
-    /// (d) `schemaVersion: 2` の JSON は変換せず素通しすること。
-    func test_migration_schemaVersion2IsPassedThrough() throws {
+    /// (d) 版番号付き（v2 以降）の JSON は変換せず素通しすること。
+    ///
+    /// **期待値に版番号を直書きしない**（`legacyJSON` の doc 参照）。ここが見たいのは
+    /// 「encode が版を書いていること」であって、その値が幾つかではない。
+    func test_migration_versionedJSONIsPassedThrough() throws {
         let clip = TimelineClip(sourceID: sourceA, sourceStart: 0, sourceEnd: 4)
         var state = TimelineState(clips: [clip])
         state.applyRanges = [range(clip, 1, 2)]
         let data = try JSONEncoder().encode(state)
         let text = try XCTUnwrap(String(bytes: data, encoding: .utf8))
-        XCTAssertTrue(text.contains("\"schemaVersion\":2"),
+        XCTAssertTrue(text.contains("\"schemaVersion\":\(TimelineState.currentSchemaVersion)"),
                       "encode が schemaVersion を書いていない（次回起動で v1 と誤認する）")
+        XCTAssertGreaterThanOrEqual(TimelineState.currentSchemaVersion, 2,
+                                    "版が v1 まで下がっている（移行経路の意味が反転する）")
         let decoded = try JSONDecoder().decode(TimelineState.self, from: data)
         XCTAssertEqual(decoded, state)
         XCTAssertEqual(decoded.applyRanges[0].id, state.applyRanges[0].id)

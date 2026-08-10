@@ -12,18 +12,21 @@ enum TimelineLayerAppearance {
     static func label(for kind: TimelineLayerKind) -> String {
         switch kind {
         case .mosaic: return "モザイク"
+        case .audio: return "音楽"
         }
     }
 
     static func systemImage(for kind: TimelineLayerKind) -> String {
         switch kind {
         case .mosaic: return "squareshape.split.3x3"
+        case .audio: return "music.note"
         }
     }
 
     static func fill(for kind: TimelineLayerKind, isSelected: Bool) -> Color {
         switch kind {
         case .mosaic: return TimelinePalette.mosaicFill(isSelected: isSelected)
+        case .audio: return TimelinePalette.audioFill(isSelected: isSelected)
         }
     }
 }
@@ -54,7 +57,9 @@ struct TimelineLayerTrackView: View {
     /// `@GestureState` なのでキャンセルで自動的に初期値へ戻る。
     struct ApplyDraft: Equatable {
         let rangeID: UUID
-        let clipID: UUID
+        /// 素材時刻アンカー（`.mosaic`）のセグメントが属するクリップ。
+        /// **BGM（`.audio`）では nil**（`TimelineApplySpan.anchorClipID` と同じ約束）。
+        let clipID: UUID?
         let start: Double
         let end: Double
     }
@@ -318,6 +323,7 @@ struct TimelineLayerTrackView: View {
                         let committed = snappedDraft(span, kind: .edge(edge),
                                                      translation: Double(value.translation.width)).draft
                         onCommit(.applyEdge(rangeID: committed.rangeID, clipID: committed.clipID,
+                                            kind: span.kind,
                                             start: committed.start, end: committed.end))
                     }
             )
@@ -356,7 +362,8 @@ struct TimelineLayerTrackView: View {
                                                  translation: Double(value.translation.width)).draft
                     let delta = committed.start - span.start
                     onCommit(.applyMove(rangeID: committed.rangeID, clipID: committed.clipID,
-                                        deltaSeconds: delta, start: committed.start, end: committed.end))
+                                        kind: span.kind, deltaSeconds: delta,
+                                        start: committed.start, end: committed.end))
                 case .vertical:
                     break  // `onChange(of: moveState)` が nil への遷移で後始末する。
                 case nil:
@@ -390,16 +397,16 @@ struct TimelineLayerTrackView: View {
             playheadTime: playheadTime, totalDuration: totalDuration)
         let result = TimelineItemDrag.snappedDraft(
             span: span, kind: kind, translationPixels: translation, context: context)
-        return (ApplyDraft(rangeID: span.rangeID, clipID: span.clipID,
+        return (ApplyDraft(rangeID: span.rangeID, clipID: span.anchorClipID,
                            start: result.start, end: result.end), result.snappedTo)
     }
 
     private func displayBounds(_ span: TimelineApplySpan) -> (start: Double, end: Double) {
-        if let draft, draft.rangeID == span.rangeID, draft.clipID == span.clipID {
+        if let draft, draft.rangeID == span.rangeID, draft.clipID == span.anchorClipID {
             return (draft.start, draft.end)
         }
         if let applyDraft = moveState?.applyDraft,
-           applyDraft.rangeID == span.rangeID, applyDraft.clipID == span.clipID {
+           applyDraft.rangeID == span.rangeID, applyDraft.clipID == span.anchorClipID {
             return (applyDraft.start, applyDraft.end)
         }
         return (span.start, span.end)

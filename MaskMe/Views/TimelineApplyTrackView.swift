@@ -115,15 +115,21 @@ enum TimelineInteraction: Equatable {
     case trim(clipID: UUID, edge: TimelineTrimEdge, deltaSeconds: Double)
     /// 長押しドラッグでの並べ替え（`translationSeconds` は合成時刻の差分）。
     case reorder(clipID: UUID, translationSeconds: Double)
-    /// モザイク適用区間の端ドラッグ（合成時刻の絶対区間）。
+    /// 段のアイテムの端ドラッグ（合成時刻の絶対区間）。
     /// `clipID` はどのセグメントを掴んでいるかの識別（1 本の区間は複数クリップに
     /// またがって複数セグメントに見えるため）。確定もこのセグメント単位で行う。
-    case applyEdge(rangeID: UUID, clipID: UUID, start: Double, end: Double)
+    ///
+    /// **`kind` で確定先が変わる**（`.mosaic` → 適用区間の API、`.audio` → BGM の API）。
+    /// `clipID` は `.mosaic` でのみ非 nil（BGM は合成時刻アンカーでクリップに属さない。
+    /// `TimelineApplySpan.anchorClipID` の doc 参照）。
+    case applyEdge(rangeID: UUID, clipID: UUID?, kind: TimelineLayerKind,
+                   start: Double, end: Double)
     /// モザイク適用区間の本体ドラッグ（平行移動）。`deltaSeconds` は合成時刻の移動量で、
     /// `MosaicEditorModel.moveMosaicApplyRange(id:clipID:byCompositionDelta:)`
     /// （`TimelineState.movingApplyRange`）へそのまま渡す。
     /// `start` / `end` はドラッグ表示と同じ最終位置（確定後の選択引き直し用の目安）。
-    case applyMove(rangeID: UUID, clipID: UUID, deltaSeconds: Double, start: Double, end: Double)
+    case applyMove(rangeID: UUID, clipID: UUID?, kind: TimelineLayerKind,
+                   deltaSeconds: Double, start: Double, end: Double)
 }
 
 /// クリップ帯のトリム下書きから導いた**表示専用**パラメータ（クランプ済み）。

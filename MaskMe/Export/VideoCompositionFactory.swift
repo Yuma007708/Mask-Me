@@ -388,12 +388,25 @@ enum VideoCompositionFactory {
 enum AudioMixFactory {
     /// - Returns: 必要なとき（重なりがある / 音量が 1.0 でないクリップがある）だけ
     ///   非 nil。無変換構成では nil を返し、従来のパススルー経路を温存する。
+    /// - Parameters:
+    ///   - backgroundItems: BGM（E2）。**`backgroundTrack` へ実際に載った曲**を渡すこと。
+    ///   - backgroundTrack: BGM 専用トラック（無ければ nil）。元音声のトラック
+    ///     （`tracks`）とは**別の入力パラメータ**を持つ。これが「元動画の音と BGM の
+    ///     音量を別々に調整できる」ことの実体である。
     static func make(placements: [ClipPlacement],
                      overlaps: [TimelineMapping.Overlap],
-                     tracks: [AVMutableCompositionTrack]) -> AVMutableAudioMix? {
-        guard !tracks.isEmpty else { return nil }
+                     tracks: [AVMutableCompositionTrack],
+                     backgroundItems: [AudioItem] = [],
+                     backgroundTrack: AVMutableCompositionTrack? = nil) -> AVMutableAudioMix? {
+        // BGM があるならトラックが無くても mix は要る（BGM だけの構成）。
+        guard !tracks.isEmpty || backgroundTrack != nil else { return nil }
         let needsVolume = placements.contains { clampedVolume($0.clip.originalAudioVolume) != 1.0 }
-        guard !overlaps.isEmpty || needsVolume else { return nil }
+        // **BGM がある構成では常に mix を作る。** 音量が既定（1.0）でも作るのは、
+        // ここが nil になると `hasAudioMix` が false になり、書き出しが圧縮パススルーへ
+        // 落ちる経路が 1 つ増えるためである（`AudioExportPipeline` の
+        // `hasBackgroundAudio` と二重の守りにする）。
+        let hasBackground = backgroundTrack != nil
+        guard !overlaps.isEmpty || needsVolume || hasBackground else { return nil }
 
         // トラック順に固定して作る（辞書順の非決定性を持ち込まない）。
         let parameters: [(track: AVMutableCompositionTrack, params: AVMutableAudioMixInputParameters)] =
@@ -420,8 +433,23 @@ enum AudioMixFactory {
             }
         }
 
+        // BGM トラック（E2）。**曲ごとに音量を切り替える。**
+        //
+        // トラックは 1 本を共有するので、曲の切れ目で `setVolume(_:at:)` を打ち直す
+        // 必要がある（曲 A を 0.3、曲 B を 1.0 にしたとき、B の頭で戻さないと
+        // A の音量が最後まで効き続ける）。曲どうしは重ならないので、開始時刻に
+        // 打つだけで足りる。
+        var backgroundParams: AVMutableAudioMixInputParameters?
+        if let backgroundTrack {
+            let params = AVMutableAudioMixInputParameters(track: backgroundTrack)
+            for item in backgroundItems.sorted(by: { $0.compositionStart < $1.compositionStart }) {
+                params.setVolume(clampedVolume(item.volume), at: time(item.compositionStart))
+            }
+            backgroundParams = params
+        }
+
         let mix = AVMutableAudioMix()
-        mix.inputParameters = parameters.map(\.params)
+        mix.inputParameters = parameters.map(\.params) + [backgroundParams].compactMap { $0 }
         return mix
     }
 

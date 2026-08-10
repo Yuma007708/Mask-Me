@@ -275,8 +275,8 @@ final class TimelineBandLayoutTests: XCTestCase {
         XCTAssertEqual(spans[0].end, 5, accuracy: 1e-9)
         XCTAssertEqual(spans[1].start, 5, accuracy: 1e-9)
         XCTAssertEqual(spans[1].end, 7, accuracy: 1e-9)
-        XCTAssertEqual(spans[0].clipID, clips[0].id)
-        XCTAssertEqual(spans[1].clipID, clips[1].id)
+        XCTAssertEqual(spans[0].anchorClipID, clips[0].id)
+        XCTAssertEqual(spans[1].anchorClipID, clips[1].id)
     }
 
     /// rate ≠ 1 のクリップでは素材尺を rate で割った合成区間になる。

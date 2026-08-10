@@ -1,5 +1,6 @@
 import MosaicCore
 import SwiftUI
+import UniformTypeIdentifiers
 
 extension TransitionKind {
     /// 日本語表示名（UI 専用。コア層は表示文言を持たない）。
@@ -125,10 +126,39 @@ struct TimelineSpeedSheet: View {
 /// `placement.audioTrack` が nil になり音量設定が丸ごと無視される。押せるのに何も
 /// 起きないボタンを出さないため、選択中でも活性にしない。
 enum TimelineVolumeAvailability {
+    /// 音量 UI の対象。**選択しているものによって切り替わる**（ユーザー決定 2026-08-02:
+    /// 「どちらも既存の音量ボタンから」）。
+    enum Target: Equatable {
+        /// クリップの元音声（`TimelineClip.originalAudioVolume`）。
+        case clip(UUID)
+        /// BGM（`AudioItem.volume`）。
+        case audio(UUID)
+    }
+
     /// 指定クリップで音量 UI を出してよいか（未選択・存在しない ID・写真クリップは false）。
     static func isEnabled(timeline: TimelineState, clipID: UUID?) -> Bool {
         guard let clipID, let clip = timeline.clips.first(where: { $0.id == clipID }) else { return false }
         return timeline.sourceKind(of: clip.sourceID) != .photo
+    }
+
+    /// 選択状態から音量 UI の対象を決める唯一の入口（E2）。
+    ///
+    /// **BGM の選択を優先する。** レイヤーとクリップは相互排他で選ばれる
+    /// （`TimelineSelection`）ので実際には同時に立たないが、順序を決めておかないと
+    /// 「BGM を選んだのにクリップの音量が出る」形の取り違えが将来生まれる。
+    ///
+    /// 判定を View に書かず純関数へ置くのは、活性判定（ボタンを押せるか）と
+    /// 実行（どちらの音量を変えるか）が**必ず同じ規則**であることを担保するため。
+    /// 別々に書くと「押せるのに何も起きない」が作れてしまう。
+    static func target(timeline: TimelineState,
+                       selection: TimelineSelection) -> Target? {
+        if let layer = selection.layer, layer.kind == .audio,
+           timeline.audioItems.contains(where: { $0.id == layer.id }) {
+            return .audio(layer.id)
+        }
+        guard isEnabled(timeline: timeline, clipID: selection.clipID),
+              let clipID = selection.clipID else { return nil }
+        return .clip(clipID)
     }
 }
 
@@ -383,67 +413,3 @@ struct TimelineTransitionSheet: View {
 ///
 /// **消えたクリップの掃除は呼び出し側の責務**（`VideoTimelineView.pruneSelection`）。
 /// ここは ID を持たず、シート本体側で「引けなければ何も描かない」に留める。
-struct TimelineEditSheetsModifier: ViewModifier {
-    @ObservedObject var model: MosaicEditorModel
-    @Binding var speedClipID: UUID?
-    @Binding var volumeClipID: UUID?
-    @Binding var transitionClipID: UUID?
-    @Binding var showMediaPicker: Bool
-
-    func body(content: Content) -> some View {
-        content
-            .sheet(isPresented: presenting($speedClipID)) { speedSheet }
-            .sheet(isPresented: presenting($volumeClipID)) { volumeSheet }
-            .sheet(isPresented: presenting($transitionClipID)) { transitionSheet }
-            .sheet(isPresented: $showMediaPicker) {
-                TimelineMediaAppendPicker(model: model) { showMediaPicker = false }
-            }
-    }
-
-    /// 「ID が入っていたら出す・閉じたら nil に戻す」の Bool 変換。
-    private func presenting(_ clipID: Binding<UUID?>) -> Binding<Bool> {
-        Binding(get: { clipID.wrappedValue != nil },
-                set: { if !$0 { clipID.wrappedValue = nil } })
-    }
-
-    @ViewBuilder
-    private var speedSheet: some View {
-        if let id = speedClipID, let clip = model.timeline.clips.first(where: { $0.id == id }) {
-            // 上限はクリップ尺から決まる（合成尺が最小尺を割る倍率を選べないようにする。
-            // `TimelineRateScale.maximumRate(forClip:)` の doc 参照）。
-            TimelineSpeedSheet(initialRate: clip.rate,
-                               maximumRate: TimelineRateScale.maximumRate(forClip: clip)) { rate in
-                model.setClipRate(id: id, rate: rate)
-            }
-        }
-    }
-
-    @ViewBuilder
-    private var volumeSheet: some View {
-        if let id = volumeClipID, let clip = model.timeline.clips.first(where: { $0.id == id }) {
-            TimelineVolumeSheet(initialVolume: clip.originalAudioVolume) { volume in
-                model.setClipVolume(id: id, volume: volume)
-            }
-        }
-    }
-
-    @ViewBuilder
-    private var transitionSheet: some View {
-        if let id = transitionClipID,
-           let maximum = model.timeline.maximumTransitionDuration(afterClipID: id) {
-            TimelineTransitionSheet(
-                current: model.timeline.transitions[id],
-                maximumDuration: maximum,
-                onApply: { kind, duration in
-                    model.setTransition(afterClipID: id, kind: kind, duration: duration)
-                },
-                onRemove: { model.removeTransition(afterClipID: id) })
-        } else {
-            Text("このつなぎ目にはトランジションを付けられません（クリップが短すぎます）")
-                .font(.footnote)
-                .multilineTextAlignment(.center)
-                .padding(24)
-                .presentationDetents([.height(140)])
-        }
-    }
-}

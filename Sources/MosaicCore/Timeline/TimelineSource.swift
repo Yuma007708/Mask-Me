@@ -14,6 +14,9 @@ public struct TimelineSource: Identifiable, Hashable, Sendable, Codable {
         case video
         /// 写真由来の静止 mp4。検出は素材時刻 0 の 1 回だけで全フレームに適用される。
         case photo
+        /// BGM の音源（E2）。**クリップ（`TimelineClip`）からは参照されない。**
+        /// 参照するのは `AudioItem.sourceID` だけで、映像トラックを持たない。
+        case audio
     }
 
     /// 素材の識別子（`TimelineClip.sourceID` と一致させる）。

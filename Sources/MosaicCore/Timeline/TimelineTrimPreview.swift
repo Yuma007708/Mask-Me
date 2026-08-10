@@ -78,10 +78,12 @@ public extension TimelineBandLayout {
         let previewEnd = max(grabbed.bandStart, grabbed.bandEnd + shift)
         let inner = edge == .start ? shift : 0
         return spans.map { span in
-            guard let index = indices[span.clipID], index >= grabbed.index else { return span }
+            // BGM（`anchorClipID == nil`）はクリップに属さないので、トリムの追随対象外。
+            guard let anchor = span.anchorClipID,
+                  let index = indices[anchor], index >= grabbed.index else { return span }
             guard index == grabbed.index else { return span.shifted(by: shift) }
             return TimelineApplySpan(
-                rangeID: span.rangeID, clipID: span.clipID, kind: span.kind,
+                rangeID: span.rangeID, anchorClipID: span.anchorClipID, kind: span.kind,
                 start: min(max(span.start + inner, grabbed.bandStart), previewEnd),
                 end: min(max(span.end + inner, grabbed.bandStart), previewEnd),
                 isEdgeAdjustable: span.isEdgeAdjustable)
@@ -91,7 +93,7 @@ public extension TimelineBandLayout {
 
 private extension TimelineApplySpan {
     func shifted(by shift: Double) -> TimelineApplySpan {
-        TimelineApplySpan(rangeID: rangeID, clipID: clipID, kind: kind,
+        TimelineApplySpan(rangeID: rangeID, anchorClipID: anchorClipID, kind: kind,
                           start: start + shift, end: end + shift,
                           isEdgeAdjustable: isEdgeAdjustable)
     }

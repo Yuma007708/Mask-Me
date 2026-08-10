@@ -389,6 +389,7 @@ extension MosaicEditorModel {
         composition = built.composition
         videoComposition = built.videoComposition
         audioMix = built.audioMix
+        hasBackgroundAudio = built.hasBackgroundAudio
         renderLayout = built.layout
         // クリップが 1 本も無い build では `.zero` が来る（表示するサイズが無い ＝ nil）。
         let size = built.outputSize
@@ -425,10 +426,18 @@ extension MosaicEditorModel {
         guard !clipsSnapshot.isEmpty,
               clipsSnapshot.allSatisfy({ sourcesSnapshot[$0.sourceID] != nil }) else { return }
         let transitionsSnapshot = timeline.transitions
+        // BGM は**実効**（合成尺で切ったもの）だけを composition へ渡す。生の
+        // `timeline.audioItems` を渡すと、クリップを消して縮んだタイムラインの外へ
+        // 挿入しにいく（`AudioItem` 型の doc の温存規則）。
+        // 音源が未登録の曲は composition が組めないので落とす（`missingSource` で
+        // 再構築ごと失敗させると、音源を選び直すまで編集が一切できなくなる）。
+        let audioItemsSnapshot = timeline
+            .effectiveAudioItems(totalDuration: mapping.totalDuration)
+            .filter { sourcesSnapshot[$0.sourceID] != nil }
         do {
             let built = try await TimelineCompositionBuilder()
                 .build(clips: clipsSnapshot, transitions: transitionsSnapshot,
-                       sources: sourcesSnapshot)
+                       audioItems: audioItemsSnapshot, sources: sourcesSnapshot)
             guard generation == timelineGeneration else { return }  // 古い世代の結果は破棄
             apply(built: built, generation: generation)
             guard let controller = previewController else { return }

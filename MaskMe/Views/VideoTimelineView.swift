@@ -39,9 +39,13 @@ struct VideoTimelineView: View {
     @Environment(\.scenePhase) private var scenePhase
     @State var geometry = TimelineGeometry()
     @State var speedSheetClipID: UUID?
-    @State var volumeSheetClipID: UUID?
+    /// 音量シートの対象（クリップの元音声 or BGM）。**種を持つ型で持つこと**。
+    /// UUID だけにすると、どちらの音量を編集しているのかが型から消える。
+    @State var volumeSheetTarget: TimelineVolumeAvailability.Target?
     @State private var transitionSheetClipID: UUID?
     @State var showMediaPicker = false
+    /// 音楽ファイル選択（E2）。`.fileImporter` の提示条件。
+    @State var showAudioPicker = false
     /// スクロールの見え方（トラック内 x 座標系）。`TimelineScrollContainer` が更新し、
     /// サムネイル要求の可視範囲を決めるのに使う。
     @State var viewport = TimelineViewport(scrollOffset: 0, visibleWidth: 0, contentWidth: 0)
@@ -88,6 +92,14 @@ struct VideoTimelineView: View {
         TimelineBandLayout.applySpans(ranges: model.timeline.applyRanges, mapping: model.mapping,
                                       photoSourceIDs: model.timeline.photoSourceIDs)
     }
+    /// BGM の帯（E2）。**合成尺で切った実効だけ**を見せる
+    /// （`TimelineBandLayout.audioSpans` の doc 参照。生の `audioItems` を渡すと、
+    /// クリップを消して縮んだタイムラインの外へ帯が伸びる）。
+    var audioSpans: [TimelineApplySpan] {
+        TimelineBandLayout.audioSpans(items: model.timeline.audioItems,
+                                      totalDuration: totalDuration)
+    }
+
     /// 選択中クリップ（消えたクリップを指したままにしないよう毎回引き直す）。
     var selectedClip: TimelineClip? {
         guard let selectedClipID else { return nil }
@@ -149,8 +161,9 @@ struct VideoTimelineView: View {
         // シート本体と提示条件は `TimelineEditSheetsModifier`（TimelineEditSheets.swift）へ
         // 寄せてある（このファイルが file_length の閾値に張り付いているため）。
         .modifier(TimelineEditSheetsModifier(
-            model: model, speedClipID: $speedSheetClipID, volumeClipID: $volumeSheetClipID,
-            transitionClipID: $transitionSheetClipID, showMediaPicker: $showMediaPicker))
+            model: model, speedClipID: $speedSheetClipID, volumeTarget: $volumeSheetTarget,
+            transitionClipID: $transitionSheetClipID, showMediaPicker: $showMediaPicker,
+            showAudioPicker: $showAudioPicker, audioInsertTime: playheadTime))
     }
 
     /// サムネイル生成の抑止を 1 箇所で決める。
@@ -166,8 +179,8 @@ struct VideoTimelineView: View {
 
     /// いずれかのシートが出ているか（抑止の入力その 3）。
     private var isSheetPresented: Bool {
-        speedSheetClipID != nil || volumeSheetClipID != nil
-            || transitionSheetClipID != nil || showMediaPicker
+        speedSheetClipID != nil || volumeSheetTarget != nil
+            || transitionSheetClipID != nil || showMediaPicker || showAudioPicker
     }
 
     /// プレビューのデコード占有をサムネイル生成の抑止条件へ繋ぐ。
@@ -357,10 +370,12 @@ struct VideoTimelineView: View {
             guard let target = TimelineBandLayout.reorderTargetIndex(
                 layouts: clipLayouts, clipID: clipID, translationSeconds: translation) else { return }
             model.moveClip(id: clipID, toIndex: target)
-        case let .applyEdge(rangeID, clipID, start, end):
-            commitApplyEdge(rangeID: rangeID, clipID: clipID, start: start, end: end)
-        case let .applyMove(rangeID, clipID, delta, start, end):
-            commitApplyMove(rangeID: rangeID, clipID: clipID, delta: delta, start: start, end: end)
+        case let .applyEdge(rangeID, clipID, kind, start, end):
+            commitApplyEdge(rangeID: rangeID, clipID: clipID, kind: kind,
+                            interval: CompositionInterval(start: start, end: end))
+        case let .applyMove(rangeID, clipID, kind, delta, start, end):
+            commitApplyMove(rangeID: rangeID, clipID: clipID, kind: kind, delta: delta,
+                            interval: CompositionInterval(start: start, end: end))
         }
     }
 
@@ -375,17 +390,49 @@ struct VideoTimelineView: View {
     /// 掴んだセグメント（`rangeID` × `clipID`）の新区間だけを渡す。
     /// 差し替えは素材時刻で行われ、他セグメントぶん・クリップ使用範囲外の素材区間は
     /// コア層が温存する（`TimelineState.replacingApplyRange(id:clipID:compositionInterval:)`）。
-    private func commitApplyEdge(rangeID: UUID, clipID: UUID, start: Double, end: Double) {
-        model.setMosaicApplyRange(id: rangeID, clipID: clipID,
-                                  interval: CompositionInterval(start: start, end: end))
+    /// **種ごとの `switch` で全 case を網羅し、`default` は書かない**
+    /// （`TimelineSelection.prune` と同じ理由。種が増えたときに書き忘れると、
+    /// つまみは動くのに指を離すと必ず元へ戻る＝無言の no-op になる）。
+    private func commitApplyEdge(rangeID: UUID, clipID: UUID?, kind: TimelineLayerKind,
+                                 interval: CompositionInterval) {
+        let (start, end) = (interval.start, interval.end)
+        switch kind {
+        case .mosaic:
+            // `.mosaic` の clipID は必ず非 nil（`TimelineApplySpan.anchorClipID` の約束）。
+            // nil で来たら型の不変条件が壊れているので、黙って別のものを編集せず何もしない。
+            guard let clipID else { return }
+            model.setMosaicApplyRange(id: rangeID, clipID: clipID,
+                                      interval: CompositionInterval(start: start, end: end))
+        case .audio:
+            // BGM の端ドラッグは「差し替え」ではなく**現在位置からの差分**で確定する
+            // （素材時刻の伸縮に写す必要があるため。`TimelineState.trimmingAudioItem`）。
+            guard let item = model.timeline.audioItems.first(where: { $0.id == rangeID })
+            else { return }
+            let startDelta = start - item.compositionStart
+            let endDelta = end - item.compositionEnd
+            // 動いた方の端だけを確定する（両端が同時に動くことはない）。
+            if abs(startDelta) > abs(endDelta) {
+                model.trimAudioItem(id: rangeID, edge: .start, byCompositionDelta: startDelta)
+            } else {
+                model.trimAudioItem(id: rangeID, edge: .end, byCompositionDelta: endDelta)
+            }
+        }
         reselectApplyRange(near: (start + end) / 2)
     }
 
     /// 本体ドラッグ（移動）の確定。`start` / `end` はドラッグ表示と同じ最終位置で、
     /// 確定後の選択引き直し（マージで id が変わり得る）に使うだけ。実際の編集は
     /// `TimelineState.movingApplyRange` へそのまま渡す `delta`（合成時刻）が行う。
-    private func commitApplyMove(rangeID: UUID, clipID: UUID, delta: Double, start: Double, end: Double) {
-        model.moveMosaicApplyRange(id: rangeID, clipID: clipID, byCompositionDelta: delta)
+    private func commitApplyMove(rangeID: UUID, clipID: UUID?, kind: TimelineLayerKind,
+                                 delta: Double, interval: CompositionInterval) {
+        let (start, end) = (interval.start, interval.end)
+        switch kind {
+        case .mosaic:
+            guard let clipID else { return }
+            model.moveMosaicApplyRange(id: rangeID, clipID: clipID, byCompositionDelta: delta)
+        case .audio:
+            model.moveAudioItem(id: rangeID, byCompositionDelta: delta)
+        }
         reselectApplyRange(near: (start + end) / 2)
     }
 
@@ -428,9 +475,14 @@ struct VideoTimelineView: View {
         if let speedSheetClipID, !model.timeline.clips.contains(where: { $0.id == speedSheetClipID }) {
             self.speedSheetClipID = nil
         }
-        // 音量シートも同様（消えたクリップを指したまま空のシートを開きっぱなしにしない）。
-        if let volumeSheetClipID, !model.timeline.clips.contains(where: { $0.id == volumeSheetClipID }) {
-            self.volumeSheetClipID = nil
+        // 音量シートも同様（消えたクリップ／BGM を指したまま空のシートを開かない）。
+        switch volumeSheetTarget {
+        case let .clip(id) where !model.timeline.clips.contains(where: { $0.id == id }):
+            volumeSheetTarget = nil
+        case let .audio(id) where !model.timeline.audioItems.contains(where: { $0.id == id }):
+            volumeSheetTarget = nil
+        default:
+            break
         }
         // 継ぎ目シートも同じ扱い（undo でクリップが消えた状態のシートを開いたままにしない）。
         if let transitionSheetClipID,

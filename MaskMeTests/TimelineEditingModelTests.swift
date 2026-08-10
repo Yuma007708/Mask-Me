@@ -2007,10 +2007,15 @@ final class TimelineEditingModelTests: XCTestCase {
         //     ため全体区間へ移行。復元経路では再生成しないので、この 1 本だけが残る。
         let sourceC = UUID()
         let clipC = TimelineClip(sourceID: sourceC, sourceStart: 0, sourceEnd: 1)
+        //     **版番号を直書きしないこと。** `"schemaVersion":2` と書いていた間、版を 3 へ
+        //     上げた瞬間にこの除去が空振りして v1 の JSON が作れなくなり、(c) だけが
+        //     「移行が壊れた」ように見える形で落ちた（実際はテストの前提が古いだけ）。
         var v1 = String(decoding: try JSONEncoder().encode(TimelineState(clips: [clipC])),
                         as: UTF8.self)
-        v1 = v1.replacingOccurrences(of: ",\"schemaVersion\":2", with: "")
-        v1 = v1.replacingOccurrences(of: "\"schemaVersion\":2,", with: "")
+        let versionField = "\"schemaVersion\":\(TimelineState.currentSchemaVersion)"
+        v1 = v1.replacingOccurrences(of: ",\(versionField)", with: "")
+        v1 = v1.replacingOccurrences(of: "\(versionField),", with: "")
+        XCTAssertFalse(v1.contains("schemaVersion"), "版番号が残っている（v1 になっていない）")
         let migrated = try JSONDecoder().decode(TimelineState.self, from: Data(v1.utf8))
         let restoredV1 = try await restore(migrated, sourceID: sourceC)
         XCTAssertEqual(restoredV1.timeline.applyRanges.count, 1)
@@ -3933,7 +3938,7 @@ final class PhotoClipDurationAndVolumeTests: XCTestCase {
         let bands = TimelineBandLayout.applySpans(ranges: model.timeline.applyRanges,
                                                   mapping: model.mapping,
                                                   photoSourceIDs: model.timeline.photoSourceIDs)
-            .filter { $0.clipID == clipID }
+            .filter { $0.anchorClipID == clipID }
         XCTAssertEqual(bands.count, 1, "\(label): 帯が 1 本でない", file: file, line: line)
         var off = 0
         let samples = 40
@@ -4210,5 +4215,137 @@ final class TimelineVolumeSheetWiringTests: XCTestCase {
         sheet.onApply(1.8)
         XCTAssertEqual(model.clips[0].originalAudioVolume, 1.0, accuracy: 1e-6,
                        "範囲外の音量が素通りしている")
+    }
+}
+
+// MARK: - BGM の UI 配線と下書き（E2-3b）
+
+/// BGM を段の仕組みへ載せたぶんの契約。
+///
+/// **下書きの穴の回帰が主目的**。`draftSources` / `sessionReferencedSourceIDs` は
+/// クリップだけを走査していたので、BGM の音源が下書きへコピーされず、
+/// 再開したときに帯だけ残って音が消えていた。
+@MainActor
+final class BackgroundAudioWiringTests: XCTestCase {
+    private func makeModel() -> MosaicEditorModel {
+        let model = MosaicEditorModel(mode: .video, recents: RecentItemsStore())
+        model.faceMosaicOn = true
+        return model
+    }
+
+    /// 動画 1 本 + BGM 1 曲を積んだ状態を作る（音源は AVURLAsset で登録する）。
+    private func makeModelWithAudio() throws -> (MosaicEditorModel, UUID, URL) {
+        let model = makeModel()
+        let videoSource = model.currentSourceID
+        model.setClipsForTesting([TimelineClip(sourceID: videoSource, sourceStart: 0, sourceEnd: 10)])
+
+        let audioURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(UUID().uuidString).m4a")
+        try Data([0x00]).write(to: audioURL)
+        let audioSource = UUID()
+        model.registerAudioSource(id: audioSource, asset: AVURLAsset(url: audioURL))
+        model.addAudioItem(sourceID: audioSource, sourceDuration: 4, atCompositionTime: 1)
+        return (model, audioSource, audioURL)
+    }
+
+    /// **下書きへ BGM の音源も持っていく。**
+    ///
+    /// 漏らすと、下書きを再開したとき帯だけ残って音源が `sources` に無く、
+    /// BGM が黙って鳴らない（`rebuildComposition` が音源未登録の曲を落とす）。
+    func test_draftSources_includeBackgroundAudioSource() throws {
+        let (model, audioSource, audioURL) = try makeModelWithAudio()
+        defer { try? FileManager.default.removeItem(at: audioURL) }
+
+        XCTAssertEqual(model.timeline.audioItems.count, 1, "前提が崩れている（BGM が入っていない）")
+        XCTAssertTrue(model.draftSources.contains { $0.id == audioSource },
+                      "BGM の音源が下書き保存対象に出てこない（再開すると音が消える）")
+    }
+
+    /// **GC 保護にも BGM の音源を含める。**
+    ///
+    /// 含めないと「BGM を消して再保存 → undo で戻す」で音源の実体だけが消え、
+    /// 帯はあるのに鳴らない状態になる。
+    func test_sessionReferencedSourceIDs_includeBackgroundAudioAcrossUndo() throws {
+        let (model, audioSource, audioURL) = try makeModelWithAudio()
+        defer { try? FileManager.default.removeItem(at: audioURL) }
+        model.commitEdit()
+
+        let itemID = try XCTUnwrap(model.timeline.audioItems.first?.id)
+        model.removeAudioItem(id: itemID)
+        model.commitEdit()
+        XCTAssertTrue(model.timeline.audioItems.isEmpty, "前提が崩れている（BGM が消えていない）")
+
+        XCTAssertTrue(model.sessionReferencedSourceIDs.contains(audioSource),
+                      "undo で戻せる BGM の音源が GC 保護から漏れている")
+    }
+
+    /// BGM の帯は**合成尺で切った実効**だけを見せる。
+    func test_audioSpans_showOnlyEffectiveItems() throws {
+        let (model, _, audioURL) = try makeModelWithAudio()
+        defer { try? FileManager.default.removeItem(at: audioURL) }
+
+        let spans = TimelineBandLayout.audioSpans(items: model.timeline.audioItems,
+                                                   totalDuration: model.mapping.totalDuration)
+        XCTAssertEqual(spans.count, 1)
+        XCTAssertNil(spans[0].anchorClipID, "BGM の帯がクリップに紐づいている")
+        XCTAssertEqual(spans[0].kind, .audio)
+    }
+
+    /// 音量 UI の対象は**選択しているもので切り替わる**。
+    ///
+    /// 活性判定（押せるか）と実行（どちらの音量を変えるか）が同じ純関数を通ることの契約。
+    /// 別々に書くと「押せるのに何も起きない」が作れる。
+    func test_volumeTarget_switchesWithSelection() throws {
+        let (model, _, audioURL) = try makeModelWithAudio()
+        defer { try? FileManager.default.removeItem(at: audioURL) }
+        let clipID = try XCTUnwrap(model.timeline.clips.first?.id)
+        let itemID = try XCTUnwrap(model.timeline.audioItems.first?.id)
+
+        model.timelineSelection.selectClip(clipID)
+        XCTAssertEqual(TimelineVolumeAvailability.target(timeline: model.timeline,
+                                                        selection: model.timelineSelection),
+                       .clip(clipID), "クリップを選んでいるのに BGM の音量が出る")
+
+        model.timelineSelection.selectLayer(TimelineLayerSelection(kind: .audio, id: itemID))
+        XCTAssertEqual(TimelineVolumeAvailability.target(timeline: model.timeline,
+                                                        selection: model.timelineSelection),
+                       .audio(itemID), "BGM を選んでいるのにクリップの音量が出る")
+
+        model.timelineSelection.clear()
+        XCTAssertNil(TimelineVolumeAvailability.target(timeline: model.timeline,
+                                                      selection: model.timelineSelection),
+                     "何も選んでいないのに音量 UI が出る")
+    }
+
+    /// 消えた BGM を選んだままだと音量 UI を出さない（空のシートを開かない）。
+    func test_volumeTarget_afterRemovingAudio_isNil() throws {
+        let (model, _, audioURL) = try makeModelWithAudio()
+        defer { try? FileManager.default.removeItem(at: audioURL) }
+        let itemID = try XCTUnwrap(model.timeline.audioItems.first?.id)
+        model.timelineSelection.selectLayer(TimelineLayerSelection(kind: .audio, id: itemID))
+        model.removeAudioItem(id: itemID)
+
+        XCTAssertNil(TimelineVolumeAvailability.target(timeline: model.timeline,
+                                                      selection: model.timelineSelection),
+                     "消えた BGM を対象にしたまま音量 UI が開く")
+    }
+
+    /// BGM の編集は undo で戻る（`applyTimelineEdit` を通していることの実測）。
+    func test_audioEdits_areUndoable() throws {
+        let (model, _, audioURL) = try makeModelWithAudio()
+        defer { try? FileManager.default.removeItem(at: audioURL) }
+        model.commitEdit()
+        let itemID = try XCTUnwrap(model.timeline.audioItems.first?.id)
+
+        model.setAudioVolume(id: itemID, volume: 0.25)
+        model.commitEdit()
+        XCTAssertEqual(model.timeline.audioItems[0].volume, 0.25, accuracy: 1e-6)
+
+        model.undo()
+        XCTAssertEqual(model.timeline.audioItems[0].volume, 1.0, accuracy: 1e-6,
+                       "BGM の音量が undo で戻らない")
+        model.redo()
+        XCTAssertEqual(model.timeline.audioItems[0].volume, 0.25, accuracy: 1e-6,
+                       "BGM の音量が redo で戻らない")
     }
 }

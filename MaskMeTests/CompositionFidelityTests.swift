@@ -228,6 +228,7 @@ final class CompositionFidelityTests: XCTestCase {
         XCTAssertEqual(conditions, AudioTrackConditions(),
                        "無変換タイムラインなのに変換条件が立っている")
         XCTAssertEqual(AudioExportPipeline.decide(isTrimming: false, hasAudioMix: false,
+                                                  hasBackgroundAudio: false,
                                                   conditions: conditions),
                        .passthrough,
                        "無変換タイムラインがパススルーに乗らない（bit 同一の忠実度が壊れる）")

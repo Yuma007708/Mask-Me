@@ -53,6 +53,194 @@ final class TimelineCompositionBuilderTests: XCTestCase {
         return url
     }
 
+    /// BGM 用の音源（映像なし・音声だけの m4a）を生成する。
+    ///
+    /// **映像を入れない**のが要点。BGM の音源は音声トラックしか持たないので、
+    /// builder が `loadTracks(withMediaType: .video)` を要求していたらここで落ちる。
+    private func makeTestAudio(seconds: Double, sampleRate: Double = 44100) async throws -> URL {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("\(UUID().uuidString).m4a")
+        let writer = try AVAssetWriter(outputURL: url, fileType: .m4a)
+        let input = AVAssetWriterInput(mediaType: .audio, outputSettings: [
+            AVFormatIDKey: kAudioFormatMPEG4AAC,
+            AVSampleRateKey: sampleRate,
+            AVNumberOfChannelsKey: 1,
+            AVEncoderBitRateKey: 64000
+        ])
+        input.expectsMediaDataInRealTime = false
+        writer.add(input)
+        writer.startWriting()
+        writer.startSession(atSourceTime: .zero)
+
+        let frames = 1024
+        let totalSamples = Int(seconds * sampleRate)
+        var written = 0
+        var format: CMAudioFormatDescription?
+        var asbd = AudioStreamBasicDescription(
+            mSampleRate: sampleRate, mFormatID: kAudioFormatLinearPCM,
+            mFormatFlags: kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked,
+            mBytesPerPacket: 2, mFramesPerPacket: 1, mBytesPerFrame: 2,
+            mChannelsPerFrame: 1, mBitsPerChannel: 16, mReserved: 0)
+        CMAudioFormatDescriptionCreate(allocator: kCFAllocatorDefault, asbd: &asbd,
+                                       layoutSize: 0, layout: nil, magicCookieSize: 0,
+                                       magicCookie: nil, extensions: nil,
+                                       formatDescriptionOut: &format)
+        guard let format else { throw NSError(domain: "test", code: -1) }
+
+        while written < totalSamples {
+            while !input.isReadyForMoreMediaData {
+                try await Task.sleep(nanoseconds: 1_000_000)
+            }
+            let count = min(frames, totalSamples - written)
+            var samples = [Int16](repeating: 0, count: count)
+            for i in 0..<count {
+                let t = Double(written + i) / sampleRate
+                samples[i] = Int16(sin(2 * .pi * 440 * t) * 12000)
+            }
+            var block: CMBlockBuffer?
+            let byteCount = count * 2
+            CMBlockBufferCreateWithMemoryBlock(
+                allocator: kCFAllocatorDefault, memoryBlock: nil, blockLength: byteCount,
+                blockAllocator: kCFAllocatorDefault, customBlockSource: nil, offsetToData: 0,
+                dataLength: byteCount, flags: 0, blockBufferOut: &block)
+            guard let block else { break }
+            _ = samples.withUnsafeBytes {
+                CMBlockBufferReplaceDataBytes(with: $0.baseAddress!, blockBuffer: block,
+                                              offsetIntoDestination: 0, dataLength: byteCount)
+            }
+            var sample: CMSampleBuffer?
+            var timing = CMSampleTimingInfo(
+                duration: CMTime(value: 1, timescale: CMTimeScale(sampleRate)),
+                presentationTimeStamp: CMTime(value: CMTimeValue(written),
+                                              timescale: CMTimeScale(sampleRate)),
+                decodeTimeStamp: .invalid)
+            CMSampleBufferCreateReady(allocator: kCFAllocatorDefault, dataBuffer: block,
+                                      formatDescription: format, sampleCount: count,
+                                      sampleTimingEntryCount: 1, sampleTimingArray: &timing,
+                                      sampleSizeEntryCount: 1, sampleSizeArray: [2],
+                                      sampleBufferOut: &sample)
+            if let sample { input.append(sample) }
+            written += count
+        }
+        input.markAsFinished()
+        await writer.finishWriting()
+        return url
+    }
+
+    // MARK: - BGM（E2-2）
+
+    /// BGM を置くと**専用の音声トラックが 1 本増える**こと、`hasBackgroundAudio` が
+    /// 立つこと、置いた位置と長さが composition に反映されること。
+    func test_backgroundAudio_addsDedicatedTrack() async throws {
+        let videoURL = try await makeTestVideo(seconds: 4.0)
+        let audioURL = try await makeTestAudio(seconds: 3.0)
+        defer {
+            try? FileManager.default.removeItem(at: videoURL)
+            try? FileManager.default.removeItem(at: audioURL)
+        }
+        let videoSource = UUID()
+        let audioSource = UUID()
+        let clip = TimelineClip(sourceID: videoSource, sourceStart: 0, sourceEnd: 4)
+        let item = AudioItem(sourceID: audioSource, sourceStart: 0, sourceEnd: 3,
+                             compositionStart: 1)
+
+        let built = try await TimelineCompositionBuilder().build(
+            clips: [clip], audioItems: [item],
+            sources: [videoSource: AVURLAsset(url: videoURL),
+                      audioSource: AVURLAsset(url: audioURL)])
+
+        XCTAssertTrue(built.hasBackgroundAudio, "BGM を置いたのに hasBackgroundAudio が false")
+        let audioTracks = built.composition.tracks(withMediaType: .audio)
+        // 素材の動画は無音なのでクリップ側の音声トラックは除去される。残るのは BGM だけ。
+        XCTAssertEqual(audioTracks.count, 1, "BGM のトラックが載っていない")
+
+        // **`track.timeRange` を見てはいけない。** あちらは先頭の empty edit を含む
+        // トラック全体の範囲で、ここでは 0...4 になる（実測）。BGM が「どこから
+        // どれだけ鳴るか」は**セグメント**でしか読めない。
+        let filled = audioTracks[0].segments.filter { !$0.isEmpty }
+        XCTAssertEqual(filled.count, 1, "BGM のセグメントが 1 本になっていない")
+        XCTAssertEqual(CMTimeGetSeconds(filled[0].timeMapping.target.start), 1, accuracy: 0.05,
+                       "BGM が指定した合成時刻から始まっていない")
+        XCTAssertEqual(CMTimeGetSeconds(filled[0].timeMapping.target.duration), 3, accuracy: 0.05,
+                       "BGM の長さが違う")
+        // 途中から始まる BGM の手前には empty edit が残る。これは書き出しが
+        // 圧縮パススルーを避ける根拠の 1 つでもある（`AudioExportPipeline` の
+        // `hasEmptySegments`）。
+        XCTAssertTrue(audioTracks[0].segments.contains { $0.isEmpty },
+                      "BGM の手前に empty edit が無い（開始位置がずれている疑い）")
+        XCTAssertNotNil(built.audioMix,
+                        "BGM があるのに audioMix が nil（書き出しがパススルーへ落ちる）")
+    }
+
+    /// **素材の実尺を超える区間はクランプする。** 超えたまま `insertTimeRange` へ
+    /// 渡すと AVFoundation が失敗し、書き出しごと落ちる。
+    func test_backgroundAudio_clampsToSourceDuration() async throws {
+        let videoURL = try await makeTestVideo(seconds: 4.0)
+        let audioURL = try await makeTestAudio(seconds: 2.0)
+        defer {
+            try? FileManager.default.removeItem(at: videoURL)
+            try? FileManager.default.removeItem(at: audioURL)
+        }
+        let videoSource = UUID()
+        let audioSource = UUID()
+        let clip = TimelineClip(sourceID: videoSource, sourceStart: 0, sourceEnd: 4)
+        // 2 秒しかない音源に対して 0...10 秒を要求する（下書きの復元や音源差し替えで起こる）。
+        let item = AudioItem(sourceID: audioSource, sourceStart: 0, sourceEnd: 10,
+                             compositionStart: 0)
+
+        let built = try await TimelineCompositionBuilder().build(
+            clips: [clip], audioItems: [item],
+            sources: [videoSource: AVURLAsset(url: videoURL),
+                      audioSource: AVURLAsset(url: audioURL)])
+
+        XCTAssertTrue(built.hasBackgroundAudio)
+        let filled = built.composition.tracks(withMediaType: .audio)[0]
+            .segments.filter { !$0.isEmpty }
+        let duration = filled.reduce(0.0) { $0 + CMTimeGetSeconds($1.timeMapping.target.duration) }
+        XCTAssertLessThanOrEqual(duration, 2.1, "素材の実尺を超えて挿入されている")
+        XCTAssertGreaterThan(duration, 1.9, "クランプが効きすぎて BGM がほぼ載っていない")
+    }
+
+    /// 音源に音声トラックが無い（映像だけの mp4 を選んだ）ときは、その曲を飛ばして
+    /// **書き出しごと失敗させない**。
+    func test_backgroundAudio_sourceWithoutAudioTrack_isSkipped() async throws {
+        let videoURL = try await makeTestVideo(seconds: 2.0)
+        let silentURL = try await makeTestVideo(seconds: 2.0)
+        defer {
+            try? FileManager.default.removeItem(at: videoURL)
+            try? FileManager.default.removeItem(at: silentURL)
+        }
+        let videoSource = UUID()
+        let audioSource = UUID()
+        let clip = TimelineClip(sourceID: videoSource, sourceStart: 0, sourceEnd: 2)
+        let item = AudioItem(sourceID: audioSource, sourceStart: 0, sourceEnd: 2,
+                             compositionStart: 0)
+
+        let built = try await TimelineCompositionBuilder().build(
+            clips: [clip], audioItems: [item],
+            sources: [videoSource: AVURLAsset(url: videoURL),
+                      audioSource: AVURLAsset(url: silentURL)])
+
+        XCTAssertFalse(built.hasBackgroundAudio, "音声の無い素材を BGM として載せている")
+        XCTAssertTrue(built.composition.tracks(withMediaType: .audio).isEmpty,
+                      "空の音声トラックが残っている（writer が -11800 で落ちる）")
+    }
+
+    /// BGM を置かない構成は**従来どおり**（トラックも `hasBackgroundAudio` も増えない）。
+    /// 無変換タイムラインの忠実度を壊していないことの回帰。
+    func test_withoutBackgroundAudio_compositionIsUnchanged() async throws {
+        let videoURL = try await makeTestVideo(seconds: 2.0)
+        defer { try? FileManager.default.removeItem(at: videoURL) }
+        let videoSource = UUID()
+        let clip = TimelineClip(sourceID: videoSource, sourceStart: 0, sourceEnd: 2)
+
+        let built = try await TimelineCompositionBuilder().build(
+            clips: [clip], sources: [videoSource: AVURLAsset(url: videoURL)])
+
+        XCTAssertFalse(built.hasBackgroundAudio)
+        XCTAssertNil(built.audioMix, "BGM が無いのに audioMix が付いた（パススルーが効かなくなる）")
+    }
+
     /// 単一クリップでも Composition を経由すること。
     /// 特別扱いの分岐を作らない設計を固定する。
     func test_singleClipProducesComposition() async throws {
