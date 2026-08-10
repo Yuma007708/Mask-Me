@@ -64,20 +64,52 @@ enum TimelinePalette {
 
 /// 編集ツールバーの 1 項目。
 struct TimelineToolItem: Identifiable {
+    /// 道具の役割。**色はここから決まる**（`AppTheme.ToolAccent`）。
+    ///
+    /// 場所ではなく色で覚えられるようにするための区分なので、**見た目の都合で
+    /// 割り当てを変えないこと**。同じ役割の道具は段が変わっても同じ色でいる。
+    enum Role {
+        /// 隠す（モザイク・顔・矩形）。
+        case mask
+        /// 切る・並べる（分割・複製・削除・速度）。
+        case cut
+        /// 足す（テキスト・音楽・素材の追加）。
+        case add
+        /// 飾る（フィルター・色調補正・ステッカー）。
+        case decorate
+        /// 形（比率・切り抜き・変形）。
+        case shape
+        /// 色を持たない（表示倍率など、素材に手を加えない操作）。
+        case neutral
+
+        var color: Color {
+            switch self {
+            case .mask: return AppTheme.ToolAccent.mask
+            case .cut: return AppTheme.ToolAccent.cut
+            case .add: return AppTheme.ToolAccent.add
+            case .decorate: return AppTheme.ToolAccent.decorate
+            case .shape: return AppTheme.ToolAccent.shape
+            case .neutral: return AppTheme.ink
+            }
+        }
+    }
+
     let title: String
     let systemImage: String
     let isEnabled: Bool
+    let role: Role
     /// 直前に区切り線を入れるか（操作の系統を目で分けるため）。
     let separatorBefore: Bool
     let action: () -> Void
 
     var id: String { title }
 
-    init(title: String, systemImage: String, isEnabled: Bool,
+    init(title: String, systemImage: String, isEnabled: Bool, role: Role = .neutral,
          separatorBefore: Bool = false, action: @escaping () -> Void) {
         self.title = title
         self.systemImage = systemImage
         self.isEnabled = isEnabled
+        self.role = role
         self.separatorBefore = separatorBefore
         self.action = action
     }
@@ -123,17 +155,25 @@ struct TimelineToolbarView: View {
         .allowsHitTesting(false)
     }
 
+    /// **色は絵だけに載せ、文字は白のまま。** 両方を色にすると、無効時の
+    /// `opacity(0.3)` と重なって「押せるのに読めない」状態になる。
+    /// 絵の背景は同じ色を薄く敷いて、色が小さくても拾えるようにする。
     private func button(_ item: TimelineToolItem) -> some View {
         Button(action: item.action) {
-            VStack(spacing: 1) {
+            VStack(spacing: 3) {
                 Image(systemName: item.systemImage)
-                    .font(.system(size: 20))
+                    .font(.system(size: 17))
+                    .foregroundStyle(item.role.color)
+                    .frame(width: 34, height: 30)
+                    .background(item.role.color.opacity(0.16),
+                                in: RoundedRectangle(cornerRadius: AppTheme.chipRadius,
+                                                     style: .continuous))
                 Text(item.title)
                     .font(.system(size: 10))
                     .lineLimit(1)
+                    .foregroundStyle(.white)
             }
             .frame(minWidth: 52)
-            .foregroundStyle(.white)
         }
         .buttonStyle(.plain)
         .disabled(!item.isEnabled)

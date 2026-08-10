@@ -1,13 +1,27 @@
 import SwiftUI
 import MosaicCore
 
-/// Landing screen: two side-by-side entry buttons (写真 / 動画) on top,
-/// the recent-items list below.
+/// ホーム（作品置き場）。上に「＋ 新しく作る」、下に作品のグリッド。
+///
+/// ## 入口を 1 つにまとめてある
+///
+/// 旧 UI は「写真」「動画」の 2 ボタン＋タブバー中央のカメラで、**新規作成の入口が
+/// 3 か所に散っていた**。押す前に種類を決めさせられるうえ、カメラだけ別の場所にある。
+/// ここでは `＋ 新しく作る` の 1 つに集約し、押した後のシートで
+/// 写真／動画／カメラを選ばせる（一般的な編集アプリと同じ形）。
+///
+/// カメラは `MainTabView` が `fullScreenCover` で出す。ホームからは
+/// `onRequestCamera` を通じて依頼するだけで、**ここでカメラ画面を持たない**
+/// （同じ画面を 2 か所から出すと、撮影後の戻り先が二重になる）。
 struct HomeView: View {
     @EnvironmentObject private var recents: RecentItemsStore
     @EnvironmentObject private var draftStore: DraftStore
     @EnvironmentObject private var settingsStore: DetectionSettingsStore
 
+    /// タブバー側にカメラを開いてもらう（この画面は撮影を持たない）。
+    var onRequestCamera: () -> Void = {}
+
+    @State private var showCreateSheet = false
     @State private var pickerFilter: MediaPicker.Filter?
     @State private var pickedMedia: PickedMedia?
     @State private var resumeContext: EditorView.ResumeContext?
@@ -21,21 +35,22 @@ struct HomeView: View {
     }
 
     var body: some View {
-        VStack(spacing: 20) {
-            HStack(spacing: 12) {
-                mediaButton(title: "写真", systemImage: "photo", isPrimary: false) {
-                    pickerFilter = .images
-                }
-                mediaButton(title: "動画", systemImage: "video", isPrimary: true) {
-                    pickerFilter = .videos
-                }
-            }
-            .padding(.horizontal)
-            .padding(.top, 8)
+        VStack(spacing: 18) {
+            createButton
+                .padding(.horizontal, 16)
+                .padding(.top, 10)
 
             RecentItemsView(onResumeDraft: resume(_:))
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(AppTheme.background)
         .navigationTitle("Mask Me")
+        .confirmationDialog("新しく作る", isPresented: $showCreateSheet, titleVisibility: .visible) {
+            Button("写真を選ぶ") { pickerFilter = .images }
+            Button("動画を選ぶ") { pickerFilter = .videos }
+            Button("カメラで撮る") { onRequestCamera() }
+            Button("キャンセル", role: .cancel) {}
+        }
         .sheet(item: $pickerFilter) { filter in
             // ここは**新規編集セッションの開始**なので 1 件のまま（既定値）。
             // 複数選択はタイムラインへの素材追加（VideoTimelineView）だけが使う。
@@ -64,6 +79,25 @@ struct HomeView: View {
         .onAppear { seedForUITestsIfNeeded() }
     }
 
+    private var createButton: some View {
+        Button { showCreateSheet = true } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "plus")
+                    .font(.system(size: 15, weight: .bold))
+                Text("新しく作る")
+                    .font(.system(size: 16, weight: .semibold))
+            }
+            .frame(maxWidth: .infinity)
+            .frame(height: 54)
+            .foregroundStyle(AppTheme.onAccent)
+            .background(AppTheme.accent,
+                        in: RoundedRectangle(cornerRadius: AppTheme.cornerRadius, style: .continuous))
+            .shadow(color: AppTheme.accent.opacity(0.35), radius: 10, y: 4)
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("home.create")
+    }
+
     /// UI テスト起動時だけ、合成した動画で編集画面へ直行する（`UITestBootstrap` の doc）。
     /// 通常起動では `isSeedingVideo` が false なので何もしない。
     private func seedForUITestsIfNeeded() {
@@ -76,11 +110,16 @@ struct HomeView: View {
         }
     }
 
-    /// 動画の「編集中」下書きをタップしたら、元動画＋保存パラメータで再開する。
-    /// v2 下書きはタイムライン（複数クリップ・rate・トランジション）も復元する。
+    /// 「編集中」の下書きをタップしたら、元の素材＋保存パラメータで再開する。
+    ///
+    /// **写真と動画で素材の取り出し方が違う。** 動画は `sourceURL(for:)` が
+    /// 素材コピーの URL を返すが、写真は JPEG として保存してあるので画像として
+    /// 読み直す（`PickedMedia.image` を作る）。読めなければ何もしない——
+    /// ここで空の編集画面へ進むと、保存した瞬間に下書きが空で上書きされる。
+    ///
+    /// v2 の動画下書きはタイムライン（複数クリップ・rate・トランジション）も復元する。
     private func resume(_ draft: EditingDraft) {
-        pickedMedia = .video(draftStore.sourceURL(for: draft))
-        resumeContext = EditorView.ResumeContext(
+        let context = EditorView.ResumeContext(
             draftID: draft.id,
             faceMosaicOn: draft.faceMosaicOn,
             objectMosaicOn: draft.objectMosaicOn,
@@ -93,27 +132,19 @@ struct HomeView: View {
             sourceURLs: draftStore.sourceURLs(for: draft),
             primarySourceID: draft.primarySource?.id
         )
-        showEditor = true
-    }
 
-    private func mediaButton(
-        title: String,
-        systemImage: String,
-        isPrimary: Bool,
-        action: @escaping () -> Void
-    ) -> some View {
-        Button(action: action) {
-            Label(title, systemImage: systemImage)
-                .font(.system(size: 15, weight: .semibold))
-                .frame(maxWidth: .infinity)
-                .frame(height: 52)
-                .foregroundStyle(.white)
-                .background(
-                    isPrimary ? Color.accentColor : Color(uiColor: .systemGray5),
-                    in: RoundedRectangle(cornerRadius: 13)
-                )
+        if draft.kind == .photo {
+            let url = draftStore.sourceURL(for: draft)
+            guard let data = try? Data(contentsOf: url), let image = UIImage(data: data) else {
+                pickerError = "編集中の写真を読み込めませんでした。"
+                return
+            }
+            pickedMedia = .image(image)
+        } else {
+            pickedMedia = .video(draftStore.sourceURL(for: draft))
         }
-        .buttonStyle(.plain)
+        resumeContext = context
+        showEditor = true
     }
 }
 

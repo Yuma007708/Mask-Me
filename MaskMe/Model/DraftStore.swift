@@ -164,7 +164,13 @@ final class DraftStore: ObservableObject {
             faceSelections: faceSelections,
             personProfiles: personProfiles,
             photoEdit: photoEdit,
-            thumbnailFileName: nil
+            // **写真の下書きにもサムネイルを書く。** 無いとホームの「編集中」カードが
+            // 記号だけになり、どの写真を編集していたのか画面から分からない
+            // （旧 UI は写真の下書きを一覧に出していなかったので露見しなかった）。
+            // 素材そのもの（`photo-<id>.jpg`）を読むと 1 枚が数 MB になるため、
+            // 動画と同じ `thumb-<draftID>.jpg` を別に持つ。`reuse: id` で
+            // 同じ下書きを上書きするたびに使い回し、ファイルが増えないようにする。
+            thumbnailFileName: writeThumbnail(Self.thumbnailImage(from: image), reuse: id)
         )
         savePhotoIndex()
     }
@@ -305,6 +311,22 @@ final class DraftStore: ObservableObject {
             && !referenced.contains(name)
             && !protectedPrefixes.contains(where: { name.hasPrefix($0) }) {
             try? fileManager.removeItem(at: directory.appendingPathComponent(name))
+        }
+    }
+
+    /// カード表示用に縮めた画像。長辺 480pt に収める（等倍で書くと 1 枚 数 MB になる）。
+    ///
+    /// **元が既に小さいときは拡大しない。** `UIGraphicsImageRenderer` は指定サイズへ
+    /// 引き伸ばすので、小さい素材でファイルだけ大きくなるのを避ける。
+    private static func thumbnailImage(from image: UIImage, maxSide: CGFloat = 480) -> UIImage {
+        let side = max(image.size.width, image.size.height)
+        guard side > maxSide, side > 0 else { return image }
+        let scale = maxSide / side
+        let size = CGSize(width: image.size.width * scale, height: image.size.height * scale)
+        let format = UIGraphicsImageRendererFormat.default()
+        format.scale = 1
+        return UIGraphicsImageRenderer(size: size, format: format).image { _ in
+            image.draw(in: CGRect(origin: .zero, size: size))
         }
     }
 

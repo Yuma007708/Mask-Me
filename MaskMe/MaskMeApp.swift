@@ -15,6 +15,11 @@ struct MaskMeApp: App {
             NavigationStack {
                 MainTabView()
             }
+            // **端末のライト／ダーク設定に追従させない**（`AppTheme` の型 doc 参照）。
+            // 編集画面は映像の上に道具を重ねるので、地の明るさが変わると同じ操作でも
+            // 見え方が変わる。地の色は `AppTheme` が 1 本で決める。
+            .preferredColorScheme(.dark)
+            .tint(AppTheme.accent)
             .environmentObject(recents)
             .environmentObject(draftStore)
             .environmentObject(settingsStore)

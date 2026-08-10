@@ -69,7 +69,7 @@ extension VideoTimelineView {
     /// 組み直す（`MosaicEditorModel+Crop.swift` の型 doc 参照）。
     private var cropItem: TimelineToolItem {
         TimelineToolItem(title: "切り抜き", systemImage: "crop",
-                         isEnabled: !model.timeline.clips.isEmpty) {
+                         isEnabled: !model.timeline.clips.isEmpty, role: .shape) {
             model.enterDock(.crop)
         }
     }
@@ -81,7 +81,7 @@ extension VideoTimelineView {
     /// 1 ボタン統合と同じ判断（枠が足りない）。実ボタンは `EditorDockView.transformButtons`。
     private var transformItem: TimelineToolItem {
         TimelineToolItem(title: "変形", systemImage: "rotate.right",
-                         isEnabled: selectedClip != nil, separatorBefore: true) {
+                         isEnabled: selectedClip != nil, role: .shape, separatorBefore: true) {
             model.enterDock(.transform)
         }
     }
@@ -89,7 +89,7 @@ extension VideoTimelineView {
     /// 色調補正の段へ降りる入口（P4）。
     private var filterItem: TimelineToolItem {
         TimelineToolItem(title: "フィルター", systemImage: "camera.filters",
-                         isEnabled: selectedClip != nil) {
+                         isEnabled: selectedClip != nil, role: .decorate) {
             model.enterDock(.colorGrade)
         }
     }
@@ -98,7 +98,7 @@ extension VideoTimelineView {
     /// 種で振り分ける）。
     private var removeItem: TimelineToolItem {
         TimelineToolItem(title: "削除", systemImage: "trash",
-                         isEnabled: canRemoveSelection, separatorBefore: true) {
+                         isEnabled: canRemoveSelection, role: .cut, separatorBefore: true) {
             removeSelection()
         }
     }
@@ -111,7 +111,7 @@ extension VideoTimelineView {
     /// 「素材を足す」と同じ段が意味の上でも自然。
     private var aspectRatioItem: TimelineToolItem {
         TimelineToolItem(title: "比率", systemImage: "aspectratio",
-                         isEnabled: !model.timeline.clips.isEmpty) {
+                         isEnabled: !model.timeline.clips.isEmpty, role: .shape) {
             showAspectRatioSheet = true
         }
     }
@@ -120,7 +120,7 @@ extension VideoTimelineView {
     /// 重ねると、段を選ぶつもりの指が追加を押す）。追加の入口はツールバーに 1 本だけ。
     private var addTextItem: TimelineToolItem {
         TimelineToolItem(title: "テキスト", systemImage: "textformat",
-                         isEnabled: canAddTimedItem, separatorBefore: true) {
+                         isEnabled: canAddTimedItem, role: .add, separatorBefore: true) {
             showTextInputSheet = true
         }
     }
@@ -128,7 +128,7 @@ extension VideoTimelineView {
     /// BGM を足す。テキストと同じ理由でツールバーに置く。
     private var addAudioItem: TimelineToolItem {
         TimelineToolItem(title: "音楽", systemImage: "music.note",
-                         isEnabled: canAddTimedItem) {
+                         isEnabled: canAddTimedItem, role: .add) {
             showAudioPicker = true
         }
     }
@@ -146,14 +146,14 @@ extension VideoTimelineView {
     /// （旧 UI は画面最下部の別ドックが持っていた）。
     private var mosaicItem: TimelineToolItem {
         TimelineToolItem(title: "モザイク", systemImage: "squareshape.split.3x3",
-                         isEnabled: !model.timeline.clips.isEmpty) {
+                         isEnabled: !model.timeline.clips.isEmpty, role: .mask) {
             model.enterDock(.mosaic)
         }
     }
 
     private var speedItem: TimelineToolItem {
         TimelineToolItem(title: "速度", systemImage: "speedometer",
-                         isEnabled: selectedClip != nil) {
+                         isEnabled: selectedClip != nil, role: .cut) {
             speedSheetClipID = selectedClipID
         }
     }
@@ -168,7 +168,7 @@ extension VideoTimelineView {
         let muted = isSelectedAudioMuted
         return TimelineToolItem(title: muted ? "消音中" : "音量",
                                 systemImage: muted ? "speaker.slash.fill" : "speaker.wave.2",
-                                isEnabled: canSetVolume) {
+                                isEnabled: canSetVolume, role: .add) {
             // **活性判定と同じ純関数で対象を決める**（別々に書くと「押せるのに
             // 何も起きない」が作れる）。
             volumeSheetTarget = TimelineVolumeAvailability.target(
@@ -177,7 +177,7 @@ extension VideoTimelineView {
     }
 
     private var splitItem: TimelineToolItem {
-        TimelineToolItem(title: "分割", systemImage: "scissors", isEnabled: canSplit) {
+        TimelineToolItem(title: "分割", systemImage: "scissors", isEnabled: canSplit, role: .cut) {
             guard let id = splitTargetClipID else { return }
             model.splitClip(id: id)
         }
@@ -188,7 +188,7 @@ extension VideoTimelineView {
     /// 選択状態の唯一の情報源であり、活性判定と実行の両方がそこから対象を読む）。
     private var duplicateItem: TimelineToolItem {
         TimelineToolItem(title: "複製", systemImage: "plus.square.on.square",
-                         isEnabled: selectedClip != nil) {
+                         isEnabled: selectedClip != nil, role: .cut) {
             guard let id = selectedClipID else { return }
             model.duplicateClip(id: id)
         }
@@ -196,7 +196,7 @@ extension VideoTimelineView {
 
     private var addMediaItem: TimelineToolItem {
         TimelineToolItem(title: "追加", systemImage: "photo.on.rectangle",
-                         isEnabled: !model.timeline.clips.isEmpty) {
+                         isEnabled: !model.timeline.clips.isEmpty, role: .add) {
             showMediaPicker = true
         }
     }
@@ -207,11 +207,11 @@ extension VideoTimelineView {
         [
             TimelineToolItem(title: "縮小", systemImage: "minus.magnifyingglass",
                              isEnabled: geometry.zoomedOut() != geometry,
-                             separatorBefore: true) {
+                             role: .neutral, separatorBefore: true) {
                 geometry = geometry.zoomedOut()
             },
             TimelineToolItem(title: "拡大", systemImage: "plus.magnifyingglass",
-                             isEnabled: geometry.zoomedIn() != geometry) {
+                             isEnabled: geometry.zoomedIn() != geometry, role: .neutral) {
                 geometry = geometry.zoomedIn()
             }
         ]
