@@ -287,6 +287,7 @@ final class MosaicEditorModelCropTests: XCTestCase {
         XCTAssertEqual(model.timeline.crop, .full,
                       "比率変更でクロップが全面へ戻っていない（不可逆な二重変換の温床になる）")
     }
+
 }
 
 #endif

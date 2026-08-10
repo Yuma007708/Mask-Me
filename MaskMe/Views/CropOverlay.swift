@@ -35,15 +35,16 @@ struct CropOverlay: View {
     var body: some View {
         let rect = geometry.screenRect(from: cropDraft.rect)
         return ZStack {
-            // **クロップ以外の操作面へ触らせないための全面キャッチ層。** `dimming` は
-            // 穴あきパスなのでクロップ枠の内側では当たり判定を持たない（描画してある
-            // 面積しかヒットテストされない）。枠の内側をドラッグしても背後の
-            // `FacePickOverlay` / `RectangleDrawingOverlay` / `TextOverlayEditView` に
-            // 触らせない（＝`PreviewInteractionPolicy` の排他を重ね順でも担保する）ため、
-            // 見えない全面レイヤーを先に置く。ハンドルは後で重ねるので、そちらが優先される。
-            Color.clear
-                .contentShape(Rectangle())
-                .gesture(DragGesture(minimumDistance: 0))
+            // **全面キャッチ層は置かない。** 以前は「クロップ以外の操作面へ触らせない」
+            // ための透明なドラッグ面をここに敷いていたが、それがあると排他を実際に
+            // 担っているのがキャッチ層になり、`PreviewInteractionPolicy` の配線を
+            // 外しても UI テストが緑のまま通ってしまった（親の変異検証で確認）。
+            // 守り手が 2 つあってテストできる方が働いていない状態は、退行を素通しする。
+            //
+            // 排他の唯一の機構は `PreviewInteractionPolicy`
+            // （`FacePickOverlay` / `RectangleDrawingOverlay` / `TextOverlayEditView` が
+            // それぞれ `allowsHitTesting` で参照する）。プレビュー上の操作面はこの 3 つで
+            // 尽きているので、重ね順に頼る必要は無い。
             dimming(hole: rect)
             border(rect)
             if activeHandle != nil {

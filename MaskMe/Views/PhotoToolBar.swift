@@ -1,3 +1,4 @@
+import MosaicCore
 import SwiftUI
 
 /// 写真ドックの道具（色調補正など。今後拡張）。
@@ -8,18 +9,26 @@ import SwiftUI
 /// ここへ case を足すと `EffectTab.allCases` を並べている `EffectTabBar` の意味が壊れる。
 enum PhotoTool: String, CaseIterable, Identifiable {
     case colorGrade
+    /// クロップ（切り抜き）段への入口。**モード遷移ではない。** `EffectTab` の
+    /// ON/OFF トグルとは性質が違う（`EditorDockRoute.crop` の doc 参照。動画側の
+    /// `cropItem`＝`TimelineToolItem` と同じ「作品全体の設定」）ので、`EffectTab`
+    /// ではなくこちらへ足す。押すと `model.enterDock(.crop)` を呼ぶだけで、
+    /// 段の中身の入れ替えは `EditorView.dock` が持つ（`activate(_:)` 参照）。
+    case crop
 
     var id: String { rawValue }
 
     var title: String {
         switch self {
         case .colorGrade: return "フィルター"
+        case .crop: return "切り抜き"
         }
     }
 
     var symbolName: String {
         switch self {
         case .colorGrade: return "slider.horizontal.3"
+        case .crop: return "crop"
         }
     }
 }
@@ -66,12 +75,14 @@ struct PhotoToolBar: View {
     private func isOn(_ tool: PhotoTool) -> Bool {
         switch tool {
         case .colorGrade: return !model.photoEdit.colorGrade.isIdentity
+        case .crop: return !model.timeline.crop.isFull
         }
     }
 
     private func activate(_ tool: PhotoTool) {
         switch tool {
         case .colorGrade: showColorGradeSheet = true
+        case .crop: model.enterDock(.crop)
         }
     }
 }

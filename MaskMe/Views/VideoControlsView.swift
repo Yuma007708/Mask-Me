@@ -95,6 +95,13 @@ struct VideoControlsView: View {
                     .lineLimit(1)
                     .minimumScaleFactor(0.8)
                     .accessibilityLabel(outputSizeAccessibilityLabel)
+                    .accessibilityIdentifier("editor.outputSize")
+                    // クロップの確定が書き出し経路（`outputRenderSize`）まで届いていることを
+                    // UI テストが読める値で確かめるための番人（`EditorCropUITests`）。
+                    // 表示文字列（`outputSizeText`）は "⚠︎" が付くことがあるため、
+                    // 数値だけを別途 `accessibilityValue` として持たせる。
+                    .accessibilityValue(model.outputRenderSize.map { "\(Int($0.width))x\(Int($0.height))" }
+                                        ?? "")
             }
 
             Spacer(minLength: 4)

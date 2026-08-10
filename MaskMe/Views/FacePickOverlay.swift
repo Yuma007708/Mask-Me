@@ -35,11 +35,17 @@ struct FacePickOverlay: View {
 
     /// 顔の段に居て、かつ矩形を置いている最中ではないこと。
     ///
+    /// **排他の根拠は `PreviewInteractionPolicy` であって、`CropOverlay` の
+    /// 全面キャッチレイヤーではない。** クロップ編集中に顔タップを止める判定は
+    /// ここ（`allowsFacePick`）に集約してあり、`CropOverlay` の全面キャッチは
+    /// 重ね順での多重防御でしかない（`EditorView+Preview.swift` の doc 参照）。
+    ///
     /// 写真モードには段が無いので `activeTab` で見る。動画モードは
     /// `.face` の段で `activeTab == .face`、`.rectangle` の段では
     /// それに加えて `isRectangleToolActive` が立つ（`MosaicEditorModel+Dock`）。
+    /// クロップ編集中（`interactionMode == .crop`）は常に false になる。
     private var isActive: Bool {
-        model.activeTab == .face && !model.isRectangleToolActive
+        model.previewInteraction.allowsFacePick
     }
 
     private func frame(for face: MosaicEditorModel.PickableFace,

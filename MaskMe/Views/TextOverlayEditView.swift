@@ -79,7 +79,12 @@ struct TextOverlayEditView: View {
         //
         // 物体マスクの枠は矩形ツール ON 中も触れるが、あちらは「既に置いたものを
         // 直す」操作で、テキストの選択・移動と役割が違う。優先順位を揃える理由にはならない。
-        .allowsHitTesting(model.mode == .video && !model.isRectangleToolActive)
+        //
+        // **排他の根拠は `PreviewInteractionPolicy` であって、`CropOverlay` の
+        // 全面キャッチレイヤーではない。** `allowsTextEditing` は
+        // `editorMode == .video && !isRectangleToolActive` を移設したもので、
+        // クロップ編集中（`interactionMode == .crop`）は常に false になる。
+        .allowsHitTesting(model.previewInteraction.allowsTextEditing)
     }
 
     /// いま画面に出ているテキストだけを対象にする（コア層の `visibleTextItems` 1 本を通す。

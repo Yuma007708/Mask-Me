@@ -22,18 +22,24 @@ import MosaicCore
 extension EditorView {
     var previewArea: some View {
         GeometryReader { geo in
-            // **`model.timeline.crop` をそのまま渡す。** クロップ編集中は
-            // `beginCropEditing()` が合成を `crop = .full` へ組み直しているため、
-            // このタイミングでは `timeline.crop` も自然に `.full` になっており、
-            // ここで場合分けする必要が無い（`MosaicEditorModel+Crop.swift` 型 doc 参照）。
+            // **表示する画像も、その `crop` も `model` の 1 箇所（`croppedPreviewImage` /
+            // `previewGeometryCrop`）から取る。** 動画はどちらも「クロップなし」に
+            // 揃う（動画は AVFoundation 段で既に切られており、`croppedPreviewImage` も
+            // `previewGeometryCrop` も動画モードでは常に「そのまま」を返す）。写真は
+            // `croppedPreviewImage` が `timeline.crop` でピクセルを実際に切り、
+            // `previewGeometryCrop` が同じ crop を返してオーバーレイ側の正規化座標
+            // （切る前の全画素基準）を切った後の画像へ写し直す（両者が食い違うと
+            // 「顔タップが別人を指す」——モザイクを減らす方向の欠陥になる）。
+            // クロップ編集中（`cropDraft != nil`）はどちらも「クロップなし」に倒れる
+            // （`MosaicEditorModel+Crop.swift` 型 doc 参照）。
             let geometry = PreviewImageGeometry(containerSize: geo.size,
-                                                imageSize: model.previewImage?.size,
+                                                imageSize: model.croppedPreviewImage?.size,
                                                 zoom: zoomSession.zoom,
-                                                crop: model.timeline.crop)
+                                                crop: model.previewGeometryCrop)
             ZStack {
                 Color.black
 
-                if let image = model.previewImage {
+                if let image = model.croppedPreviewImage {
                     Image(uiImage: image)
                         .resizable()
                         .frame(width: geometry.imageRect.width, height: geometry.imageRect.height)
@@ -114,8 +120,10 @@ extension EditorView {
                                                        containerSize: geo.size))
         }
         .frame(maxWidth: .infinity, minHeight: 200, maxHeight: .infinity)
-        // 画面比率変更・素材切替・読み込み完了を 1 本の条件で覆う。
-        .onChange(of: model.previewImage?.size) { _ in zoomSession.reset() }
+        // 画面比率変更・素材切替・読み込み完了・写真クロップの確定を 1 本の条件で覆う
+        // （`croppedPreviewImage` はクロップ後の実寸なので、クロップで縦横比が変わった
+        // ときもズームを正しくリセットする）。
+        .onChange(of: model.croppedPreviewImage?.size) { _ in zoomSession.reset() }
     }
 
     /// ピンチズーム＋パンの合成ジェスチャ。

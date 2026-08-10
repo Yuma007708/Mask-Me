@@ -63,7 +63,13 @@ struct RectangleDrawingOverlay: View {
             }
 
             // ドラッグジェスチャー（透明レイヤー）。**ツール ON のときだけ張る。**
-            if model.isRectangleToolActive {
+            //
+            // **排他の根拠は `PreviewInteractionPolicy` であって、`CropOverlay` の
+            // 全面キャッチレイヤーではない。** クロップ編集中は `activeTab = nil` の
+            // didSet で `isRectangleToolActive` も落ちるため、この画面が消える結果自体は
+            // 従来と変わらない——判定の出どころを 1 箇所（`allowsRectangleDrawing`）へ
+            // 揃えることが目的（`CropOverlay` の全面キャッチは重ね順の多重防御でしかない）。
+            if model.previewInteraction.allowsRectangleDrawing {
                 drawingSurface(in: geometry)
             }
 
@@ -73,9 +79,15 @@ struct RectangleDrawingOverlay: View {
             //
             // **`objectMasks` を直接 `ForEach` しないこと**: 矩形はキーフレーム補間で
             // 時刻ごとに変わるので、シークしても枠が動かなくなる。
+            //
+            // 枠自体は常時見せる（ツール ON/OFF・段に関係なく「何が掛かっているか」は
+            // 見えている必要がある）が、**編集操作（移動・大きさ・回転・削除）の可否だけ**
+            // `allowsExistingMaskEditing` で切る。クロップ編集中はここが false になり、
+            // `CropOverlay` の全面キャッチレイヤーに頼らずこのビュー自身が当たり判定を切る。
             ForEach(model.visibleObjectMasks, id: \.id) { mask in
                 maskOverlay(id: mask.id, rect: mask.rect, angle: mask.angle,
                            state: mask.state, in: geometry)
+                    .allowsHitTesting(model.previewInteraction.allowsExistingMaskEditing)
             }
 
             // 追えているかのラベル。**`maskOverlay` の中に入れない。** あそこは

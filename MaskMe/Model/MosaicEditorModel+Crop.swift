@@ -1,6 +1,7 @@
 import CoreGraphics
 import Foundation
 import MosaicCore
+import UIKit
 
 #if canImport(Metal)
 
@@ -40,6 +41,41 @@ extension MosaicEditorModel {
     /// `outputRenderSize` がそのまま「クロップ前の出力枠」を表す。
     public var cropEditingFrameSize: CGSize {
         outputRenderSize ?? .zero
+    }
+
+    /// `PreviewImageGeometry` に渡す `crop`（S6）。**この 1 箇所にだけ分岐を閉じる。**
+    ///
+    /// - 動画モード: 常に `.full`。動画のオーバーレイ座標（顔検出・物体マスク）は
+    ///   AVFoundation 段のクロップを経由した後の合成フレームに対して正規化されており、
+    ///   `renderLayout` の時点で**既にクロップ済みの座標系**になっている。ここでさらに
+    ///   `timeline.crop` を渡すと二重に掛かり、二重にずれる
+    ///   （`test_動画モードのプレビュー換算はクロップを二重に掛けない` が番人）。
+    /// - 写真モード・クロップ編集中でない: `timeline.crop`。`croppedPreviewImage` が
+    ///   同じ `timeline.crop` で表示画像そのものを切り出すため、顔検出などの正規化座標
+    ///   （切る前の全画素基準）を表示後の画像へ正しく写すには、ここでも同じ crop を
+    ///   渡してオーバーレイ側の換算（`PreviewImageGeometry.screenRect` 等）に
+    ///   `CropRect.expand` を掛けさせる必要がある。
+    /// - クロップ編集中（`cropDraft != nil`）: `.full`。編集中は写真も動画も
+    ///   `crop = .full` で合成を組み直しており（`beginCropEditing()`）、表示画像は
+    ///   まだ切られていない（`croppedPreviewImage` も同じ条件で全面を返す）。
+    public var previewGeometryCrop: CropRect {
+        guard mode == .photo, cropDraft == nil else { return .full }
+        return timeline.crop
+    }
+
+    /// 表示（`EditorView+Preview.swift` の `Image`）と保存（`savePhoto()`）が**共有する**、
+    /// クロップを実際に掛けた後の写真。
+    ///
+    /// **この 1 箇所だけを両方が通ること。** 別々に crop を掛けると、どちらかだけ
+    /// 切り忘れる事故が起きる（`test_保存画像と表示画像の画素が一致する` が番人）。
+    ///
+    /// 動画モード・クロップ編集中・`timeline.crop.isFull` のいずれかなら `previewImage`
+    /// をそのまま返す（`renderPreview()` は常に全画素を描くので、切る理由が無ければ
+    /// 何もしない。動画は AVFoundation 段で既に切られている）。
+    public var croppedPreviewImage: UIImage? {
+        guard let previewImage else { return nil }
+        guard mode == .photo, cropDraft == nil, !timeline.crop.isFull else { return previewImage }
+        return StillCropRenderer.cropped(previewImage, crop: timeline.crop)
     }
 
     /// クロップ編集を始める。

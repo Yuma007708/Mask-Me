@@ -202,7 +202,18 @@ struct EditorView: View {
     @ViewBuilder
     private var dock: some View {
         if model.mode == .photo {
-            photoDock
+            // クロップ段（`EditorDockRoute.crop`）に居る間は、通常の写真ドックの
+            // 代わりに `CropControlBar` を出す。動画側（`EditorDockView`）が
+            // `dockRoute` で中身を丸ごと入れ替えるのと同じ形——段の高さ・中身の
+            // 入れ替え方を、モードをまたいで 1 つの流儀に揃える。
+            if model.dockRoute == .crop {
+                CropControlBar(model: model)
+                    .frame(height: 52)
+                    .frame(maxWidth: .infinity)
+                    .background(Color.black)
+            } else {
+                photoDock
+            }
         }
     }
 

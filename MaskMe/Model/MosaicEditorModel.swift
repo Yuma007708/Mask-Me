@@ -2153,10 +2153,14 @@ public final class MosaicEditorModel: ObservableObject {
     // MARK: - 保存・エクスポート
 
     public func savePhoto() async {
-        guard let image = previewImage else { return }
+        // **`croppedPreviewImage`（＝クロップを掛けた previewImage）を経由する。**
+        // 表示（`EditorView+Preview.swift`）と保存はここを共有源にすることで、
+        // 「表示だけ切れて保存は全面」の食い違いが構造的に起きない
+        // （`MosaicEditorModel+Crop.swift` の doc 参照）。
+        guard let previewImageToSave = croppedPreviewImage else { return }
         do {
-            try await PhotosSaver.save(image: image)
-            recents.add(kind: .photo, thumbnail: image)
+            try await PhotosSaver.save(image: previewImageToSave)
+            recents.add(kind: .photo, thumbnail: previewImageToSave)
             didSave = true
         } catch {
             // 権限拒否（`PhotosSaver.SaveError.notAuthorized`）を握り潰さず、
