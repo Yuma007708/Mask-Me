@@ -58,12 +58,52 @@ public struct ObjectMask: Identifiable, Equatable, Sendable {
         public var sourceTime: Double
         /// 画像座標系の正規化矩形（0-1）。
         public var rect: CGRect
+        /// 矩形の傾き（ラジアン、時計回り）。無回転は 0。
+        ///
+        /// **これはピクセル空間での回転角である。** 正規化座標(0-1)は画像の縦横比の
+        /// ぶんだけ歪んでいるので、正規化のまま回すと画面上では平行四辺形になる。
+        /// 実際に回すのは `FaceMaskBuilder.rectPath(from:angle:in:)` の中、
+        /// `size` を掛けてピクセル空間へ移してから。
+        ///
+        /// 値域は `-π...π`（`normalizedAngle` が入口で畳む）。範囲を決めておかないと、
+        /// 指をぐるぐる回した回数だけ値が増え続け、補間が何周も回る。
+        public var angle: Double
 
-        public init(id: UUID = UUID(), sourceTime: Double, rect: CGRect) {
+        public init(id: UUID = UUID(), sourceTime: Double, rect: CGRect, angle: Double = 0) {
             self.id = id
             self.sourceTime = sourceTime
             self.rect = rect
+            self.angle = ObjectMask.normalizedAngle(angle)
         }
+
+        public init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: KeyframeCodingKeys.self)
+            id = try container.decode(UUID.self, forKey: .id)
+            sourceTime = try container.decode(Double.self, forKey: .sourceTime)
+            rect = try container.decode(CGRect.self, forKey: .rect)
+            angle = ObjectMask.normalizedAngle(
+                try container.decodeIfPresent(Double.self, forKey: .angle) ?? 0)
+        }
+    }
+
+    // `angle` を後から足したので、**それが無い下書きも読めなければならない**
+    // （合成された Codable では欠けたキーでデコードごと失敗し、下書きが丸ごと開けなくなる）。
+    // 無ければ無回転として読む。`Keyframe` の中に置くと入れ子が深すぎるのでここに出す。
+    enum KeyframeCodingKeys: String, CodingKey {
+        case id, sourceTime, rect, angle
+    }
+
+    /// 角度を `-π...π` へ畳む。非有限は 0（無回転）。
+    ///
+    /// **回転ジェスチャは何周でも回せる。** 畳まずに貯めると、キーフレーム間の補間が
+    /// 何周も回って「指を離した瞬間に矩形が高速回転する」ことになる。
+    public static func normalizedAngle(_ angle: Double) -> Double {
+        guard angle.isFinite else { return 0 }
+        let twoPi = Double.pi * 2
+        var wrapped = angle.truncatingRemainder(dividingBy: twoPi)
+        if wrapped > .pi { wrapped -= twoPi }
+        if wrapped < -.pi { wrapped += twoPi }
+        return wrapped
     }
 
     public let id: UUID
@@ -109,37 +149,71 @@ public struct ObjectMask: Identifiable, Equatable, Sendable {
     ///
     /// `sourceTime` が非有限のときは最初の矩形を返す（補間式に NaN を持ち込ませない）。
     public func rect(atSourceTime sourceTime: Double) -> CGRect {
+        switch span(atSourceTime: sourceTime) {
+        case let .exact(keyframe):
+            return keyframe.rect
+        case let .between(before, after, t):
+            let interpolated = CGRect(x: lerp(before.rect.origin.x, after.rect.origin.x, t),
+                                      y: lerp(before.rect.origin.y, after.rect.origin.y, t),
+                                      width: lerp(before.rect.size.width, after.rect.size.width, t),
+                                      height: lerp(before.rect.size.height, after.rect.size.height, t))
+            // **成分ごとに有限でも、差分の計算で overflow して非有限になりうる。**
+            // 例: x が -1e308 と 1e308 なら `(b - a)` が +Inf になり、t=0.5 でも x=+Inf。
+            // NaN/Inf の矩形をそのまま描画・エクスポートへ流すと下流で何が起きるか読めないので、
+            // 直前のキーフレームの矩形へ倒す（clamp と同じ「最後に確かだった位置」の考え方）。
+            return Self.isFinite(interpolated) ? interpolated : before.rect
+        }
+    }
+
+    /// 指定した**素材時刻**での傾き（ラジアン）。
+    ///
+    /// 端の扱いは `rect(atSourceTime:)` と同一（同じ `span(atSourceTime:)` を通る）。
+    /// **別々に分岐を書かないこと**: 片方だけ端の扱いが違うと、最後のキーフレームより
+    /// 後ろで「位置は最後のまま・角度だけ最初に戻る」という捻れた描画になる。
+    ///
+    /// 補間は**最短の回り方**。-179° と +179° を線形に補間すると 358° ぶん逆回りする。
+    public func angle(atSourceTime sourceTime: Double) -> Double {
+        switch span(atSourceTime: sourceTime) {
+        case let .exact(keyframe):
+            return keyframe.angle
+        case let .between(before, after, t):
+            let delta = Self.normalizedAngle(after.angle - before.angle)
+            return Self.normalizedAngle(before.angle + delta * Double(t))
+        }
+    }
+
+    /// 補間の位置。`rect` と `angle` が**同じ分岐**を通るための共通部。
+    private enum Span {
+        /// 端・単一キーフレーム・非有限時刻など、1 個へ倒したケース。
+        case exact(Keyframe)
+        /// 前後 2 個とその間の比率。
+        case between(Keyframe, Keyframe, CGFloat)
+    }
+
+    private func span(atSourceTime sourceTime: Double) -> Span {
         // 不変条件（非空）により first / last は必ず存在する。
         let last = keyframes[keyframes.count - 1]
         // **`+Inf` は「最後より後」として last へ倒す。** `isFinite` で一括除外すると
         // 正の無限大が「最初の矩形」になり、モザイクが逆側へ飛ぶ。このプロジェクトには
         // 「+∞ の sourceEnd が合成尺・写像全体を汚染した」実測が
         // `TimelineEditOperations` の doc に残っており、非有限の時刻は実際に到達する。
-        if sourceTime == .infinity { return last.rect }
+        if sourceTime == .infinity { return .exact(last) }
         // NaN と -Inf は「判定不能」「最初より前」なので先頭へ倒す。
-        guard sourceTime.isFinite else { return keyframes[0].rect }
-        if sourceTime <= keyframes[0].sourceTime { return keyframes[0].rect }
-        if sourceTime >= last.sourceTime { return last.rect }
+        guard sourceTime.isFinite else { return .exact(keyframes[0]) }
+        if sourceTime <= keyframes[0].sourceTime { return .exact(keyframes[0]) }
+        if sourceTime >= last.sourceTime { return .exact(last) }
 
         // 昇順なので「sourceTime を超える最初のキーフレーム」が後側。
         // 上の 2 分岐により index は 1...keyframes.count-1 に必ず入る。
-        guard let index = keyframes.firstIndex(where: { $0.sourceTime > sourceTime }), index > 0 else {
-            return last.rect
+        guard let index = keyframes.firstIndex(where: { $0.sourceTime > sourceTime }),
+              index > 0 else {
+            return .exact(last)
         }
         let before = keyframes[index - 1]
         let after = keyframes[index]
-        let span = after.sourceTime - before.sourceTime
-        guard span > 0 else { return before.rect }
-        let t = CGFloat((sourceTime - before.sourceTime) / span)
-        let interpolated = CGRect(x: lerp(before.rect.origin.x, after.rect.origin.x, t),
-                                  y: lerp(before.rect.origin.y, after.rect.origin.y, t),
-                                  width: lerp(before.rect.size.width, after.rect.size.width, t),
-                                  height: lerp(before.rect.size.height, after.rect.size.height, t))
-        // **成分ごとに有限でも、差分の計算で overflow して非有限になりうる。**
-        // 例: x が -1e308 と 1e308 なら `(b - a)` が +Inf になり、t=0.5 でも x=+Inf。
-        // NaN/Inf の矩形をそのまま描画・エクスポートへ流すと下流で何が起きるか読めないので、
-        // 直前のキーフレームの矩形へ倒す（clamp と同じ「最後に確かだった位置」の考え方）。
-        return Self.isFinite(interpolated) ? interpolated : before.rect
+        let width = after.sourceTime - before.sourceTime
+        guard width > 0 else { return .exact(before) }
+        return .between(before, after, CGFloat((sourceTime - before.sourceTime) / width))
     }
 
     private func lerp(_ a: CGFloat, _ b: CGFloat, _ t: CGFloat) -> CGFloat { a + (b - a) * t }
@@ -149,7 +223,15 @@ public struct ObjectMask: Identifiable, Equatable, Sendable {
     /// 指定した素材時刻へキーフレームを置く。**同じ時刻に既にあれば矩形を差し替える**
     /// （追加ではなく置換。同時刻 2 個は補間が壊れるので不変条件で禁止している）。
     /// 時刻か矩形が非有限なら self をそのまま返す（編集操作の「失敗時は self」契約）。
-    public func settingKeyframe(atSourceTime sourceTime: Double, rect: CGRect) -> ObjectMask {
+    ///
+    /// - Parameter angle: 傾き（ラジアン）。
+    ///
+    ///   **既定値を置かないこと。** 省略できると、位置だけを動かす操作で渡し忘れた
+    ///   ときに角度が無言で 0 へ戻る（＝掴んで動かしただけで傾きが失われる）。
+    ///   位置だけ変えたいなら現在の角度（`angle(atSourceTime:)`）を明示的に渡す。
+    ///   `MosaicApplyRange.clipID` が既定値を禁じているのと同じ理由。
+    public func settingKeyframe(atSourceTime sourceTime: Double, rect: CGRect,
+                                angle: Double) -> ObjectMask {
         // 時刻をグリッドへ丸めてから比較する（`timeGridPerSecond` の doc 参照。
         // 生の Double を厳密比較すると置換が起きずキーフレームが増殖する）。
         guard var time = Self.quantize(sourceTime), Self.isFinite(rect) else { return self }
@@ -159,8 +241,10 @@ public struct ObjectMask: Identifiable, Equatable, Sendable {
         var result = self
         if let index = keyframes.firstIndex(where: { $0.sourceTime == time }) {
             result.keyframes[index].rect = rect
+            result.keyframes[index].angle = Self.normalizedAngle(angle)
         } else {
-            result.keyframes = Self.normalized(keyframes + [Keyframe(sourceTime: time, rect: rect)])
+            result.keyframes = Self.normalized(
+                keyframes + [Keyframe(sourceTime: time, rect: rect, angle: angle)])
         }
         return result
     }
@@ -259,7 +343,9 @@ public struct ObjectMask: Identifiable, Equatable, Sendable {
     /// どれを残しても等価だが、規則を固定しておかないとデコードのたびに矩形が変わる。
     private static func stillFolded(_ keyframes: [Keyframe]) -> [Keyframe] {
         guard let first = keyframes.first else { return [] }
-        return [Keyframe(id: first.id, sourceTime: 0, rect: first.rect)]
+        // **項目を書き写すこと。** ここで作り直すので、`Keyframe` に何かを足したときに
+        // 移し忘れると静止画マスクでだけ黙って落ちる（角度で実際に起きた）。
+        return [Keyframe(id: first.id, sourceTime: 0, rect: first.rect, angle: first.angle)]
     }
 
     static func isFinite(_ rect: CGRect) -> Bool {

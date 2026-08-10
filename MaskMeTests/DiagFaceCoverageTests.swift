@@ -19,6 +19,8 @@ final class DiagFaceCoverageTests: XCTestCase {
     /// 2026-07-29 の実測値そのまま。**この数字を下げる変更は検出の退行**であり、
     /// 誤検出がいくら下がっても採ってはいけない（プライバシーアプリなので顔の見逃しのほうが重い）。
     /// `probe_hard_backlight` は元から 0 フレームなので下限を置けず、対象外。
+    /// **これは「逆光だから検出できない」ではない**（2026-07-31 に切り分け済み。
+    /// 詳細は `DValidLiveModelTests.hardFixtureCoverageFloor` の doc）。
     private static let detectedFrameFloor: [String: Int] = [
         "profile": 91,
         "sample_face": 75,
@@ -56,8 +58,12 @@ final class DiagFaceCoverageTests: XCTestCase {
             while t <= duration {
                 autoreleasepool {
                     guard let cg = try? gen.copyCGImage(at: CMTime(seconds: t, preferredTimescale: 600), actualTime: nil) else { return }
-                    // 実機ライブと同一の 480px 縮小
-                    let scale = min(480.0 / Double(cg.width), 1.0)
+                    // 実機ライブと同一の縮小幅。**数字を直書きしないこと。**
+                    // 480 と直書きされていた頃、本体は既に 640
+                    // （`MosaicEditorModel.liveDetectionTargetWidth`。逆光・低コントラストの
+                    // 小顔対策で 480 から上げた経緯がある）で、この診断だけ実機と違う条件で
+                    // 測っていた。合否を持たない診断なので誰も落ちず、気づけなかった。
+                    let scale = min(MosaicEditorModel.liveDetectionTargetWidth / Double(cg.width), 1.0)
                     let img: UIImage
                     if scale < 0.99, let out = ctx.createCGImage(CIImage(cgImage: cg).transformed(by: CGAffineTransform(scaleX: scale, y: scale)), from: CIImage(cgImage: cg).transformed(by: CGAffineTransform(scaleX: scale, y: scale)).extent) {
                         img = UIImage(cgImage: out)

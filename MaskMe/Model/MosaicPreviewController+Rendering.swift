@@ -109,13 +109,13 @@ extension MosaicPreviewController {
         // 別の時刻を渡すと境界フレームでモザイクの ON/OFF が 1 フレームずれる。
         let mosaicActive = model.isMosaicActive(atComposition: timeSec)
         let landmarks = landmarksForRendering(at: timeSec, model: model)
-        // 手動矩形は顔検出の補助なので顔タブ（faceMosaicOn）の状態に従う。
+        // 手動矩形は顔とは独立に ON/OFF する（`objectMosaicOn`）。
         // 解像度は（縮小後の）実テクスチャに合わせる（フルサイズだと 720px 縮小時に位置がずれる）。
-        // 物体マスクは適用区間ゲートを `objectMaskRects(atComposition:)` の中で
+        // 物体マスクは適用区間ゲートを `objectMaskPlacements(atComposition:)` の中で
         // **素材ごとに**掛ける（重なり区間で片側だけ ON にできる）。ここで
         // `mosaicActive`（合成時刻でまとめた判定）を重ねると、素材アンカーを持つ
         // マスクまで「映っている素材のどれかが区間内なら全部 ON」に引きずられる。
-        let additionalPaths = model.faceMosaicOn
+        let additionalPaths = model.objectMosaicOn
             ? model.objectMaskPaths(for: CGSize(width: tex.width, height: tex.height),
                                     atComposition: timeSec)
             : []

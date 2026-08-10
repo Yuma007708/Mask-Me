@@ -88,7 +88,7 @@ final class ObjectMaskTrackingTests: XCTestCase {
         guard let base = ObjectMask.single(anchor: .clip(clipID: clipID, sourceID: sourceID),
                                            sourceTime: 0, rect: trueRect(at: 0))
         else { return XCTFail("マスクの生成に失敗") }
-        let mask = base.settingKeyframe(atSourceTime: 2.0, rect: shifted)
+        let mask = base.settingKeyframe(atSourceTime: 2.0, rect: shifted, angle: 0)
 
         let tracks = await ObjectMaskTracker.track(
             [.init(mask: mask, clipID: clipID, sourceID: sourceID)],
@@ -118,7 +118,7 @@ final class ObjectMaskTrackingTests: XCTestCase {
         guard let base = ObjectMask.single(anchor: .clip(clipID: clipID, sourceID: sourceID),
                                            sourceTime: 0, rect: startRect)
         else { return XCTFail("マスクの生成に失敗") }
-        let mask = base.settingKeyframe(atSourceTime: 2.0, rect: endRect)
+        let mask = base.settingKeyframe(atSourceTime: 2.0, rect: endRect, angle: 0)
 
         let tracks = await ObjectMaskTracker.track(
             [.init(mask: mask, clipID: clipID, sourceID: sourceID)],

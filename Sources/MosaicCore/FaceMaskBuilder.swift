@@ -169,7 +169,15 @@ public struct FaceMaskBuilder: Sendable {
     }
 
     /// 正規化矩形（0-1）をピクセル座標の CGPath に変換する。
-    public static func rectPath(from normalizedRect: CGRect, in size: CGSize) -> CGPath {
+    ///
+    /// - Parameter angle: 傾き（ラジアン、時計回り）。矩形の**中心まわり**に回す。
+    ///
+    /// **回すのはピクセル座標へ移した後**（`size` を掛けた後）。正規化のまま回すと、
+    /// 画像の縦横比のぶんだけ潰れて平行四辺形になる（16:9 の素材で 45° 傾けると
+    /// 目に見えて歪む）。角の位置を自前で計算せず `CGAffineTransform` を通すのは、
+    /// 4 点の三角関数を手で書くと符号の取り違えが起きやすいため。
+    public static func rectPath(from normalizedRect: CGRect, angle: Double = 0,
+                                in size: CGSize) -> CGPath {
         let rect = CGRect(
             x: normalizedRect.origin.x * size.width,
             y: normalizedRect.origin.y * size.height,
@@ -177,7 +185,15 @@ public struct FaceMaskBuilder: Sendable {
             height: normalizedRect.height * size.height
         )
         let path = CGMutablePath()
-        path.addRect(rect)
+        guard angle != 0, angle.isFinite else {
+            path.addRect(rect)
+            return path
+        }
+        // 中心を原点へ寄せ、回し、戻す。
+        let transform = CGAffineTransform(translationX: rect.midX, y: rect.midY)
+            .rotated(by: CGFloat(angle))
+            .translatedBy(x: -rect.midX, y: -rect.midY)
+        path.addRect(rect, transform: transform)
         return path
     }
 

@@ -63,12 +63,29 @@ extension MosaicEditorModel {
             activeTab = .background
             setEffectOn(.background)
         case .rectangle:
-            // 矩形は顔検出を補助する道具なので、粗さは顔側を使う
-            // （描画も `faceMosaicOn` に従う。`MosaicEditorModel` の該当箇所参照）。
+            // **顔モザイクは点けない。** 矩形は矩形として独立に ON/OFF する
+            // （`objectMosaicOn`）。ここで `setEffectOn(.face)` を呼んでいた頃は、
+            // 矩形を 1 個置くだけのつもりで顔モザイクまで点いていた。
+            //
+            // 粗さは顔側のスライダーを共用する（矩形も `faceBlockSize` で描く）。
+            // `activeTab` は粗さの対象を指すだけで効果の ON/OFF ではないので、
+            // 顔が OFF のまま `.face` を指していてよい（didSet が矩形ツールを
+            // 下ろさない条件でもある）。
             activeTab = .face
-            setEffectOn(.face)
+            setObjectEffectOn()
             isRectangleToolActive = true
         }
+    }
+
+    /// 矩形モザイクを ON にする（既に ON なら区間の確保だけ）。
+    ///
+    /// `setEffectOn` と同じ理由で**フラグより先に区間を確保する**
+    /// （区間 0 本は「全区間 OFF」なので、フラグだけ立てても何も描かれない）。
+    private func setObjectEffectOn() {
+        ensureApplyRangesExist()
+        guard !objectMosaicOn else { return }
+        objectMosaicOn = true
+        commitEdit()
     }
 
     /// 効果を ON にする（既に ON なら何もしない）。
@@ -76,8 +93,17 @@ extension MosaicEditorModel {
     /// `tapTab` を使わないのは、あれが**トグル**だから。段に入るたびにトグルすると
     /// 「顔の段へ入り直したら顔モザイクが消えた」になる。
     private func setEffectOn(_ tab: EffectTab) {
+        // **フラグより先に区間を確保する。** 区間 0 本は「全区間 OFF」なので、
+        // フラグだけ立てても何も描かれない。既に ON でも通すこと: 「効果は ON のまま
+        // 加工レイヤーだけ消した」状態から段に入り直したとき、`guard` で早期 return
+        // すると区間が復活せず、完了を押しても何も起きない（ユーザー報告）。
+        ensureApplyRangesExist()
         switch tab {
         case .face:
+            // **顔探しはここが起点。** 動画を開いた時点では走らせていないので
+            // （素材を見たいだけの人に待ち時間を負わせない）、掛けると決めた
+            // このタイミングで一度だけ走らせる。2 度目以降は即座に返る。
+            Task { await seedFacesIfNeeded() }
             guard !faceMosaicOn else { return }
             faceMosaicOn = true
         case .background:
@@ -96,11 +122,27 @@ extension MosaicEditorModel {
     /// この導線は「レイヤーを選んで削除」に一本化して外せる。
     public func toggleDockEffect(_ tab: EffectTab) {
         switch tab {
-        case .face: faceMosaicOn.toggle()
+        case .face:
+            faceMosaicOn.toggle()
+            if faceMosaicOn { ensureApplyRangesExist() }
         case .background:
             backgroundMosaicOn.toggle()
-            if backgroundMosaicOn { recomputeBackgroundMask() }
+            if backgroundMosaicOn {
+                ensureApplyRangesExist()
+                recomputeBackgroundMask()
+            }
         }
+        commitEdit()
+    }
+
+    /// 矩形モザイクの ON/OFF を切り替える（段は動かさない）。
+    ///
+    /// `EffectTab` に `.rectangle` を足していないのは、あの列挙が写真モードの
+    /// `EffectTabBar` の項目そのもの（`allCases` を並べている）だから。足すと
+    /// 写真の画面に矩形タブが生える。
+    public func toggleObjectMosaic() {
+        objectMosaicOn.toggle()
+        if objectMosaicOn { ensureApplyRangesExist() }
         commitEdit()
     }
 

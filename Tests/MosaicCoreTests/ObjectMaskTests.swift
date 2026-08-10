@@ -114,8 +114,8 @@ final class ObjectMaskTests: XCTestCase {
         XCTAssertNotEqual(base, jittered, "前提: 2 つは厳密比較で別の値")
 
         let mask = ObjectMask.single(anchor: clipAnchor, sourceTime: 0, rect: rect(x: 0))?
-            .settingKeyframe(atSourceTime: base, rect: rect(x: 0.4))
-            .settingKeyframe(atSourceTime: jittered, rect: rect(x: 0.7))
+            .settingKeyframe(atSourceTime: base, rect: rect(x: 0.4), angle: 0)
+            .settingKeyframe(atSourceTime: jittered, rect: rect(x: 0.7), angle: 0)
         // 0 と 0.3 の 2 個。0.3 の矩形は後から置いた方（x=0.7）で上書きされる。
         XCTAssertEqual(mask?.keyframes.count, 2, "1 ulp 差でキーフレームが増殖した")
         XCTAssertEqual(mask?.rect(atSourceTime: base).origin.x, 0.7)
@@ -144,7 +144,7 @@ final class ObjectMaskTests: XCTestCase {
     /// （拒否ではない。静止画でも矩形を置き直す操作は通したいため）。
     func test_stillへ別時刻のキーフレームを置いても1個のまま() {
         let mask = ObjectMask.single(anchor: .still, rect: rect(x: 0.1))?
-            .settingKeyframe(atSourceTime: 5, rect: rect(x: 0.6))
+            .settingKeyframe(atSourceTime: 5, rect: rect(x: 0.6), angle: 0)
         XCTAssertEqual(mask?.keyframes.count, 1)
         XCTAssertEqual(mask?.keyframes.first?.sourceTime, 0)
         XCTAssertEqual(mask?.rect(atSourceTime: 5).origin.x, 0.6, "描き直しが反映されていない")

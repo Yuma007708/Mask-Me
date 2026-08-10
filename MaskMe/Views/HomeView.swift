@@ -83,6 +83,7 @@ struct HomeView: View {
         resumeContext = EditorView.ResumeContext(
             draftID: draft.id,
             faceMosaicOn: draft.faceMosaicOn,
+            objectMosaicOn: draft.objectMosaicOn,
             backgroundMosaicOn: draft.backgroundMosaicOn,
             faceBlockSize: draft.faceBlockSize,
             backgroundBlockSize: draft.backgroundBlockSize,

@@ -27,6 +27,8 @@ struct EditorView: View {
     struct ResumeContext {
         let draftID: UUID
         let faceMosaicOn: Bool
+        /// 手動矩形の ON/OFF。この項目より前の下書きは true（`EditingDraft` の doc）。
+        var objectMosaicOn: Bool = true
         let backgroundMosaicOn: Bool
         let faceBlockSize: Float
         let backgroundBlockSize: Float
@@ -150,6 +152,9 @@ struct EditorView: View {
                 ProgressView().tint(.white)
             }
 
+            // 顔の枠は矩形より**下**に置く。重なったときは矩形の枠と ✕ を
+            // 優先させる（矩形は自分で置いたものなので、消せなくなると困る）。
+            FacePickOverlay(model: model)
             RectangleDrawingOverlay(model: model)
 
             if model.mode == .video {
@@ -332,6 +337,7 @@ struct EditorView: View {
         if let resume {
             model.applyRestoredParameters(
                 faceMosaicOn: resume.faceMosaicOn,
+                objectMosaicOn: resume.objectMosaicOn,
                 backgroundMosaicOn: resume.backgroundMosaicOn,
                 faceBlockSize: resume.faceBlockSize,
                 backgroundBlockSize: resume.backgroundBlockSize,
@@ -395,6 +401,7 @@ extension EditorView {
                 existing: nil,
                 image: image,
                 faceMosaicOn: model.faceMosaicOn,
+                objectMosaicOn: model.objectMosaicOn,
                 backgroundMosaicOn: model.backgroundMosaicOn,
                 faceBlockSize: model.faceBlockSize,
                 backgroundBlockSize: model.backgroundBlockSize,
@@ -414,6 +421,7 @@ extension EditorView {
                 sessionSourceIDs: model.sessionReferencedSourceIDs,
                 timeline: model.timeline,
                 faceMosaicOn: model.faceMosaicOn,
+                objectMosaicOn: model.objectMosaicOn,
                 backgroundMosaicOn: model.backgroundMosaicOn,
                 faceBlockSize: model.faceBlockSize,
                 backgroundBlockSize: model.backgroundBlockSize,

@@ -62,6 +62,10 @@ struct EditingDraft: Codable, Identifiable, Equatable {
     /// 既定経路がそのまま素材全体 1 クリップを構築する。
     let timeline: TimelineState
     let faceMosaicOn: Bool
+    /// 手動矩形の ON/OFF。顔とは独立（`MosaicEditorModel.objectMosaicOn`）。
+    /// この項目より前の下書きにはキーが無く、デコード時は true（＝矩形が
+    /// 保存されていれば従来どおり掛かる）へ落ちる。
+    let objectMosaicOn: Bool
     let backgroundMosaicOn: Bool
     let faceBlockSize: Float
     let backgroundBlockSize: Float
@@ -102,6 +106,7 @@ struct EditingDraft: Codable, Identifiable, Equatable {
         sources: [DraftSource]? = nil,
         timeline: TimelineState = TimelineState(),
         faceMosaicOn: Bool,
+        objectMosaicOn: Bool = true,
         backgroundMosaicOn: Bool,
         faceBlockSize: Float,
         backgroundBlockSize: Float,
@@ -118,6 +123,7 @@ struct EditingDraft: Codable, Identifiable, Equatable {
         self.sources = sources ?? [DraftSource(id: UUID(), fileName: sourceFileName)]
         self.timeline = timeline
         self.faceMosaicOn = faceMosaicOn
+        self.objectMosaicOn = objectMosaicOn
         self.backgroundMosaicOn = backgroundMosaicOn
         self.faceBlockSize = faceBlockSize
         self.backgroundBlockSize = backgroundBlockSize
@@ -140,7 +146,7 @@ struct EditingDraft: Codable, Identifiable, Equatable {
         // 旧キー名のまま残す（既存の下書き JSON を読めなくしない）。
         case legacyManualRects = "manualRects"
         case objectMasks
-        case faceMosaicOn, backgroundMosaicOn, faceBlockSize, backgroundBlockSize
+        case faceMosaicOn, objectMosaicOn, backgroundMosaicOn, faceBlockSize, backgroundBlockSize
         case sources, timeline, faceSelections, personProfiles
     }
 
@@ -189,6 +195,9 @@ struct EditingDraft: Codable, Identifiable, Equatable {
         faceMosaicOn = try c.decodeIfPresent(Bool.self, forKey: .faceMosaicOn)
             ?? legacyFaceEnabled ?? true
         backgroundMosaicOn = try c.decodeIfPresent(Bool.self, forKey: .backgroundMosaicOn) ?? false
+        // キー無し（この項目より前の下書き）は true。矩形が保存されている下書きを
+        // 開いたときに、無言でモザイクが消える方へ倒さない。
+        objectMosaicOn = try c.decodeIfPresent(Bool.self, forKey: .objectMosaicOn) ?? true
         faceBlockSize = try c.decodeIfPresent(Float.self, forKey: .faceBlockSize)
             ?? legacyBlock ?? 28
         backgroundBlockSize = try c.decodeIfPresent(Float.self, forKey: .backgroundBlockSize) ?? 28

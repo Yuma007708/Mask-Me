@@ -76,8 +76,9 @@ final class DValidLiveModelTests: XCTestCase {
     /// 本当に守るべきはこちらで、**検出率が上がってもモザイクが切れている**という
     /// 事故はこの計測でしか気づけない。
     ///
-    /// 逆光（`probe_hard_backlight`）の検出率は 0% だが、それは「顔がシルエットしか
-    /// 写っていない」ためで、被覆率まで 0 なら実害がある。数字を分けて持つ理由がここにある。
+    /// 逆光（`probe_hard_backlight`）は検出率も被覆率も 0% だが、**顔はシルエットではなく
+    /// はっきり写っている**（拡大しても目鼻が潰れているだけ）。検出できない理由と、
+    /// 効かなかった対策は `hardFixtureCoverageFloor` の doc に残してある。
     @MainActor
     func test_LiveModelPath_HardFixtures() async throws {
         var measured = false
@@ -102,9 +103,33 @@ final class DValidLiveModelTests: XCTestCase {
     /// backlight 0.00 / dark 1.00 / motion 1.00 / occluded 1.00 / beach 1.00 / crowd 0.96。
     ///
     /// `probe_hard_backlight` が 0 なのは**現状がそうだから**で、目標ではない。
-    /// 0.72 秒・11 フレームしかない極端な素材だが、逆光でモザイクが一切乗らないのは
-    /// プライバシー上の実害なので、**改善したら下限を引き上げること**。
     /// 更新するときは理由と計測日を添える。
+    ///
+    /// ## この 0 は「逆光だから」ではない（2026-07-31 に切り分け済み）
+    ///
+    /// **逆光そのものは検出を妨げない。** `sample_face`（明るいスタジオ撮影・75/75）の
+    /// 顔のすぐ横に光源を合成して強度を 3 段階で測ったところ、**顔の左半分が完全に
+    /// 光に溶ける強さでも 75/75（100%）検出できた**。
+    ///
+    /// この素材が 0 なのは、逆光・夜間・低ビットレート・やや下向きの顔・キャップの影が
+    /// 重なって**顔の局所的な特徴そのものが残っていない**ため。拡大すると目鼻が単色へ
+    /// 潰れている。人間が顔と分かるのは文脈からで、検出器が使える手がかりが無い。
+    ///
+    /// ## 試して効かなかったこと（同じ道を 2 度通らないために残す）
+    ///
+    /// | 試したこと | 結果 |
+    /// |---|---|
+    /// | 明るい crop にも `.backlight`（明部抑制）を適用 | 0 のまま |
+    /// | 露出 −2 段の補正段を新設 | 0 のまま |
+    /// | 検出幅 640 → 960 | 0 のまま。**遮蔽が 36→34 に退行**したので採れない |
+    /// | 素材を 2 倍に拡大 | 1/12。ほぼ変わらない |
+    /// | **顔を画面いっぱいまで拡大** | **0/11。サイズの問題ではない** |
+    ///
+    /// つまり検出パイプライン側では届かない。**下限を上げたいなら、まず素材を疑うこと。**
+    ///
+    /// なお、この切り分けは「逆光という要因単体」を合成で分離したもので、
+    /// 夜間の低照度・低画質を含む実素材は手元にこの 1 本しかない。
+    /// 実シーンの逆光を保証したいなら素材を足す必要がある。
     private static let hardFixtureCoverageFloor: [String: Double] = [
         "probe_hard_backlight": 0.00,
         "probe_hard_dark": 0.95,
@@ -268,6 +293,12 @@ final class DValidLiveModelTests: XCTestCase {
 
         let scanner = makeFaceLandmarker(forVideo: false, settings: DetectionSettings())
         let model = MosaicEditorModel(mode: .video, recents: RecentItemsStore())
+        // **「顔モザイクをかける」までを再現する。** 動画モードの既定は OFF
+        // （開いただけでは掛からない）なので、これが無いと被覆率は必ず 0 になる。
+        // フラグを直に立てず段の操作を通すのは、実機と同じ経路
+        // （区間の確保も含む）を測るため。
+        model.enterDock(.mosaic)
+        model.enterDock(.face)
 
         var frames = 0
         var flowFrames = 0

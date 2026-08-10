@@ -35,6 +35,8 @@ public final class MosaicEditorModel: ObservableObject {
     /// undo/redo でクリップ ID・順序・rate まで完全復元される。
     struct EditSnapshot: Equatable {
         var faceMosaicOn: Bool
+        /// 手動矩形の ON/OFF。顔とは別に戻す（顔を切った undo で矩形まで戻らない）。
+        var objectMosaicOn: Bool
         var backgroundMosaicOn: Bool
         var faceBlockSize: Float
         var backgroundBlockSize: Float
@@ -147,7 +149,24 @@ public final class MosaicEditorModel: ObservableObject {
     @Published public var trimRange: ClosedRange<Double> = 0...1
 
     // コントロール（効果ごと）
+
+    /// 顔モザイクを掛けるか。
+    ///
+    /// **動画モードの初期値は false**（`init` で設定）。動画を開いただけで勝手に
+    /// モザイクが乗ると、素材を確認したいだけの人が必ず一度外すことになる。
+    /// 「モザイク」→「顔」を押した時点で初めて掛かる（`setEffectOn`）。
+    /// 写真モードは 1 枚に対して即座に結果を見せる画面なので true のまま。
     @Published public var faceMosaicOn = true
+    /// 手動矩形（物体モザイク）を掛けるか。**顔モザイクからは独立している。**
+    ///
+    /// 以前は `faceMosaicOn` に従属させていた（矩形は顔検出の補助、という位置づけ）。
+    /// 顔を切ると矩形まで消えるため、「顔は検出に任せて、検出できない物だけ矩形で隠す」
+    /// という使い方ができなかった。矩形は矩形として管理する。
+    ///
+    /// **既定は true。** 矩形はユーザーが描いたときにしか存在しないので、描いた直後に
+    /// 何も起きない状態（既定 OFF）を作らない。切る導線は矩形の段のトグル
+    /// （`toggleObjectMosaic`）にある。
+    @Published public var objectMosaicOn = true
     @Published public var backgroundMosaicOn = false
     @Published public var faceBlockSize: Float = 28
     @Published public var backgroundBlockSize: Float = 28
@@ -526,6 +545,8 @@ public final class MosaicEditorModel: ObservableObject {
         settings: DetectionSettings = DetectionSettings()
     ) {
         self.mode = mode
+        // 動画は「開いてから決める」。写真は開いた時点で結果を見せる（上の doc 参照）。
+        self.faceMosaicOn = mode == .photo
         self.recents = recents
         self.detectionSettings = settings
         self.landmarker = landmarker ?? makeFaceLandmarker(forVideo: mode == .video, settings: settings)
@@ -545,6 +566,7 @@ public final class MosaicEditorModel: ObservableObject {
     private func bindControls() {
         let changes: [AnyPublisher<Void, Never>] = [
             $faceMosaicOn.map { _ in () }.eraseToAnyPublisher(),
+            $objectMosaicOn.map { _ in () }.eraseToAnyPublisher(),
             $backgroundMosaicOn.map { _ in () }.eraseToAnyPublisher(),
             $faceBlockSize.map { _ in () }.eraseToAnyPublisher(),
             $backgroundBlockSize.map { _ in () }.eraseToAnyPublisher()
@@ -577,6 +599,9 @@ public final class MosaicEditorModel: ObservableObject {
                        isSelected: autoSelect, personID: personIDs[idx])
         }
         objectMasks = []
+        // 矩形が 1 個も無い状態へ戻すので、切ってあった ON/OFF も既定へ戻す
+        // （前の素材で切ったまま持ち越すと、新しく描いた矩形が無言で出ない）。
+        objectMosaicOn = true
         sourceTexture = makeTexture(from: normalized)
         updateBackgroundMask(from: normalized)
         renderer?.reset()
@@ -604,6 +629,10 @@ public final class MosaicEditorModel: ObservableObject {
         videoAsset = asset
 
         objectMasks = []
+        // 矩形を捨てるので ON/OFF も既定へ（写真側と同じ理由）。
+        objectMosaicOn = true
+        // 素材が変わるので顔探しはやり直し（次に顔の段へ入ったときに走る）。
+        didSeedFaces = false
         // 新しい素材を読み込むので顔は一旦空にする。**初期スキャンが非同期になった**
         // （下の Task）ため、ここで空にしないと「前の素材の顔が残ったまま復元が走る」
         // 窓ができる。スキャン結果はこの空の列へ**追記**される（`loadSeedFaces` の doc）。
@@ -630,7 +659,18 @@ public final class MosaicEditorModel: ObservableObject {
             // `pendingFaceSelectionAnchors` に保留され、埋まった時点で didSet が適用する
             // （`restoreFaceSelection` の doc）。
             await Task.yield()
-            await loadSeedFaces(from: asset)
+            // 先頭フレームは常に要る（プレビューに何も出ないと読み込み失敗に見える）。
+            _ = loadFirstFrame(from: asset)
+            // **顔探しは「掛けると決めてから」。** 動画モードの新規読み込みでは走らせない
+            // （`seedFacesIfNeeded` が顔の段に入った時点で走らせる）。
+            // 下書き復元は保存時の顔選択を結び直す必要があるので、ここで走らせる。
+            if mode == .photo || pendingTimelineRestore != nil || faceMosaicOn {
+                await loadSeedFaces(from: asset)
+            } else {
+                // 顔を出さないぶん、素材の絵だけは先に見せる
+                // （`loadSeedFaces` の末尾がやっているのと同じ役割）。
+                renderPreview()
+            }
             #if DEBUG
             print(String(format: "[MMLOAD] seed scan done %.2fs faces=%d",
                          Date().timeIntervalSince(loadStart), detectedFaces.count))
@@ -723,11 +763,34 @@ public final class MosaicEditorModel: ObservableObject {
     /// ライブ検出の安全網——ため、置き換えるとそれらを黙って消す
     /// （実測: 復元した顔選択が丸ごと失われ、`detectedFaces` が空になった）。
     /// 列は `load` の同期部で空にしてあるので、通常経路では追記＝置き換えと同じ結果になる。
-    private func loadSeedFaces(from asset: AVAsset) async {
-        guard let frame = Self.firstFrame(of: asset) else { return }
+    /// 素材を開いた直後に必ず要るもの（先頭フレーム・テクスチャ・背景マスク）。
+    ///
+    /// **顔探しはここに含めない。** あちらは動画によっては数秒かかるうえ、
+    /// 動画モードでは「モザイクを掛けると決めるまで」不要
+    /// （`seedFacesIfNeeded` が段に入った時点で走らせる）。
+    private func loadFirstFrame(from asset: AVAsset) -> UIImage? {
+        guard let frame = Self.firstFrame(of: asset) else { return nil }
         sourceImage = frame
         sourceTexture = makeTexture(from: frame)
         updateBackgroundMask(from: frame)
+        return frame
+    }
+
+    /// まだなら顔探しを走らせる。**2 度は走らせない。**
+    ///
+    /// 動画を開いた時点では走らせず、「モザイク」→「顔」に入った時点で初めて走る。
+    /// 素材を確認したいだけの人に、掛ける前提の待ち時間を負わせないため。
+    /// 写真モードと下書き復元は開いた時点で必要なので `load` から直接呼ぶ。
+    func seedFacesIfNeeded() async {
+        guard !didSeedFaces, let asset = videoAsset else { return }
+        didSeedFaces = true
+        await loadSeedFaces(from: asset)
+    }
+
+    private func loadSeedFaces(from asset: AVAsset) async {
+        let existing = sourceImage ?? loadFirstFrame(from: asset)
+        guard let frame = existing else { return }
+        didSeedFaces = true
 
         let scan = await scanSeedFaces(of: asset, firstFrame: frame)
         let faces = scan.faces
@@ -1258,11 +1321,15 @@ public final class MosaicEditorModel: ObservableObject {
         var current = tex
 
         // 顔モザイク（立体メッシュ）＋手動矩形。
-        // 手動矩形は顔検出を補助するものなので、顔タブ（faceMosaicOn）の状態に従う。
-        if faceMosaicOn {
-            let landmarks = detectedFaces.filter(\.isSelected).map(\.landmarks)
-            let extra = objectMaskPaths(for: CGSize(width: tex.width, height: tex.height),
-                                        atComposition: compositionTimeForOverlay)
+        // **両者は独立して ON/OFF する。** 顔を切っても矩形は残る（逆も同じ）。
+        // 1 回の `renderToNewTexture` に両方渡すのは従来どおり（2 回描くと
+        // 重なった部分だけ二重にブロック化されて濃さが変わる）。
+        let landmarks = faceMosaicOn ? detectedFaces.filter(\.isSelected).map(\.landmarks) : []
+        let extra = objectMosaicOn
+            ? objectMaskPaths(for: CGSize(width: tex.width, height: tex.height),
+                              atComposition: compositionTimeForOverlay)
+            : []
+        if !landmarks.isEmpty || !extra.isEmpty {
             if let result = renderer.renderToNewTexture(
                 input: current, landmarkSets: landmarks, additionalPaths: extra
             ) {
@@ -1411,6 +1478,13 @@ public final class MosaicEditorModel: ObservableObject {
     /// そこで load の**前**に予約し、load 自身が適用する（適用後は破棄）。
     private var pendingTimelineRestore: TimelineRestoreRequest?
 
+    /// 顔探し（初期スキャン）を走らせたか。
+    ///
+    /// **動画を開いただけでは走らせない**ので、「モザイク」→「顔」に入った時点で
+    /// 一度だけ走らせるための目印（`seedFacesIfNeeded`）。素材を差し替える
+    /// `load(videoURL:)` で false に戻す。
+    var didSeedFaces = false
+
     /// 下書きの復元内容を予約する。`load(videoURL:)` の**前**に呼ぶこと。
     ///
     /// - Parameters:
@@ -1493,6 +1567,9 @@ public final class MosaicEditorModel: ObservableObject {
     ///   一切触らない＝初期スキャンの自動選択規則がそのまま残る。
     public func applyRestoredParameters(
         faceMosaicOn: Bool,
+        /// 矩形の ON/OFF。この項目より前に保存された下書きには無いので、
+        /// 既定は true（＝矩形が保存されていれば従来どおり掛かる）。
+        objectMosaicOn: Bool = true,
         backgroundMosaicOn: Bool,
         faceBlockSize: Float,
         backgroundBlockSize: Float,
@@ -1509,6 +1586,7 @@ public final class MosaicEditorModel: ObservableObject {
             personRegistry.merge(personProfiles)
         }
         self.faceMosaicOn = faceMosaicOn
+        self.objectMosaicOn = objectMosaicOn
         self.backgroundMosaicOn = backgroundMosaicOn
         self.faceBlockSize = faceBlockSize
         self.backgroundBlockSize = backgroundBlockSize
@@ -1699,6 +1777,7 @@ public final class MosaicEditorModel: ObservableObject {
     private func snapshot() -> EditSnapshot {
         EditSnapshot(
             faceMosaicOn: faceMosaicOn,
+            objectMosaicOn: objectMosaicOn,
             backgroundMosaicOn: backgroundMosaicOn,
             faceBlockSize: faceBlockSize,
             backgroundBlockSize: backgroundBlockSize,
@@ -1711,6 +1790,7 @@ public final class MosaicEditorModel: ObservableObject {
 
     private func apply(_ snap: EditSnapshot) {
         faceMosaicOn = snap.faceMosaicOn
+        objectMosaicOn = snap.objectMosaicOn
         backgroundMosaicOn = snap.backgroundMosaicOn
         faceBlockSize = snap.faceBlockSize
         backgroundBlockSize = snap.backgroundBlockSize
@@ -1869,6 +1949,7 @@ public final class MosaicEditorModel: ObservableObject {
                 audioMix: audioMix,
                 renderLayout: renderLayout,
                 faceEnabled: faceMosaicOn,
+                objectEnabled: objectMosaicOn,
                 backgroundEnabled: backgroundMosaicOn,
                 backgroundBlock: backgroundBlockSize,
                 speed: exportSpeed,

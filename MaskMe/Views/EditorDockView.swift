@@ -78,6 +78,8 @@ struct EditorDockView: View {
             effectToggle(.background)
             blockSizeSlider
         case .rectangle:
+            // 矩形そのものの ON/OFF。顔・背景と同じ位置（段の先頭）に置く。
+            objectMosaicToggle
             rectangleToolToggle
             // 置いた矩形のチップ（✕ で削除）。**これが無いと置いた矩形を取り消せない。**
             // 顔チップはこの段の関心ではないので落とす。
@@ -99,8 +101,10 @@ struct EditorDockView: View {
                        isActive: model.isDockEffectOn(.background)) {
                 model.enterDock(.background)
             }
+            // 点灯は「矩形が置いてあり、かつ効いている」とき
+            // （置いてあっても切ってあれば効いていない）。
             dockButton(title: "矩形", systemImage: "rectangle.dashed",
-                       isActive: !model.draftObjectMasks.isEmpty) {
+                       isActive: model.objectMosaicOn && !model.draftObjectMasks.isEmpty) {
                 model.enterDock(.rectangle)
             }
             Spacer(minLength: 0)
@@ -116,6 +120,18 @@ struct EditorDockView: View {
                           accessibilityLabel: "\(tab.title)モザイクを\(isOn ? "オフ" : "オン")") {
             model.toggleDockEffect(tab)
         }
+    }
+
+    /// 矩形モザイクそのものの ON/OFF。**顔とは独立**（`objectMosaicOn`）。
+    /// 顔を切ると矩形まで消えていたのを分けたので、切る導線もここに要る。
+    private var objectMosaicToggle: some View {
+        let isOn = model.objectMosaicOn
+        return dockButton(title: "矩形", systemImage: "rectangle.dashed",
+                          isActive: isOn,
+                          accessibilityLabel: "矩形モザイクを\(isOn ? "オフ" : "オン")") {
+            model.toggleObjectMosaic()
+        }
+        .accessibilityIdentifier("editor.objectMosaicToggle")
     }
 
     /// 矩形を置くモードの ON/OFF。ON の間だけプレビューのドラッグが矩形作成になる

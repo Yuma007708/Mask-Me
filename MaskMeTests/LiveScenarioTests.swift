@@ -14,7 +14,12 @@ final class LiveScenarioTests: XCTestCase {
     private let step = 1.0 / 15.0
 
     private func makeModel() -> MosaicEditorModel {
-        MosaicEditorModel(mode: .video, recents: RecentItemsStore())
+        let model = MosaicEditorModel(mode: .video, recents: RecentItemsStore())
+        // **「顔モザイクをかける」までを再現する。** 動画モードの既定は OFF
+        // （開いただけでは掛からない）で、ライブ検出そのものも `faceMosaicOn` を
+        // 見ているため、これが無いとどのシナリオも「何も起きない」になる。
+        model.faceMosaicOn = true
+        return model
     }
 
     private func fakeFace(cx: Double, cy: Double, size: Double = 0.2) -> FaceLandmarkSet {

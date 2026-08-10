@@ -18,9 +18,23 @@ import MosaicCore
 /// ## 描画の入口は 1 本
 ///
 /// プレビュー 2 経路（`renderPreview` / `MosaicPreviewController`）とエクスポートが
-/// **全て `objectMaskRects(atComposition:)` を通る**。`MosaicApplyRange` の
+/// **全て `objectMaskPlacements(atComposition:)` を通る**。`MosaicApplyRange` の
 /// 「編集の入口は 1 本だけ」と同じ理由で、解決規則（clipID の絞り込み・適用区間ゲート・
 /// レイアウト写像・トランジションの union）を書き写さない。
+
+/// オーバーレイ 1 個ぶんの表示情報。
+///
+/// タプルで返さないのは、項目が増えるたびに呼び出し側の分解が壊れるのと、
+/// `angle` を足したときに「順番を取り違えて矩形と角度が入れ替わる」事故が
+/// 型で止まらないため。
+public struct VisibleObjectMask: Identifiable, Equatable {
+    public let id: UUID
+    /// 合成フレーム基準の正規化矩形。
+    public let rect: CGRect
+    /// ピクセル空間での傾き（ラジアン）。
+    public let angle: Double
+}
+
 @MainActor
 extension MosaicEditorModel {
     // MARK: - 描画用の解決
@@ -38,9 +52,11 @@ extension MosaicEditorModel {
     ///
     /// 静止画編集（クリップ無し）では `.still` のマスクをそのまま返す
     /// （時間軸が無いので写像もゲートも掛からない）。
-    func objectMaskRects(atComposition time: Double) -> [CGRect] {
+    func objectMaskPlacements(atComposition time: Double) -> [ObjectMaskPlacement] {
         guard !clips.isEmpty else {
-            return objectMasks.filter(\.anchor.isStill).map { $0.rect(atSourceTime: 0) }
+            return objectMasks.filter(\.anchor.isStill).map {
+                ObjectMaskPlacement(rect: $0.rect(atSourceTime: 0), angle: $0.angle(atSourceTime: 0))
+            }
         }
         let locations = mapping.sourceLocations(at: time)
         guard locations.count >= 2, let overlap = mapping.overlap(at: time) else {
@@ -49,39 +65,49 @@ extension MosaicEditorModel {
             let resolved = resolveSourceLocation(atComposition: time)
             guard isMosaicActive(clipID: resolved.clipID, sourceID: resolved.sourceID,
                                  sourceTime: resolved.time) else { return [] }
-            return ObjectMaskResolver.rects(objectMasks, tracks: objectTracks,
-                                            clipID: resolved.clipID,
-                                            sourceTime: resolved.time, layout: renderLayout)
+            return ObjectMaskResolver.placements(objectMasks, tracks: objectTracks,
+                                                 clipID: resolved.clipID,
+                                                 sourceTime: resolved.time, layout: renderLayout)
         }
-        return locations.flatMap { entry -> [CGRect] in
+        return locations.flatMap { entry -> [ObjectMaskPlacement] in
             guard let side = entry.side, let progress = entry.progress else { return [] }
             let sourceTime = timeline.clampedSourceTime(entry.location.time,
                                                         sourceID: entry.location.sourceID)
             guard isMosaicActive(clipID: entry.location.clipID,
                                  sourceID: entry.location.sourceID,
                                  sourceTime: sourceTime) else { return [] }
-            return ObjectMaskResolver.rects(objectMasks, tracks: objectTracks,
-                                            clipID: entry.location.clipID,
-                                            sourceTime: sourceTime, layout: renderLayout)
-                .compactMap { overlap.kind.visibleRect($0, progress: progress, side: side) }
+            return ObjectMaskResolver.placements(objectMasks, tracks: objectTracks,
+                                                 clipID: entry.location.clipID,
+                                                 sourceTime: sourceTime, layout: renderLayout)
+                // トランジションで見えている部分だけを残す。**傾きはそのまま持ち回る**
+                // （切り取られるのは矩形であって、傾きが変わるわけではない）。
+                .compactMap { placed in
+                    overlap.kind.visibleRect(placed.rect, progress: progress, side: side)
+                        .map { ObjectMaskPlacement(rect: $0, angle: placed.angle) }
+                }
         }
     }
 
     /// 物体マスクを `FaceMaskBuilder.RegionPath` に変換する（描画層の入口）。
     func objectMaskPaths(for size: CGSize, atComposition time: Double) -> [FaceMaskBuilder.RegionPath] {
-        objectMaskRects(atComposition: time).map {
-            FaceMaskBuilder.RegionPath(path: FaceMaskBuilder.rectPath(from: $0, in: size), value: 0.4)
+        objectMaskPlacements(atComposition: time).map {
+            FaceMaskBuilder.RegionPath(
+                path: FaceMaskBuilder.rectPath(from: $0.rect, angle: $0.angle, in: size),
+                value: 0.4)
         }
     }
 
-    /// UI のチップ表示用: マスク id と**現在の再生位置での**合成基準矩形。
+    /// UI のチップ表示用: マスク id と**現在の再生位置での**合成基準矩形・傾き。
     ///
     /// `objectMasks` をそのまま `ForEach` してはいけない。矩形はキーフレーム補間で
     /// 時刻ごとに変わるので、シークしてもチップの枠が動かなくなる。
-    public var visibleObjectMasks: [(id: UUID, rect: CGRect)] {
+    public var visibleObjectMasks: [VisibleObjectMask] {
         let time = compositionTimeForOverlay
         guard !clips.isEmpty else {
-            return objectMasks.filter(\.anchor.isStill).map { ($0.id, $0.rect(atSourceTime: 0)) }
+            return objectMasks.filter(\.anchor.isStill).map {
+                VisibleObjectMask(id: $0.id, rect: $0.rect(atSourceTime: 0),
+                                  angle: $0.angle(atSourceTime: 0))
+            }
         }
         let resolved = resolveSourceLocation(atComposition: time)
         return objectMasks.filter { $0.anchor.clipID == resolved.clipID }.map { mask in
@@ -89,7 +115,10 @@ extension MosaicEditorModel {
             // ユーザーが「どこを掴めば直せるのか」を見失う）。
             let rect = ObjectMaskResolver.rect(of: mask, tracks: objectTracks,
                                                atSourceTime: resolved.time)
-            return (mask.id, renderLayout.remap(rect, clipID: resolved.clipID))
+            let angle = mask.angle(atSourceTime: resolved.time)
+            return VisibleObjectMask(id: mask.id,
+                                     rect: renderLayout.remap(rect, clipID: resolved.clipID),
+                                     angle: angle)
         }
     }
 
@@ -113,6 +142,11 @@ extension MosaicEditorModel {
     func appendObjectMask(compositionRect rect: CGRect) {
         guard let mask = makeObjectMask(compositionRect: rect) else { return }
         objectMasks.append(mask)
+        // **描いた矩形が無言で出ない状態を作らない。** 矩形を描く操作そのものが
+        // 「ここを隠す」という意思表示なので、切ってあった ON/OFF を戻し、
+        // 適用区間も確保する（区間 0 本は全区間 OFF）。
+        objectMosaicOn = true
+        ensureApplyRangesExist()
         commitEdit()
     }
 
@@ -139,7 +173,11 @@ extension MosaicEditorModel {
     ///
     /// 渡す矩形は**合成フレーム基準**。素材基準へ落としてから積む。
     /// 同じ時刻に既にキーフレームがあれば置換される（`ObjectMask.settingKeyframe`）。
-    public func setObjectMaskKeyframe(_ id: UUID, compositionRect rect: CGRect) {
+    /// - Parameter angle: 傾き（ラジアン）。**位置だけ動かす操作でも必ず渡すこと**
+    ///   （省略できると、掴んで動かしただけで傾きが 0 に戻る）。呼び出し側は
+    ///   `visibleObjectMasks` が返した角度をそのまま渡せばよい。
+    public func setObjectMaskKeyframe(_ id: UUID, compositionRect rect: CGRect,
+                                      angle: Double) {
         guard let index = objectMasks.firstIndex(where: { $0.id == id }) else { return }
         let mask = objectMasks[index]
         let sourceRect: CGRect
@@ -152,7 +190,8 @@ extension MosaicEditorModel {
             sourceRect = rect
             sourceTime = 0
         }
-        let updated = mask.settingKeyframe(atSourceTime: sourceTime, rect: sourceRect)
+        let updated = mask.settingKeyframe(atSourceTime: sourceTime, rect: sourceRect,
+                                           angle: angle)
         guard updated != mask else { return }
         objectMasks[index] = updated
         renderPreview()

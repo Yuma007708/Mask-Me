@@ -168,6 +168,27 @@ extension MosaicEditorModel {
         applyTimelineEdit { $0.removingApplyRange(id: id) }
     }
 
+    /// 適用区間が 1 本も無ければ、全クリップに全域の区間を作る。
+    ///
+    /// **モザイクを「かける」操作の入口で必ず通すこと。** 区間 0 本は
+    /// 「全区間 OFF」であり（`MosaicApplyGate` の仕様）、効果のフラグを立てただけでは
+    /// 何も描かれない。実際に「加工レイヤーを消す → もう一度かける → 完了を押しても
+    /// 何も起きない」というユーザー報告になった。効果の ON/OFF と区間の有無は
+    /// 別々に持っているので、**繋ぐのは操作の入口の責任**である。
+    ///
+    /// **一部だけ残っているときは触らない。** 特定のクリップの区間を消したのは
+    /// 意図的な操作なので、別のクリップで効果を入れ直したからといって復活させない。
+    /// 全部消えているときだけ「掛けるつもりで何も無い」＝繋ぎ忘れとみなす。
+    func ensureApplyRangesExist() {
+        guard timeline.applyRanges.isEmpty, !timeline.clips.isEmpty else { return }
+        applyTimelineEdit { state in
+            var next = state
+            next.applyRanges = MosaicApplyGate.fullCoverRanges(
+                for: state.clips, photoSourceIDs: state.photoSourceIDs)
+            return next
+        }
+    }
+
     /// 掴んだセグメント（適用区間 × クリップ）を新しい合成区間で置き換える（端ドラッグの確定）。
     ///
     /// 差し替えは素材時刻で行われ、当該クリップの使用範囲外にある素材区間は温存される

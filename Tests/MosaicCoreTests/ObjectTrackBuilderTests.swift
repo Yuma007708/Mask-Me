@@ -189,7 +189,7 @@ final class ObjectTrackBuilderTests: XCTestCase {
         guard let track = sut.finish() else { return XCTFail("軌跡が空") }
         XCTAssertTrue(track.matches(target))
 
-        let edited = target.settingKeyframe(atSourceTime: 0.5, rect: box(0.8))
+        let edited = target.settingKeyframe(atSourceTime: 0.5, rect: box(0.8), angle: 0)
         XCTAssertFalse(track.matches(edited), "キーフレーム追加後も一致してしまっている")
 
         let otherClip = ObjectMask(id: target.id, anchor: .clip(clipID: UUID(), sourceID: sourceID),

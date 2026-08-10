@@ -11,7 +11,12 @@ import MosaicCore
 @MainActor
 final class TimelineEditingModelTests: XCTestCase {
     private func makeModel() -> MosaicEditorModel {
-        MosaicEditorModel(mode: .video, recents: RecentItemsStore())
+        let model = MosaicEditorModel(mode: .video, recents: RecentItemsStore())
+        // **「顔モザイクをかける」までを再現する。** 動画モードの既定は OFF
+        // （開いただけでは掛からない）で、ライブ検出も描画も `faceMosaicOn` を見ている。
+        // 既定そのものを検証したいテストは `MosaicReapplyFlowTests` にある。
+        model.faceMosaicOn = true
+        return model
     }
 
     private func fakeFace(cx: Double = 0.5, cy: Double = 0.4, size: Double = 0.2) -> FaceLandmarkSet {
@@ -2897,7 +2902,12 @@ final class PhotoClipEncoderTests: XCTestCase {
 @MainActor
 final class PhotoClipModelTests: XCTestCase {
     private func makeModel() -> MosaicEditorModel {
-        MosaicEditorModel(mode: .video, recents: RecentItemsStore())
+        let model = MosaicEditorModel(mode: .video, recents: RecentItemsStore())
+        // **「顔モザイクをかける」までを再現する。** 動画モードの既定は OFF
+        // （開いただけでは掛からない）で、ライブ検出も描画も `faceMosaicOn` を見ている。
+        // 既定そのものを検証したいテストは `MosaicReapplyFlowTests` にある。
+        model.faceMosaicOn = true
+        return model
     }
 
     private func fakeFace(cx: Double = 0.5, cy: Double = 0.4, size: Double = 0.2) -> FaceLandmarkSet {
@@ -3086,7 +3096,11 @@ final class PhotoClipModelTests: XCTestCase {
         XCTAssertEqual(videoResolved.sourceID, videoID)
         XCTAssertEqual(videoResolved.time, 1.0, accuracy: 1e-9)
 
-        // seed 前は検出対象、seed 後は写真区間のどの時刻でも検出しない
+        // seed 前は検出対象、seed 後は写真区間のどの時刻でも検出しない。
+        // **ライブ検出は `faceMosaicOn` を見ている**（掛けないなら検出も走らせない）。
+        // 動画モードの既定は OFF なので、ここで「掛ける」状態にしないと
+        // 何を測っても常に false になる。
+        model.faceMosaicOn = true
         XCTAssertTrue(model.shouldDetectPreviewFrame(at: 3.5), "seed 前に検出が抑止されている")
         model.cacheStore.store([fakeFace()], sourceID: photoID, time: 0)
         XCTAssertFalse(model.shouldDetectPreviewFrame(at: 2.0),
@@ -3114,7 +3128,12 @@ final class PhotoClipModelTests: XCTestCase {
 @MainActor
 final class TransitionOverlapModelTests: XCTestCase {
     private func makeModel() -> MosaicEditorModel {
-        MosaicEditorModel(mode: .video, recents: RecentItemsStore())
+        let model = MosaicEditorModel(mode: .video, recents: RecentItemsStore())
+        // **「顔モザイクをかける」までを再現する。** 動画モードの既定は OFF
+        // （開いただけでは掛からない）で、ライブ検出も描画も `faceMosaicOn` を見ている。
+        // 既定そのものを検証したいテストは `MosaicReapplyFlowTests` にある。
+        model.faceMosaicOn = true
+        return model
     }
 
     private func fakeFace(cx: Double, cy: Double, size: Double = 0.1) -> FaceLandmarkSet {
@@ -3352,7 +3371,12 @@ final class TransitionOverlapModelTests: XCTestCase {
 @MainActor
 final class PhotoClipDurationAndVolumeTests: XCTestCase {
     private func makeModel() -> MosaicEditorModel {
-        MosaicEditorModel(mode: .video, recents: RecentItemsStore())
+        let model = MosaicEditorModel(mode: .video, recents: RecentItemsStore())
+        // **「顔モザイクをかける」までを再現する。** 動画モードの既定は OFF
+        // （開いただけでは掛からない）で、ライブ検出も描画も `faceMosaicOn` を見ている。
+        // 既定そのものを検証したいテストは `MosaicReapplyFlowTests` にある。
+        model.faceMosaicOn = true
+        return model
     }
 
     private func solidImage(width: CGFloat, height: CGFloat) -> UIImage {
@@ -3654,7 +3678,12 @@ final class PhotoClipDurationAndVolumeTests: XCTestCase {
 @MainActor
 final class TimelineVolumeSheetWiringTests: XCTestCase {
     private func makeModel() -> MosaicEditorModel {
-        MosaicEditorModel(mode: .video, recents: RecentItemsStore())
+        let model = MosaicEditorModel(mode: .video, recents: RecentItemsStore())
+        // **「顔モザイクをかける」までを再現する。** 動画モードの既定は OFF
+        // （開いただけでは掛からない）で、ライブ検出も描画も `faceMosaicOn` を見ている。
+        // 既定そのものを検証したいテストは `MosaicReapplyFlowTests` にある。
+        model.faceMosaicOn = true
+        return model
     }
 
     /// 写真クリップでは音量メニューが活性にならないこと（音声トラックが無く、

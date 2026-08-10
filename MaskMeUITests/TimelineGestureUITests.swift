@@ -252,6 +252,55 @@ final class TimelineGestureUITests: XCTestCase {
                       "矩形の段でドラッグしたのに矩形ができない")
     }
 
+    /// **大きさのつまみが、矩形の移動に食われていないこと。**
+    ///
+    /// つまみは当たり判定を 44pt へ広げてあるので、小さい矩形では枠の外まで
+    /// 張り出して枠本体のドラッグと重なる。上に乗っている（＝つまみが勝つ）
+    /// ことをここで確かめる。負けると、つまみを引いても矩形がただ動く。
+    func test_resizeHandle_growsTheRectangle() {
+        openRectangleRoute()
+        dragOnPreview()
+        let mask = element("editor.objectMask")
+        XCTAssertTrue(mask.waitForExistence(timeout: 15), "矩形ができていない")
+        let before = mask.frame
+
+        let handle = element("editor.objectMask.resize")
+        XCTAssertTrue(handle.waitForExistence(timeout: 5), "大きさのつまみが無い")
+        // 座標へ引くので `XCUICoordinate` 同士で操作する
+        // （`XCUIElement.press(forDuration:thenDragTo:)` は要素しか受け取らない）。
+        handle.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+            .press(forDuration: 0.1,
+                   thenDragTo: app.windows.firstMatch.coordinate(
+                    withNormalizedOffset: CGVector(dx: 0.9, dy: 0.9)))
+
+        let after = element("editor.objectMask").frame
+        XCTAssertGreaterThan(after.width, before.width + 8,
+                             "つまみを引いたのに矩形が大きくならない（移動に食われている）")
+    }
+
+    /// **傾きのつまみで矩形が回ること。**
+    /// 回ると外接矩形の縦横比が変わるので、それで判定する
+    /// （XCUITest からは回転そのものを読めない）。
+    func test_rotateHandle_turnsTheRectangle() {
+        openRectangleRoute()
+        dragOnPreview()
+        let mask = element("editor.objectMask")
+        XCTAssertTrue(mask.waitForExistence(timeout: 15), "矩形ができていない")
+        let before = mask.frame
+
+        let handle = element("editor.objectMask.rotate")
+        XCTAssertTrue(handle.waitForExistence(timeout: 5), "傾きのつまみが無い")
+        handle.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5))
+            .press(forDuration: 0.1,
+                   thenDragTo: app.windows.firstMatch.coordinate(
+                    withNormalizedOffset: CGVector(dx: 0.15, dy: 0.5)))
+
+        let after = element("editor.objectMask").frame
+        XCTAssertNotEqual(after.width / after.height, before.width / before.height,
+                          accuracy: 0.05,
+                          "つまみを回したのに矩形の向きが変わらない")
+    }
+
     // MARK: - ドックの段（勝手に閉じないこと）
 
     /// **タイムラインを払っても段は閉じない。** 旧 UI は下段そのものが文脈で
@@ -298,6 +347,13 @@ final class TimelineGestureUITests: XCTestCase {
         dockBack.tap()
         XCTAssertTrue(app.buttons["モザイク"].waitForExistence(timeout: 5),
                       "モザイクから戻った先が最上段になっていない")
+    }
+
+    /// **要素の型を決め打ちしないで探す。** 枠は `otherElements`、つまみは `Image`
+    /// なので `images` と、同じ層の部品でも型が割れる。型で引くと「実装は動いて
+    /// いるのに要素が見つからない」で落ち、原因の切り分けに時間を取られる。
+    private func element(_ identifier: String) -> XCUIElement {
+        app.descendants(matching: .any).matching(identifier: identifier).firstMatch
     }
 
     private var dockBack: XCUIElement { app.buttons["editor.dock.back"] }

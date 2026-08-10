@@ -92,8 +92,11 @@ final class DiagLivePathDumpTests: XCTestCase {
                     fputs(String(format: "[DIAG] t=%.3f FRAME-FAIL\n", t), stderr)
                     return
                 }
-                // 実機と同じく 480px 幅へ縮小してから検出する
-                let scaled = downscale(cg, targetWidth: 480)
+                // 実機と同じ幅へ縮小してから検出する。**直書きしないこと**
+                // （480 と書かれていた頃、本体は既に 640 だった）。
+                // すぐ上の `configMatrix` が 480/720/960 を直に並べているのは、
+                // あちらが解像度そのものを比較する診断だから。
+                let scaled = downscale(cg, targetWidth: MosaicEditorModel.liveDetectionTargetWidth)
                 let faces = scanner.allLandmarks(in: UIImage(cgImage: scaled))
                 let bucket = (t * 15.0).rounded() / 15.0
                 cache[bucket] = faces
