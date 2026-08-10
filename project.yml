@@ -34,6 +34,12 @@ targets:
       base:
         INFOPLIST_FILE: MaskMe/Info.plist
         PRODUCT_BUNDLE_IDENTIFIER: com.maskme.app
+        # `Assets.xcassets/AccentColor` を**アプリ全体のアクセント色として結線する**。
+        # これが無いと資産は存在するのに誰も引かず、`Color.accentColor` と
+        # システム部品（Picker / Slider / Toggle など）は OS 既定の青のままになる。
+        # 自作の部品だけ `AppTheme.accent`、標準部品だけ既定の青、という混在が
+        # 見た目では気づきにくい形で残る（`ToolColorSchemeTests` が番人）。
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
         DEVELOPMENT_TEAM: SF7RHB4VK7
         # Simulator では実機用証明書を探さず ad-hoc 署名にする。
         # これが無いと DEVELOPMENT_TEAM / CODE_SIGN_IDENTITY が全 SDK に効き、

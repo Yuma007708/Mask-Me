@@ -20,25 +20,29 @@ enum TimelinePalette {
     static let applyTrackBackground = Color.white.opacity(0.05)
 
     /// モザイク（適用区間）。選択で濃くなる。
+    ///
+    /// **色は `AppTheme.ToolAccent` から引く**（ドックの道具と同じ表）。
+    /// ここに直接 `Color.accentColor` を書くと、道具は青なのに帯だけ別の色、
+    /// という食い違いが起きる（`AppTheme.ToolAccent` の doc 参照）。
     static func mosaicFill(isSelected: Bool) -> Color {
-        Color.accentColor.opacity(isSelected ? 0.9 : 0.55)
+        AppTheme.ToolAccent.mask.opacity(isSelected ? 0.9 : 0.55)
     }
 
     /// BGM（E2）。**モザイクと明確に違う色にする**。同じ段の仕組みに乗るので、
     /// 色だけが「どちらの帯を掴んでいるか」の手がかりになる。
     static func audioFill(isSelected: Bool) -> Color {
-        Color(red: 0.35, green: 0.72, blue: 0.55).opacity(isSelected ? 0.95 : 0.6)
+        AppTheme.ToolAccent.audio.opacity(isSelected ? 0.95 : 0.6)
     }
 
     /// テキスト（E3）。モザイク（アクセント）・BGM（緑）・構造の目印（`structure`＝琥珀）
     /// のどれとも違う色にする（`audioFill` と同じ理由。同じ段の仕組みに乗るので
     /// 色だけが「どの帯か」の手がかりになる）。
     static func textFill(isSelected: Bool) -> Color {
-        Color(red: 0.85, green: 0.4, blue: 0.78).opacity(isSelected ? 0.95 : 0.6)
+        AppTheme.ToolAccent.decorate.opacity(isSelected ? 0.95 : 0.6)
     }
 
     /// 編集の目印（継ぎ目ボタン・キーフレーム）。
-    static let structure = Color(red: 1.0, green: 0.78, blue: 0.35)
+    static let structure = AppTheme.ToolAccent.cut
 
     static let selection = Color.white
     /// 非選択クリップの輪郭。段の地より明るく、選択枠よりはるかに暗い。
@@ -68,16 +72,20 @@ struct TimelineToolItem: Identifiable {
     ///
     /// 場所ではなく色で覚えられるようにするための区分なので、**見た目の都合で
     /// 割り当てを変えないこと**。同じ役割の道具は段が変わっても同じ色でいる。
+    ///
+    /// **道具の色は、その道具が作る帯の色と同じ**（`TimelinePalette` と同じ表を引く）。
+    /// テキストを押したら桃の帯が出る、音楽を押したら緑の帯が出る、という対応が
+    /// 画面の下と真ん中で成り立つ。
     enum Role {
-        /// 隠す（モザイク・顔・矩形）。
+        /// 隠す（モザイク・顔・矩形）↔ モザイクの適用区間の帯。
         case mask
-        /// 切る・並べる（分割・複製・削除・速度）。
-        case cut
-        /// 足す（テキスト・音楽・素材の追加）。
-        case add
-        /// 飾る（フィルター・色調補正・ステッカー）。
+        /// 音（音楽・音量）↔ BGM／音声の帯。
+        case audio
+        /// 文字・飾り（テキスト・ステッカー・フィルター）↔ テキストの帯。
         case decorate
-        /// 形（比率・切り抜き・変形）。
+        /// 切る・並べる（分割・複製・削除・速度・素材の追加）↔ 継ぎ目の目印。
+        case cut
+        /// 形（比率・切り抜き・変形）。帯を持たない、作品全体に掛かる設定。
         case shape
         /// 色を持たない（表示倍率など、素材に手を加えない操作）。
         case neutral
@@ -85,9 +93,9 @@ struct TimelineToolItem: Identifiable {
         var color: Color {
             switch self {
             case .mask: return AppTheme.ToolAccent.mask
-            case .cut: return AppTheme.ToolAccent.cut
-            case .add: return AppTheme.ToolAccent.add
+            case .audio: return AppTheme.ToolAccent.audio
             case .decorate: return AppTheme.ToolAccent.decorate
+            case .cut: return AppTheme.ToolAccent.cut
             case .shape: return AppTheme.ToolAccent.shape
             case .neutral: return AppTheme.ink
             }

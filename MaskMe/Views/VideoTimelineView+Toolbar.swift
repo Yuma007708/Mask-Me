@@ -120,7 +120,7 @@ extension VideoTimelineView {
     /// 重ねると、段を選ぶつもりの指が追加を押す）。追加の入口はツールバーに 1 本だけ。
     private var addTextItem: TimelineToolItem {
         TimelineToolItem(title: "テキスト", systemImage: "textformat",
-                         isEnabled: canAddTimedItem, role: .add, separatorBefore: true) {
+                         isEnabled: canAddTimedItem, role: .decorate, separatorBefore: true) {
             showTextInputSheet = true
         }
     }
@@ -128,7 +128,7 @@ extension VideoTimelineView {
     /// BGM を足す。テキストと同じ理由でツールバーに置く。
     private var addAudioItem: TimelineToolItem {
         TimelineToolItem(title: "音楽", systemImage: "music.note",
-                         isEnabled: canAddTimedItem, role: .add) {
+                         isEnabled: canAddTimedItem, role: .audio) {
             showAudioPicker = true
         }
     }
@@ -168,7 +168,7 @@ extension VideoTimelineView {
         let muted = isSelectedAudioMuted
         return TimelineToolItem(title: muted ? "消音中" : "音量",
                                 systemImage: muted ? "speaker.slash.fill" : "speaker.wave.2",
-                                isEnabled: canSetVolume, role: .add) {
+                                isEnabled: canSetVolume, role: .audio) {
             // **活性判定と同じ純関数で対象を決める**（別々に書くと「押せるのに
             // 何も起きない」が作れる）。
             volumeSheetTarget = TimelineVolumeAvailability.target(
@@ -196,7 +196,7 @@ extension VideoTimelineView {
 
     private var addMediaItem: TimelineToolItem {
         TimelineToolItem(title: "追加", systemImage: "photo.on.rectangle",
-                         isEnabled: !model.timeline.clips.isEmpty, role: .add) {
+                         isEnabled: !model.timeline.clips.isEmpty, role: .cut) {
             showMediaPicker = true
         }
     }
