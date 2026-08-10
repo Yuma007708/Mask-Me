@@ -225,11 +225,26 @@ struct TimelineApplyTrackView: View {
                 .fill(Color.white.opacity(0.06))
                 .frame(width: max(geometry.width(forDuration: totalDuration), 1),
                        height: TimelineMetrics.applyTrackHeight)
+            if displaySpans.isEmpty { emptyHint }
             ForEach(displaySpans) { span in
                 spanView(span)
             }
         }
         .frame(height: TimelineMetrics.applyTrackHeight, alignment: .topLeading)
+    }
+
+    /// 区間が 1 つも無いときに、この段が何の段かを示す。
+    ///
+    /// 薄い帯だけだと**空の段は存在しないのと同じ**に見え、「モザイクを掛ける
+    /// 区間をここに置ける」ことが読めない。ビューポート幅に依存させず左端へ置く
+    /// （この段は横スクロールする中身の一部なので、追えば必ず見つかる）。
+    private var emptyHint: some View {
+        Label("モザイク", systemImage: "squareshape.split.3x3")
+            .font(.system(size: 10, weight: .medium))
+            .foregroundStyle(.white.opacity(0.35))
+            .padding(.horizontal, 8)
+            .frame(height: TimelineMetrics.applyTrackHeight)
+            .allowsHitTesting(false)
     }
 
     /// 表示用スパン。クリップ帯のトリム下書き中は帯と同じ量だけ平行移動させる
@@ -254,6 +269,7 @@ struct TimelineApplyTrackView: View {
                     .strokeBorder(isSelected ? Color.white : Color.clear, lineWidth: 1)
             )
             .frame(width: max(width, 3), height: TimelineMetrics.applyTrackHeight)
+            .overlay(alignment: .leading) { chipLabel(width: width, isSelected: isSelected) }
             .overlay(alignment: .leading) {
                 if isSelected, span.isEdgeAdjustable { edgeHandle(span, edge: .start) }
             }
@@ -263,6 +279,32 @@ struct TimelineApplyTrackView: View {
             .offset(x: geometry.x(forTime: bounds.start))
             .contentShape(Rectangle())
             .onTapGesture { selectedRangeID = span.rangeID }
+            .accessibilityIdentifier("timeline.applySpan")
+            .accessibilityLabel("モザイク区間")
+            .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
+    }
+
+    /// チップの中に置く名前。**幅で削る。**
+    ///
+    /// 狭い区間で文字がはみ出すと、隣の区間の上に文字だけが乗って区切りが読めなくなる。
+    /// アイコンすら入らない幅では何も出さない（`3pt` まで潰せる区間がある）。
+    /// 選択中は左端ハンドル（`handleWidth`）の下に潜るので、そのぶん右へ寄せる。
+    @ViewBuilder
+    private func chipLabel(width: CGFloat, isSelected: Bool) -> some View {
+        let leading = (isSelected ? TimelineMetrics.handleWidth : 0) + 4
+        if width >= leading + 52 {
+            Label("モザイク", systemImage: "squareshape.split.3x3")
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(.white)
+                .padding(.leading, leading)
+                .allowsHitTesting(false)
+        } else if width >= leading + 16 {
+            Image(systemName: "squareshape.split.3x3")
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(.white)
+                .padding(.leading, leading)
+                .allowsHitTesting(false)
+        }
     }
 
     /// 端ハンドル。見た目は `handleWidth`×28 のまま、**当たり判定だけ**を HIG の 44×44 へ広げる

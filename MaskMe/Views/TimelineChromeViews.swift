@@ -22,16 +22,11 @@ struct TimelineToolItem: Identifiable {
     }
 }
 
-/// タイムライン**直下**の編集ツールバー（一般的な動画編集アプリの並び）。
+/// ドックの `root` 段に並ぶ編集項目（`EditorDockView` の中身のひとつ）。
 ///
-/// **項目は文脈依存で 4〜6 個に絞る**（`VideoTimelineView.toolItems`）。全 9 項目を
-/// 常時並べていた版は概算 434pt に対し iPhone 16 の 393pt 幅で末尾 3 項目が
-/// **初期表示で画面外**に出ており、押せない項目も `opacity 0.3` で居座って
-/// 「どれが今使えるのか」が読めなかった。絞ったことで固定ゾーン（旧 `pinnedItems`）も不要になり、
-/// ズームは何も選んでいないときの項目として本文に並ぶ。
-///
-/// 横スクロールは**保険として残す**（iPhone SE 幅 375pt では 6 項目がわずかに溢れる）。
-/// 高さは `TimelineMetrics.toolbarHeight` で固定し、粗さ調整バーと同じ段に収める。
+/// **並びは選択状態で変えない**（`VideoTimelineView.toolItems` の doc 参照）。
+/// 幅に収まる 5 項目のうしろに、収まらない項目（前へ／後へ・ズーム・モザイク区間）を
+/// 横スクロールで続ける。項目を絞って落とすのではなく、順序で優先度を付ける形。
 struct TimelineToolbarView: View {
     let items: [TimelineToolItem]
 
@@ -67,44 +62,6 @@ struct TimelineToolbarView: View {
         .disabled(!item.isEnabled)
         .opacity(item.isEnabled ? 1 : 0.3)
         .accessibilityLabel(item.title)
-    }
-}
-
-/// 粗さ調整バー（動画モードのみ。**編集ツールバーと同じ段を取り合う**）。
-///
-/// 効果タブ（顔・背景）を開いている間だけ、`TimelineToolbarView` と入れ替わりでここに出る。
-/// 段を増やさずに入れ替えることが要点で、旧 UI のように下部ドックへ積み上げると
-/// 「顔サムネ列 + 粗さバー + タブバー」で 224pt を占め、プレビューが 30% まで潰れる。
-///
-/// 写真モードは従来どおり `EditorView.adjustmentBar`（下部ドックに積む形）を使う
-/// （写真モードの UI 契約はそちらに依存しているため触らない）。
-struct TimelineAdjustmentBarView: View {
-    @ObservedObject var model: MosaicEditorModel
-
-    var body: some View {
-        HStack(spacing: 10) {
-            Text(model.activeTab == .background ? "背景の粗さ" : "顔の粗さ")
-                .font(.caption)
-                .foregroundStyle(.white.opacity(0.8))
-                .lineLimit(1)
-
-            Slider(value: Binding(get: { model.activeBlockSize },
-                                  set: { model.activeBlockSize = $0 }),
-                   in: 4...80)
-                .tint(.accentColor)
-
-            Button { model.confirmAdjustment() } label: {
-                Image(systemName: "checkmark")
-                    .font(.system(size: 15, weight: .bold))
-                    .foregroundStyle(.white)
-                    .frame(width: 34, height: 34)
-                    .background(Circle().fill(Color.accentColor))
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("粗さを確定")
-        }
-        .padding(.horizontal, 16)
-        .frame(height: TimelineMetrics.toolbarHeight)
     }
 }
 

@@ -1,3 +1,4 @@
+import MosaicCore
 import SwiftUI
 
 /// プレビュー上に重ねるジェスチャーオーバーレイ。
@@ -152,40 +153,19 @@ struct RectangleDrawingOverlay: View {
         }
     }
 
-    // プレビュー領域内の正規化座標 → 画面座標
+    // 換算の実体は `PreviewImageGeometry`（MosaicCore、`swift test` で固定）。
+    // **ここに式を書き戻さないこと。** 顔の枠（`FacePickOverlay`）が同じ換算を使うので、
+    // 片方だけ直すと「矩形は合っているのに顔の枠だけずれる」ことになる。
+
+    private func geometry(in size: CGSize) -> PreviewImageGeometry {
+        PreviewImageGeometry(containerSize: size, imageSize: model.previewImage?.size)
+    }
+
     private func previewRect(from normalized: CGRect, in size: CGSize) -> CGRect {
-        let (imageRect, _) = imageRectInPreview(size: size)
-        return CGRect(
-            x: imageRect.origin.x + normalized.origin.x * imageRect.width,
-            y: imageRect.origin.y + normalized.origin.y * imageRect.height,
-            width: normalized.width * imageRect.width,
-            height: normalized.height * imageRect.height
-        )
+        geometry(in: size).screenRect(from: normalized)
     }
 
-    // 画面座標 → 画像正規化座標（scaledToFit 表示を考慮）
     private func normalizedRect(from rect: CGRect, in containerSize: CGSize) -> CGRect {
-        let (imageRect, _) = imageRectInPreview(size: containerSize)
-        let clipped = rect.intersection(imageRect)
-        return CGRect(
-            x: (clipped.origin.x - imageRect.origin.x) / imageRect.width,
-            y: (clipped.origin.y - imageRect.origin.y) / imageRect.height,
-            width: clipped.width / imageRect.width,
-            height: clipped.height / imageRect.height
-        )
-    }
-
-    /// プレビューコンテナ内で画像が占める矩形を計算（scaledToFit 相当）。
-    private func imageRectInPreview(size: CGSize) -> (imageRect: CGRect, imageSize: CGSize) {
-        guard let img = model.previewImage else {
-            return (CGRect(origin: .zero, size: size), size)
-        }
-        let iw = img.size.width
-        let ih = img.size.height
-        let scale = min(size.width / iw, size.height / ih)
-        let fw = iw * scale
-        let fh = ih * scale
-        let origin = CGPoint(x: (size.width - fw) / 2, y: (size.height - fh) / 2)
-        return (CGRect(x: origin.x, y: origin.y, width: fw, height: fh), CGSize(width: fw, height: fh))
+        geometry(in: containerSize).normalizedRect(from: rect)
     }
 }

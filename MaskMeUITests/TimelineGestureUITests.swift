@@ -240,26 +240,88 @@ final class TimelineGestureUITests: XCTestCase {
                        "ツール OFF なのにプレビューのドラッグで矩形ができた")
     }
 
-    /// ツールを ON にすればこれまでどおり矩形を指定できる（入口を塞いでいないこと）。
+    /// 「矩形」の段へ降りればこれまでどおり矩形を指定できる（入口を塞いでいないこと）。
+    /// 段に入った時点でツールは ON になる（そのために降りた段なので、もう一度押させない）。
     func test_dragOnPreview_withRectangleTool_createsRegion() {
-        openFaceTab()
-        let tool = app.buttons["editor.rectangleTool"]
-        XCTAssertTrue(tool.waitForExistence(timeout: 10), "矩形ツールのボタンが無い")
-        tool.tap()
+        openRectangleRoute()
+        XCTAssertTrue(app.buttons["editor.rectangleTool"].waitForExistence(timeout: 10),
+                      "矩形の段にツールのボタンが無い")
         dragOnPreview()
         let region = app.buttons.matching(identifier: "editor.manualRegion").firstMatch
         XCTAssertTrue(region.waitForExistence(timeout: 15),
-                      "ツール ON でドラッグしたのに矩形ができない")
+                      "矩形の段でドラッグしたのに矩形ができない")
     }
 
-    /// 動画モードのドックで「モザイク」→「顔」へ降りる（矩形ツールは顔の道具）。
+    // MARK: - ドックの段（勝手に閉じないこと）
+
+    /// **タイムラインを払っても段は閉じない。** 旧 UI は下段そのものが文脈で
+    /// 差し替わっていたため、粗さを調整しながら再生位置を確かめる操作で段が消えた。
+    func test_swipe_doesNotCloseDockRoute() {
+        openFaceTab()
+        XCTAssertTrue(dockBack.exists, "前提: 顔の段に降りていること（戻るが出ている）")
+        swipeLeft(on: Track.clipBand)
+        XCTAssertTrue(dockBack.exists, "タイムラインを払ったら段が閉じた")
+        XCTAssertTrue(app.buttons["editor.dock.done"].exists, "完了まで消えている")
+    }
+
+    /// **再生しても段は閉じない。**
+    func test_playback_doesNotCloseDockRoute() {
+        openFaceTab()
+        app.buttons["再生"].tap()
+        Thread.sleep(forTimeInterval: 1.0)
+        XCTAssertTrue(dockBack.exists, "再生したら段が閉じた")
+        app.buttons["一時停止"].tap()
+    }
+
+    /// **クリップを選んでも段は閉じない。**（旧 UI で最も頻繁に段が飛んだ操作）
+    func test_selectingClip_doesNotCloseDockRoute() {
+        openFaceTab()
+        app.otherElements[Track.clipBand].tap()
+        XCTAssertTrue(dockBack.exists, "クリップを選んだら段が閉じた")
+    }
+
+    /// 「完了」はどの深さからでも 1 回で最上段へ戻す（`‹` の連打を要求しない）。
+    func test_done_returnsToRootInOneTap() {
+        openFaceTab()
+        app.buttons["editor.dock.done"].tap()
+        XCTAssertTrue(dockBack.waitForNonExistence(timeout: 5),
+                      "完了を押しても最上段へ戻らない（戻るボタンが残っている）")
+        XCTAssertTrue(app.buttons["モザイク"].exists, "最上段の道具が出ていない")
+    }
+
+    /// 戻る `‹` は 1 段ずつ上がる（顔 → モザイク → 最上段）。
+    func test_back_climbsOneLevelAtATime() {
+        openFaceTab()
+        dockBack.tap()
+        XCTAssertTrue(app.buttons["背景"].waitForExistence(timeout: 5),
+                      "顔から戻った先がモザイクの段になっていない")
+        dockBack.tap()
+        XCTAssertTrue(app.buttons["モザイク"].waitForExistence(timeout: 5),
+                      "モザイクから戻った先が最上段になっていない")
+    }
+
+    private var dockBack: XCUIElement { app.buttons["editor.dock.back"] }
+
+    /// ドックで「モザイク」→「顔」へ降りる。
     private func openFaceTab() {
-        let mosaic = app.buttons["モザイク"]
-        XCTAssertTrue(mosaic.waitForExistence(timeout: 15), "ドックに「モザイク」が無い")
-        mosaic.tap()
+        openMosaicMenu()
         let face = app.buttons["顔"]
         XCTAssertTrue(face.waitForExistence(timeout: 10), "ドックに「顔」が無い")
         face.tap()
+    }
+
+    /// ドックで「モザイク」→「矩形」へ降りる。
+    private func openRectangleRoute() {
+        openMosaicMenu()
+        let rect = app.buttons["矩形"]
+        XCTAssertTrue(rect.waitForExistence(timeout: 10), "ドックに「矩形」が無い")
+        rect.tap()
+    }
+
+    private func openMosaicMenu() {
+        let mosaic = app.buttons["モザイク"]
+        XCTAssertTrue(mosaic.waitForExistence(timeout: 15), "ドックに「モザイク」が無い")
+        mosaic.tap()
     }
 
     /// プレビュー中央を斜めに払う（矩形を描く操作）。

@@ -36,8 +36,6 @@ struct VideoTimelineView: View {
     @StateObject private var thumbnails = TimelineThumbnailStore()
     @Environment(\.scenePhase) private var scenePhase
     @State var geometry = TimelineGeometry()
-    @State var selectedClipID: UUID?
-    @State var selectedRangeID: UUID?
     @State var speedSheetClipID: UUID?
     @State var volumeSheetClipID: UUID?
     @State private var transitionSheetClipID: UUID?
@@ -126,8 +124,7 @@ struct VideoTimelineView: View {
         .onChange(of: model.sourceVideoURL) { _ in
             // 素材が入れ替わったらキャッシュは無効（別動画のコマを描かない）。
             thumbnails.reset()
-            selectedClipID = nil
-            selectedRangeID = nil
+            model.timelineSelection.clear()
             scheduleThumbnailRefresh()
         }
         // 抑止の入力源は 3 つ（画面表示・scenePhase・シート）。**必ず
@@ -177,19 +174,13 @@ struct VideoTimelineView: View {
 
     // MARK: - タイムライン直下の 1 段
 
-    /// タイムラインの**下**に置く 1 段。編集ツールバーと粗さ調整バーが**入れ替わる**
-    /// （積み上げない。`TimelineMetrics.toolbarHeight` で高さは常に一定）。
+    /// タイムラインの**下**に置く、この画面で唯一のツールバー。
     ///
-    /// ツールバーをタイムラインの下へ置くのは一般的な動画編集アプリの並びに合わせるため。
-    /// 粗さ調整バーをここへ同居させているのは、効果タブを開いたときに段が増えて
-    /// プレビューが潰れるのを防ぐため（旧 UI は 46% → 30% まで縮んでいた）。
-    @ViewBuilder
+    /// 中身は `model.dockRoute` で丸ごと入れ替わる（`EditorDockView`）。旧 UI は
+    /// ここ（編集の道具）と画面最下部（モザイクの階層）に段が割れており、
+    /// 戻る `‹` は下の段にしか無かったため現在地が読めなかった。
     private var bottomBar: some View {
-        if model.activeTab != nil {
-            TimelineAdjustmentBarView(model: model)
-        } else {
-            TimelineToolbarView(items: toolItems)
-        }
+        EditorDockView(model: model, rootItems: toolItems)
     }
 
     // MARK: - トラック
@@ -306,16 +297,20 @@ struct VideoTimelineView: View {
         }
     }
 
-    /// クリップ選択と区間選択は**相互排他**にする（どちらが編集対象かを一意にするため）。
-    /// `@State` は 2 本のまま残し、子へ渡す `Binding` をここでラップする（子は無改造）。
+    /// 選択は**モデルが持つ**（下部ツールバーが別の段にあり、同じ選択を読むため）。
+    /// 相互排他は `TimelineSelection` 側の契約なので、ここは橋渡しだけ。
+    /// 子（クリップ帯・レイヤー段）は `Binding<UUID?>` のままで無改造。
+    var selectedClipID: UUID? { model.timelineSelection.clipID }
+    var selectedRangeID: UUID? { model.timelineSelection.rangeID }
+
     private var clipSelection: Binding<UUID?> {
-        Binding(get: { selectedClipID },
-                set: { selectedClipID = $0; if $0 != nil { selectedRangeID = nil } })
+        Binding(get: { model.timelineSelection.clipID },
+                set: { model.timelineSelection.selectClip($0) })
     }
 
     private var rangeSelection: Binding<UUID?> {
-        Binding(get: { selectedRangeID },
-                set: { selectedRangeID = $0; if $0 != nil { selectedClipID = nil } })
+        Binding(get: { model.timelineSelection.rangeID },
+                set: { model.timelineSelection.selectRange($0) })
     }
 
     // MARK: - 操作の確定
@@ -387,14 +382,11 @@ struct VideoTimelineView: View {
         scrub(toCompositionTime: seconds)
     }
 
-    /// 消えたクリップ・区間を選択したままにしない（削除・undo 後）。
+    /// 消えたクリップを指したままのシートを閉じる（削除・undo 後）。
+    ///
+    /// **クリップ／レイヤーの選択はここでは刈らない。** 選択はモデルが持ち、
+    /// `timeline` の didSet が刈る（画面が載っていない間の編集でも漏れないため）。
     private func pruneSelection() {
-        if let selectedClipID, !model.timeline.clips.contains(where: { $0.id == selectedClipID }) {
-            self.selectedClipID = nil
-        }
-        if let selectedRangeID, !model.timeline.applyRanges.contains(where: { $0.id == selectedRangeID }) {
-            self.selectedRangeID = nil
-        }
         if let speedSheetClipID, !model.timeline.clips.contains(where: { $0.id == speedSheetClipID }) {
             self.speedSheetClipID = nil
         }

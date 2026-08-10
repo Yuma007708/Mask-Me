@@ -160,6 +160,14 @@ public final class MosaicEditorModel: ObservableObject {
         }
     }
 
+    /// 下部ツールバーがいま出している段（動画モードのみ）。
+    ///
+    /// **書き換えは `enterDock` / `dockBack` / `dockDone` からだけ行う**
+    /// （`MosaicEditorModel+Dock.swift`）。直接代入すると、段と効果の ON/OFF・
+    /// 矩形ツールの状態が食い違う。シーク・再生・クリップ選択では**変えない**
+    /// （`EditorDockRoute` の doc 参照。段が勝手に閉じないことがこの UI の契約）。
+    @Published public var dockRoute: EditorDockRoute = .root
+
     /// 手動矩形ツール（プレビューをドラッグして範囲を指定するモード）が ON か。
     ///
     /// **既定は OFF。** 常時有効だった頃は、プレビューを少しなぞっただけで矩形が
@@ -336,8 +344,19 @@ public final class MosaicEditorModel: ObservableObject {
             // 自動追跡を張り直す。復元経路ではここが軌跡を作る唯一の起点になる
             // （軌跡は下書きに保存しないため。`ObjectTrack` の doc 参照）。
             scheduleObjectTracking()
+            // 消えたクリップ・レイヤーを選択したまま残さない。**タイムラインを
+            // 変える経路がここ 1 本しかない**ので、刈り込みもここに置けば漏れない
+            // （View 側の `onChange` に置くと、画面が載っていない間の編集で漏れる）。
+            timelineSelection.prune(against: timeline)
         }
     }
+    /// タイムラインで選択中のクリップ／加工レイヤー。
+    ///
+    /// **View の `@State` ではなくモデルが持つ。** 下部ツールバーはタイムラインとは
+    /// 別の段（画面最下部）にあり、両方が同じ選択を読む必要がある。
+    /// 相互排他と刈り込みは `TimelineSelection`（MosaicCore の値型）が持つので、
+    /// ここは置き場所を提供するだけ。
+    @Published var timelineSelection = TimelineSelection()
     /// タイムライン上のクリップ列（`timeline` への読み取りショートカット）。
     var clips: [TimelineClip] { timeline.clips }
     /// タイムラインの世代トークン。`timeline` が変わるたびに 1 進む。
@@ -1924,7 +1943,9 @@ public final class MosaicEditorModel: ObservableObject {
 
     /// 保持中のフレームから背景マスクを計算する。
     /// 背景モザイクが OFF のときは Vision を実行しない（読み込み・シーク毎の重い無駄処理を避ける）。
-    private func recomputeBackgroundMask() {
+    ///
+    /// `MosaicEditorModel+Dock.swift`（背景モザイクを ON にする経路）から呼ぶため internal。
+    func recomputeBackgroundMask() {
         #if canImport(Vision)
         guard backgroundMosaicOn, let cg = backgroundMaskSource?.cgImage else {
             backgroundMask = nil
@@ -1959,11 +1980,9 @@ public final class MosaicEditorModel: ObservableObject {
     let faceMatchThreshold: CGFloat = 0.5
 
     func normalizedCentroid(of landmarks: FaceLandmarkSet) -> CGPoint {
-        guard !landmarks.points.isEmpty else { return CGPoint(x: 0.5, y: 0.5) }
-        var sx: Float = 0; var sy: Float = 0
-        for p in landmarks.points { sx += p.x; sy += p.y }
-        let n = Float(landmarks.points.count)
-        return CGPoint(x: CGFloat(sx / n), y: CGFloat(sy / n))
+        // **自前で足し合わせないこと。** 同じ式が `SelectedFaceTracker.centroid` にもあり、
+        // 片方だけ直すと描画の絞り込みとタップ選択が違う顔を指す。
+        FaceCentroidMatching.centroid(of: landmarks)
     }
 
     /// 素材の先頭フレーム。`appendVideoClip(url:)`（別ファイルの extension）からも

@@ -1,66 +1,60 @@
 import MosaicCore
 import SwiftUI
 
-// タイムライン下部のツールバー（編集項目・ズーム項目）とその活性判定。
+// 下部ツールバーの `root` 段に並べる編集項目と、その活性判定。
 // 「前へ / 後へ」の並べ替えもツールバーからの操作なのでここに同居させている。
 // 本体（`VideoTimelineView.swift`）はレイアウトとジェスチャ確定に専念させ、
 // file / type の行数上限に余裕を持たせるための分割である。
 
 extension VideoTimelineView {
-    // MARK: - ツールバー（文脈依存）
+    // MARK: - `root` 段の項目
 
-    /// いま何を選んでいるかで**中身ごと差し替える**ツールバー項目。
+    /// 並びは**選択状態で変えない**。変わるのは
+    /// 「押せるかどうか」と「5 番目が追加か削除か」だけ。
     ///
-    /// 9 項目を常時並べていた版は、押せない項目が `opacity 0.3` で居座るうえ
-    /// 3 項目が初期表示で画面外に出ていた。選択状態ごとに 4〜6 項目へ絞ると
-    /// iPhone 16 の幅に収まり、隠れボタンと「押せないボタン」が同時に消える。
+    /// 選択のたびに項目そのものを入れ替えていた版は、同じ位置のボタンが別の操作に
+    /// 化けるため、狙って押すには毎回読み直す必要があった。位置を固定して活性だけ
+    /// 変えると、押せない理由が「今それを選んでいないから」だと見た目で分かる。
+    ///
+    /// 末尾の項目（前へ／後へ／ズーム／モザイク区間）は幅に収まらないので
+    /// 横スクロールの向こう側に置く。**落とさずに残してある**理由は各項目の doc 参照。
     var toolItems: [TimelineToolItem] {
-        if selectedRangeID != nil { return rangeToolItems }
-        if selectedClipID != nil { return clipToolItems }
-        return idleToolItems
+        [splitItem, mosaicItem, speedItem, volumeItem, addOrRemoveItem]
+            + [moveBackwardItem, moveForwardItem] + zoomItems + [addApplyRangeItem]
     }
 
-    /// 何も選んでいないとき。**分割は選択なしでも押せる**（対象はプレイヘッド直下）。
-    /// ズームはここに置く（クリップ選択中はピンチで代替できるため項目数を優先した）。
-    private var idleToolItems: [TimelineToolItem] {
-        [splitItem, addMediaItem, addApplyRangeItem] + zoomItems
+    /// モザイクの階層へ降りる入口。**ここが唯一の入口**
+    /// （旧 UI は画面最下部の別ドックが持っていた）。
+    private var mosaicItem: TimelineToolItem {
+        TimelineToolItem(title: "モザイク", systemImage: "squareshape.split.3x3",
+                         isEnabled: !model.timeline.clips.isEmpty) {
+            model.enterDock(.mosaic)
+        }
     }
 
-    /// クリップを選んでいるとき（そのクリップに対する操作だけ）。
-    private var clipToolItems: [TimelineToolItem] {
-        [
-            splitItem,
-            TimelineToolItem(title: "削除", systemImage: "trash", isEnabled: canRemoveClip) {
-                guard let id = selectedClipID else { return }
-                selectedClipID = nil
-                model.removeClip(id: id)
-            },
-            TimelineToolItem(title: "速度", systemImage: "speedometer", isEnabled: selectedClip != nil) {
-                speedSheetClipID = selectedClipID
-            },
-            TimelineToolItem(title: "音量", systemImage: "speaker.wave.2", isEnabled: canSetVolume) {
-                volumeSheetClipID = selectedClipID
-            },
-            // 長押し並べ替えの代替。画面外のクリップとも入れ替えられる
-            // （ドラッグは同時に見えている範囲＋自動スクロールの届く範囲に限られる）。
-            TimelineToolItem(title: "前へ", systemImage: "arrow.left",
-                             isEnabled: canMoveClip(by: -1)) { moveSelectedClip(by: -1) },
-            TimelineToolItem(title: "後へ", systemImage: "arrow.right",
-                             isEnabled: canMoveClip(by: 1)) { moveSelectedClip(by: 1) }
-        ]
+    /// 5 番目の枠。何も選んでいなければ素材追加、選んでいればそれを削除。
+    ///
+    /// 削除の対象は**いま選んでいるもの**（クリップでも加工レイヤーでも同じボタン）。
+    /// 対象ごとにボタンを分けると、選択のたびに並びが動く。
+    private var addOrRemoveItem: TimelineToolItem {
+        guard selectedRangeID != nil || selectedClipID != nil else { return addMediaItem }
+        return TimelineToolItem(title: "削除", systemImage: "trash",
+                                isEnabled: canRemoveSelection) {
+            removeSelection()
+        }
     }
 
-    /// モザイク適用区間を選んでいるとき。
-    private var rangeToolItems: [TimelineToolItem] {
-        [
-            TimelineToolItem(title: "区間削除", systemImage: "minus.rectangle",
-                             isEnabled: selectedRangeID != nil) {
-                guard let id = selectedRangeID else { return }
-                selectedRangeID = nil
-                model.removeMosaicApplyRange(id: id)
-            },
-            addMediaItem
-        ]
+    private var speedItem: TimelineToolItem {
+        TimelineToolItem(title: "速度", systemImage: "speedometer",
+                         isEnabled: selectedClip != nil) {
+            speedSheetClipID = selectedClipID
+        }
+    }
+
+    private var volumeItem: TimelineToolItem {
+        TimelineToolItem(title: "音量", systemImage: "speaker.wave.2", isEnabled: canSetVolume) {
+            volumeSheetClipID = selectedClipID
+        }
     }
 
     private var splitItem: TimelineToolItem {
@@ -71,15 +65,33 @@ extension VideoTimelineView {
     }
 
     private var addMediaItem: TimelineToolItem {
-        TimelineToolItem(title: "素材追加", systemImage: "photo.on.rectangle",
+        TimelineToolItem(title: "追加", systemImage: "photo.on.rectangle",
                          isEnabled: !model.timeline.clips.isEmpty) {
             showMediaPicker = true
         }
     }
 
+    /// 長押しドラッグの代替。ドラッグは「同時に見えている範囲 + 自動スクロールが
+    /// 届く範囲」でしか届かないので、**画面外のクリップと入れ替える唯一の手段**。
+    private var moveBackwardItem: TimelineToolItem {
+        TimelineToolItem(title: "前へ", systemImage: "arrow.left",
+                         isEnabled: canMoveClip(by: -1), separatorBefore: true) {
+            moveSelectedClip(by: -1)
+        }
+    }
+
+    private var moveForwardItem: TimelineToolItem {
+        TimelineToolItem(title: "後へ", systemImage: "arrow.right",
+                         isEnabled: canMoveClip(by: 1)) { moveSelectedClip(by: 1) }
+    }
+
+    /// モザイクを掛ける区間を足す。
+    ///
+    /// **加工をレイヤーとして直接置けるようになったら外す**（そちらが本来の導線）。
+    /// 今はこれが区間を作る唯一の手段なので、外すと区間指定そのものができなくなる。
     private var addApplyRangeItem: TimelineToolItem {
         TimelineToolItem(title: "モザイク区間", systemImage: "plus.rectangle.on.rectangle",
-                         isEnabled: canAddApplyRange) {
+                         isEnabled: canAddApplyRange, separatorBefore: true) {
             addApplyRangeAtPlayhead()
         }
     }
@@ -117,7 +129,22 @@ extension VideoTimelineView {
         return model.timeline.canSplit(clipID: id, atDisplayTime: playheadTime)
     }
 
-    private var canRemoveClip: Bool { selectedClip != nil && model.timeline.clips.count > 1 }
+    /// 削除の活性判定。**最後の 1 本のクリップは消せない**（空のタイムラインを作らない）。
+    /// 加工レイヤーの削除にはその制約が無い。
+    private var canRemoveSelection: Bool {
+        if selectedRangeID != nil { return true }
+        return selectedClip != nil && model.timeline.clips.count > 1
+    }
+
+    /// 選択しているものを消す。**選択解除は書かない**
+    /// （`model.timeline` の didSet が消えたものを刈る。二重管理にしない）。
+    private func removeSelection() {
+        if let id = selectedRangeID {
+            model.removeMosaicApplyRange(id: id)
+        } else if let id = selectedClipID {
+            model.removeClip(id: id)
+        }
+    }
 
     /// 音量の活性判定。**写真クリップは除く**（判定の理由は
     /// `TimelineVolumeAvailability` の doc 参照。純関数側に置いてテストで固定してある）。
@@ -132,9 +159,6 @@ extension VideoTimelineView {
 
 // MARK: - クリップの並べ替え（ボタン操作）
 
-/// 長押しドラッグの代替経路。ドラッグは「同時に見えている範囲 + 自動スクロールが
-/// 届く範囲」でしか届かないうえ、`scrollTo` がドラッグ中の `UIScrollView` に効くかは
-/// 環境依存なので、**確実に動く手段**として 1 つずつ動かすボタンを併置してある。
 private extension VideoTimelineView {
     func canMoveClip(by offset: Int) -> Bool {
         guard let index = selectedClipIndex else { return false }

@@ -4,9 +4,22 @@ import SwiftUI
 /// 動画モードでは右下に検出率バッジを表示する。
 struct FaceSelectorView: View {
     @ObservedObject var model: MosaicEditorModel
-    /// 動画モードの 1 段ドック（`VideoEffectDockView`）に収める縮小版。
+    /// 動画モードの 1 段ドック（`EditorDockView`）に収める縮小版。
     /// 写真モードは既定（`false`）のまま＝従来の見た目を変えない。
     var compact = false
+    /// 矩形ツールのチップを並べるか。
+    ///
+    /// **動画モードの「顔」の段では出さない**（`false`）。あちらは矩形が
+    /// 顔と並列の段として独立しているので、両方に入口があると同じ道具が
+    /// 2 箇所から生えて「どっちを押せばいいのか」が読めなくなる。
+    /// 写真モードは段が無く、ここが唯一の入口なので既定は `true`。
+    var showsRectangleTool = true
+    /// 検出した顔（人物）のチップを並べるか。
+    ///
+    /// **「矩形」の段では出さない**（`false`）。あの段は手で置いた矩形だけを扱う。
+    /// ただし**置いた矩形のチップは出す**（`objectMaskChip`）。あれが矩形を消す
+    /// 唯一の導線なので、外すと一度置いた矩形を取り消せなくなる。
+    var showsFaces = true
 
     /// サムネイルの一辺。
     private var chipSize: CGFloat { compact ? 40 : 60 }
@@ -17,12 +30,14 @@ struct FaceSelectorView: View {
                 // 矩形ツールの入口。**顔が 1 つも見つからないときこそ必要**なので、
                 // 「検出できませんでした」の場合も必ず並べる（旧実装はこの分岐で
                 // 行ごと差し替えていたため、検出ゼロだと手動指定へ辿り着けなかった）。
-                rectangleToolChip
+                if showsRectangleTool { rectangleToolChip }
                 // 顔ではなく**人物**単位で並べる。同じ人がフレームアウト→再入して
                 // ターゲットが増えても、一覧では 1 つのチップにまとまる。
                 // 署名が取れていない顔は従来どおり 1 顔 = 1 チップ。
-                ForEach(model.personGroups) { group in
-                    personChip(group)
+                if showsFaces {
+                    ForEach(model.personGroups) { group in
+                        personChip(group)
+                    }
                 }
                 // 物体マスクは顔ではなく「領域」として別表示
                 ForEach(model.visibleObjectMasks, id: \.id) { mask in
@@ -31,7 +46,7 @@ struct FaceSelectorView: View {
                 if let progress = model.objectTrackingProgress {
                     trackingChip(progress)
                 }
-                if model.detectedFaces.isEmpty && model.objectMasks.isEmpty {
+                if showsFaces && model.detectedFaces.isEmpty && model.objectMasks.isEmpty {
                     Text("顔を検出できませんでした")
                         .font(.footnote)
                         .foregroundStyle(.secondary)

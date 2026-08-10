@@ -6,10 +6,13 @@ struct VideoControlsView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // マルチクリップタイムライン（スクラブ + クリップ編集。S9 で全体 In/Out
-            // トリムはクリップ単位のトリムへ置き換わった）
-            VideoTimelineView(model: model)
+            // 再生行は**タイムラインより上**。ツールバーが階層で入れ替わっても
+            // ▶ と ↩↪ の位置が動かないようにする（動くと、粗さを調整しながら
+            // 再生位置を確かめる操作のたびに指の行き先が変わる）。
             transportRow
+            // マルチクリップタイムライン（スクラブ + クリップ編集）。
+            // この下が `EditorDockView`（唯一のツールバー）で、画面の最下段になる。
+            VideoTimelineView(model: model)
         }
         .background(.black.opacity(0.35))
     }

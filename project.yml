@@ -34,7 +34,7 @@ targets:
       base:
         INFOPLIST_FILE: MaskMe/Info.plist
         PRODUCT_BUNDLE_IDENTIFIER: com.maskme.app
-        DEVELOPMENT_TEAM: 8694X8U5SQ
+        DEVELOPMENT_TEAM: SF7RHB4VK7
         # Simulator では実機用証明書を探さず ad-hoc 署名にする。
         # これが無いと DEVELOPMENT_TEAM / CODE_SIGN_IDENTITY が全 SDK に効き、
         # Simulator ビルドの成果物が **未署名** になる。iOS 26 の Simulator は
@@ -129,6 +129,14 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.maskme.app.tests
         SWIFT_VERSION: "5.9"
+        # 実機テスト用。ここが無いと `platform:iOS` の destination で
+        # 「Signing for "..." requires a development team」でビルドが止まる。
+        # Simulator では MaskMe と同じく ad-hoc 署名へ落とす（未署名だと
+        # iOS 26 Simulator が起動を拒否する。MaskMe 側のコメント参照）。
+        DEVELOPMENT_TEAM: SF7RHB4VK7
+        "CODE_SIGN_IDENTITY[sdk=iphonesimulator*]": "-"
+        "CODE_SIGN_STYLE[sdk=iphonesimulator*]": Manual
+        "DEVELOPMENT_TEAM[sdk=iphonesimulator*]": ""
         GENERATE_INFOPLIST_FILE: YES
         TEST_HOST: "$(BUILT_PRODUCTS_DIR)/MaskMe.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/MaskMe"
         BUNDLE_LOADER: "$(TEST_HOST)"
@@ -149,5 +157,13 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.maskme.app.uitests
         SWIFT_VERSION: "5.9"
+        # 実機テスト用。ここが無いと `platform:iOS` の destination で
+        # 「Signing for "..." requires a development team」でビルドが止まる。
+        # Simulator では MaskMe と同じく ad-hoc 署名へ落とす（未署名だと
+        # iOS 26 Simulator が起動を拒否する。MaskMe 側のコメント参照）。
+        DEVELOPMENT_TEAM: SF7RHB4VK7
+        "CODE_SIGN_IDENTITY[sdk=iphonesimulator*]": "-"
+        "CODE_SIGN_STYLE[sdk=iphonesimulator*]": Manual
+        "DEVELOPMENT_TEAM[sdk=iphonesimulator*]": ""
         GENERATE_INFOPLIST_FILE: YES
         TEST_TARGET_NAME: MaskMe

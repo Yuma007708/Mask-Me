@@ -233,9 +233,12 @@ extension MosaicEditorModel {
         }
         guard !scoped.isEmpty else { return [] }
         let centroids = scoped.map { normalizedCentroid(of: $0.landmarks) }
-        let spatiallyMatched = faces.map { face in
-            let center = normalizedCentroid(of: face)
-            return centroids.contains { hypot(center.x - $0.x, center.y - $0.y) < 0.5 }
+        // 閾値と重心の式は `FaceCentroidMatching` に 1 本化してある
+        // （プレビュー上のタップ選択が同じ判定を使う。別々に持つと
+        // 「枠が出ているのにタップしても選べない顔」が生まれる）。
+        // 「許容内に 1 つでもあるか」は最近傍が許容内かと同値。
+        let spatiallyMatched = faces.map {
+            FaceCentroidMatching.nearestIndex(for: $0, in: centroids) != nil
         }
         let signatures = sourceID.map {
             signatureCache.signatures(for: faces, sourceID: $0, time: sourceTime)
