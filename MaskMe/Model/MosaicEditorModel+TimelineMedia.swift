@@ -149,14 +149,22 @@ extension MosaicEditorModel {
     /// - Parameter frame: 検出に使ったフレーム（`signatureSource` の原寸ではない）。
     ///   途中から現れた人物を自動追加する経路（`admitEmergingPersons`）が、
     ///   確定した顔のサムネイルをこのフレームから作るために使う。
+    ///
+    /// **座標系**: `faces` は署名を計算したときの検出結果＝**合成フレーム基準**
+    /// （`frame` と同じ座標系）。署名の置き場は `FaceSignatureSample.centroid` の doc の
+    /// とおり**素材フレーム基準**の重心で引くので、`renderLayout.inverseRemap` で戻して
+    /// から書く（`storeLiveDetection` が顔をどう書いたかと必ず揃える）。
+    /// サムネイル生成だけは `frame` の座標系が要るので合成座標の顔も併せて渡す。
     @MainActor
     func storeLiveSignatures(_ signatures: [FaceSignature?], for faces: [FaceLandmarkSet],
                              at t: Double, frame: UIImage, generation: Int) {
         guard generation == timelineGeneration else { return }
-        let (sourceID, sourceTime) = resolveSourceTime(atComposition: t)
-        signatureCache.store(signatures, for: faces, sourceID: sourceID, time: sourceTime)
-        admitEmergingPersons(faces: faces, signatures: signatures,
-                             sourceID: sourceID, sourceTime: sourceTime, frame: frame)
+        let resolved = resolveSourceLocation(atComposition: t)
+        let sourceFaces = renderLayout.inverseRemap(faces, clipID: resolved.clipID)
+        signatureCache.store(signatures, for: sourceFaces,
+                             sourceID: resolved.sourceID, time: resolved.time)
+        admitEmergingPersons(faces: sourceFaces, frameFaces: faces, signatures: signatures,
+                             sourceID: resolved.sourceID, sourceTime: resolved.time, frame: frame)
     }
 
     /// 写真クリップの検出 seed（素材時刻 t=0 の 1 回だけ）。

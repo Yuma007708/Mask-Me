@@ -398,6 +398,14 @@ public final class VideoMosaicExporter: @unchecked Sendable {
     /// アンカーは常にトリム前の合成タイムライン上にある）。
     private var textTotalDuration: Double = 0
 
+    /// 無料プランの透かし（課金 P2）を焼き込むか。export 開始時に設定する。
+    ///
+    /// **`isPro` を直接見ない。** 判定の根拠は `Built.exportRestriction.needsWatermark`
+    /// の 1 箇所に集約し（`ExportRestrictionPolicy.decide` が唯一の判定関数）、
+    /// `MosaicEditorModel.runExport` が呼び出し時に渡す。ここで改めて `isPro` を
+    /// 見直すと、判定ロジックが 2 箇所に散らばって将来食い違う余地ができる。
+    private var needsWatermark = false
+
     private func resetPerf() {
         perfDetectSec = 0; perfRenderSec = 0; perfSegSec = 0; perfDecodeSec = 0
         perfDetectCalls = 0; perfFrames = 0
@@ -487,6 +495,12 @@ public final class VideoMosaicExporter: @unchecked Sendable {
         /// 画面に置く文字（E3）。`MosaicEditorModel` は `timeline.textItems` を渡す。
         /// 素材アンカーを持たないので `mapping` による写像は不要（合成時刻のまま使う）。
         textItems: [TextItem] = [],
+        /// 無料プランの透かし（課金 P2）を焼き込むか。
+        ///
+        /// `MosaicEditorModel` は `exportRestriction.needsWatermark` を渡す
+        /// （`.exceedsResolution` でも真になる導出プロパティ。`ExportRestriction` の
+        /// doc 参照）。既定 `false` はテスト・素の書き出し互換のため。
+        needsWatermark: Bool = false,
         videoComposition: AVVideoComposition? = nil,
         audioMix: AVAudioMix? = nil,
         /// BGM（E2）が 1 曲でも載っているか。真なら音声は必ず再エンコード経路になる。
@@ -538,6 +552,7 @@ public final class VideoMosaicExporter: @unchecked Sendable {
         self.objectTracks = objectTracks
         self.textItems = textItems
         self.textTotalDuration = mapping.totalDuration
+        self.needsWatermark = needsWatermark
         let videoTracks = try await asset.loadTracks(withMediaType: .video)
         guard let videoTrack = videoTracks.first else {
             throw ExportError.noVideoTrack
@@ -1289,10 +1304,17 @@ public final class VideoMosaicExporter: @unchecked Sendable {
         // テキスト（E3-2）は「モザイク → テキスト」の順で常に最後に重ねる。
         // プレビューと同じ `TextOverlayCompositor` を通すことで、位置・サイズの
         // px 換算とアニメーションの数式が両経路で一致する。
-        let finalTexture = textItems.isEmpty
+        let texturedTexture = textItems.isEmpty
             ? outputTexture
             : TextOverlayCompositor.apply(items: textItems, at: textCompositionTime,
                                           renderer: renderer, cache: textOverlayCache, input: outputTexture)
+
+        // 無料プランの透かし（課金 P2）を「モザイク → テキスト → 透かし」の順で最後に重ねる。
+        // プレビューと同じ `WatermarkCompositor` / `ExportWatermark` を通す
+        // （`needsWatermark` の判定根拠は `Built.exportRestriction` の 1 箇所。doc 参照）。
+        let finalTexture = needsWatermark
+            ? WatermarkCompositor.apply(renderer: renderer, cache: textOverlayCache, input: texturedTexture)
+            : texturedTexture
 
         // テキスト合成が新規テクスチャを作った場合、`outputTexture`（pixelBuffer 由来の
         // texture）へ書き戻してから append する。`outBuffer` の中身を最終結果にするため。

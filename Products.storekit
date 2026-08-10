@@ -1,0 +1,118 @@
+{
+  "identifier" : "601D37EB-63E1-4739-9E4C-C00E4F3814ED",
+  "nonRenewingSubscriptions" : [],
+  "products" : [],
+  "settings" : {
+    "_failTransactionsEnabled" : false,
+    "_locale" : "ja_JP",
+    "_storefront" : "JPN",
+    "_storeKitErrors" : [
+      {
+        "current" : null,
+        "enabled" : false,
+        "name" : "Load Products"
+      },
+      {
+        "current" : null,
+        "enabled" : false,
+        "name" : "Purchase"
+      },
+      {
+        "current" : null,
+        "enabled" : false,
+        "name" : "Verification"
+      },
+      {
+        "current" : null,
+        "enabled" : false,
+        "name" : "App Store Sync"
+      },
+      {
+        "current" : null,
+        "enabled" : false,
+        "name" : "Subscription Status"
+      },
+      {
+        "current" : null,
+        "enabled" : false,
+        "name" : "App Transaction"
+      },
+      {
+        "current" : null,
+        "enabled" : false,
+        "name" : "Manage Subscriptions Sheet"
+      },
+      {
+        "current" : null,
+        "enabled" : false,
+        "name" : "Refund Request Sheet"
+      },
+      {
+        "current" : null,
+        "enabled" : false,
+        "name" : "Offer Code Redeem Sheet"
+      }
+    ]
+  },
+  "subscriptionGroups" : [
+    {
+      "id" : "855AF4C1-CA17-410F-BD0C-EB85548B5AB6",
+      "localizations" : [],
+      "name" : "Pro",
+      "subscriptions" : [
+        {
+          "adHocOffers" : [],
+          "codeOffers" : [],
+          "displayPrice" : "480",
+          "familyShareable" : false,
+          "groupNumber" : 1,
+          "internalID" : "28550318-83F4-4CCD-8A55-1A9F9067622F",
+          "introductoryOffer" : null,
+          "localizations" : [
+            {
+              "description" : "月額プラン。モザイクの透かしなし・全機能を利用できます。",
+              "displayName" : "Mask Me Pro（月額）",
+              "locale" : "ja_JP"
+            }
+          ],
+          "productID" : "com.maskme.pro.monthly",
+          "recurringSubscriptionPeriod" : "P1M",
+          "referenceName" : "Pro Monthly",
+          "subscriptionGroupID" : "855AF4C1-CA17-410F-BD0C-EB85548B5AB6",
+          "type" : "RecurringSubscription"
+        },
+        {
+          "adHocOffers" : [],
+          "codeOffers" : [],
+          "displayPrice" : "3000",
+          "familyShareable" : false,
+          "groupNumber" : 1,
+          "internalID" : "8DCC42C1-5F5F-42A6-9804-4214868EA971",
+          "introductoryOffer" : {
+            "displayPrice" : "0",
+            "internalID" : "52C99332-C926-4F65-8A99-963E1C6E4485",
+            "numberOfPeriods" : 1,
+            "paymentMode" : "free",
+            "subscriptionPeriod" : "P1W"
+          },
+          "localizations" : [
+            {
+              "description" : "年額プラン。7日間の無料体験つき。モザイクの透かしなし・全機能を利用できます。",
+              "displayName" : "Mask Me Pro（年額）",
+              "locale" : "ja_JP"
+            }
+          ],
+          "productID" : "com.maskme.pro.yearly",
+          "recurringSubscriptionPeriod" : "P1Y",
+          "referenceName" : "Pro Yearly",
+          "subscriptionGroupID" : "855AF4C1-CA17-410F-BD0C-EB85548B5AB6",
+          "type" : "RecurringSubscription"
+        }
+      ]
+    }
+  ],
+  "version" : {
+    "major" : 3,
+    "minor" : 0
+  }
+}

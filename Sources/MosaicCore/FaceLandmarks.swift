@@ -164,6 +164,25 @@ extension FaceLandmarkSet {
         }
         return FaceLandmarkSet(points: remappedPoints, confidence: confidence)
     }
+
+    /// `remapped(into:)` の逆写像。`rect` を含む全体画像の座標で表された点を、
+    /// `rect` を [0,1]×[0,1] とみなす局所座標へ戻す。
+    ///
+    /// **[0,1] へのクランプも、はみ出しの切り落としもしない。** 顔のランドマークは
+    /// 顔の輪郭（およびフレーム）より外へ出ることがあり、切り落とすと顔が痩せて
+    /// モザイクが小さくなる＝露出が増える方向へ倒れる。安全側は「素直に逆写像する」。
+    /// 面積 0 の矩形は逆写像が定義できないので自分をそのまま返す。
+    public func unmapped(from rect: CGRect) -> FaceLandmarkSet {
+        guard rect.width > 0, rect.height > 0 else { return self }
+        let unmappedPoints = points.map { lm in
+            FaceLandmark(
+                x: (lm.x - Float(rect.origin.x)) / Float(rect.width),
+                y: (lm.y - Float(rect.origin.y)) / Float(rect.height),
+                z: lm.z
+            )
+        }
+        return FaceLandmarkSet(points: unmappedPoints, confidence: confidence)
+    }
 }
 
 /// Named face regions, each backed by the MediaPipe canonical landmark indices

@@ -154,8 +154,12 @@ final class CompositionFidelityTests: XCTestCase {
                                   seconds: Double) async throws -> AVMutableComposition {
         let sourceID = UUID()
         let clip = TimelineClip(sourceID: sourceID, sourceStart: 0, sourceEnd: seconds)
+        // **`isPro: true`（制限なし）で組む。** このスイートが守るのは
+        // 「無変換タイムラインはフェーズ1 と bit 同一」という忠実度の契約で、
+        // 課金の制限（解像度の縮小・透かし）が掛かるとその前提が変わる。
+        // 無料側の見え方は課金のテスト（`ExportRestrictionTests` ほか）が受け持つ。
         return try await TimelineCompositionBuilder()
-            .build(clips: [clip], sources: [sourceID: asset]).composition
+            .build(clips: [clip], sources: [sourceID: asset], isPro: true).composition
     }
 
     // MARK: - Critical 1: ビットレートが合成で変わらないこと
@@ -196,7 +200,7 @@ final class CompositionFidelityTests: XCTestCase {
         let composition = try await TimelineCompositionBuilder().build(
             clips: [TimelineClip(sourceID: sourceID, sourceStart: 0, sourceEnd: 1),
                     TimelineClip(sourceID: sourceID, sourceStart: 2, sourceEnd: 3)],
-            sources: [sourceID: asset]).composition
+            sources: [sourceID: asset], isPro: true).composition
         let rate = try await composition.loadTracks(withMediaType: .video)[0]
             .load(.estimatedDataRate)
         print("[FIDELITY] multiClipDataRate=\(rate)")

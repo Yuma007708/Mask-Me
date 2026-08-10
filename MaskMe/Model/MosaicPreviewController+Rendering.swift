@@ -133,10 +133,22 @@ extension MosaicPreviewController {
         // 順で常に最後に重ねる（逆順だと顔に被った文字がモザイクで潰れる）。
         // 「どれが出ているか」はコア層の `visibleTextItems` だけが決める。
         let textItems = model.timeline.visibleTextItems(atComposition: timeSec, totalDuration: model.mapping.totalDuration)
-        let finalTexture = textItems.isEmpty
+        let texturedTexture = textItems.isEmpty
             ? mosaicedTexture
             : TextOverlayCompositor.apply(items: textItems, at: timeSec, renderer: renderer,
                                           cache: textOverlayCache, input: mosaicedTexture)
+
+        // 無料プランの透かし（課金 P2）。「モザイク → テキスト → 透かし」の順で最後に重ねる。
+        //
+        // プレビューは `Built.exportRestriction` を持たない（トリム中に尺・解像度が
+        // 変わるので確定しない）ため、判定は `Entitlements.shared.isPro` を
+        // 直接見る。書き出し側の判定（`Built.exportRestriction.needsWatermark`）と
+        // ずれるのは「無料 + 尺超過」のときだけで、その場合は書き出し自体が
+        // `durationRestrictionMessage` で止まるため実害は無い
+        // （`VideoMosaicExporter.export(needsWatermark:)` の doc 参照）。
+        let finalTexture = Entitlements.shared.isPro
+            ? texturedTexture
+            : WatermarkCompositor.apply(renderer: renderer, cache: textOverlayCache, input: texturedTexture)
 
         guard let cgImage = MetalTextureUtilities.cgImage(from: finalTexture) else { return false }
         let uiImage = UIImage(cgImage: cgImage)

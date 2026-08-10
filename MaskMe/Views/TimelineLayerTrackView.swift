@@ -311,8 +311,12 @@ struct TimelineLayerTrackView: View {
             .accessibilityIdentifier(edge == .start
                                      ? "timeline.applySpan.handle.start"
                                      : "timeline.applySpan.handle.end")
+            // **`coordinateSpace` は `.local` にしないこと**（`TimelineClipBandView` の
+            // トリムつまみと同じ理由）。つまみは帯の端に貼り付いていてドラッグの結果で
+            // 動くため、`.local` だと `translation` が View の移動を拾って発振する。
             .highPriorityGesture(
-                DragGesture(minimumDistance: 1)
+                DragGesture(minimumDistance: 1,
+                            coordinateSpace: .named(TimelineCoordinateSpace.scroll))
                     .updating($draft) { value, draft, _ in
                         if draft == nil { haptics.begin() }
                         let next = snappedDraft(span, kind: .edge(edge),
@@ -340,7 +344,10 @@ struct TimelineLayerTrackView: View {
     /// から行う）。`.onEnded` は `.updating` の下書きに頼らず、最終 `translation` から
     /// 改めて方向を決める（極小ドラッグでは `.updating` が一度も呼ばれないことがあるため）。
     private func moveGesture(_ span: TimelineApplySpan) -> some Gesture {
-        DragGesture(minimumDistance: 1)
+        // 座標空間は `edgeHandle` と同じ理由でスクロールビュー基準にする（帯そのものが
+        // ドラッグの結果で動くため、`.local` だと `translation` が発振する）。
+        DragGesture(minimumDistance: 1,
+                    coordinateSpace: .named(TimelineCoordinateSpace.scroll))
             .updating($moveState) { value, state, _ in
                 guard let axis = Self.resolvedAxis(current: state?.axis, translation: value.translation)
                 else { return }

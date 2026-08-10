@@ -395,6 +395,7 @@ extension MosaicEditorModel {
         let size = built.outputSize
         outputRenderSize = size.width > 0 && size.height > 0 ? size : nil
         hasDownscaledClips = !built.downscaledClipIDs.isEmpty
+        exportRestriction = built.exportRestriction
         compositionGeneration = generation  // mapping との整合性照合（exportVideo）に使う
     }
 
@@ -437,7 +438,8 @@ extension MosaicEditorModel {
         do {
             let built = try await TimelineCompositionBuilder()
                 .build(clips: clipsSnapshot, transitions: transitionsSnapshot,
-                       audioItems: audioItemsSnapshot, sources: sourcesSnapshot)
+                       audioItems: audioItemsSnapshot, sources: sourcesSnapshot,
+                       isPro: entitlements.isPro)
             guard generation == timelineGeneration else { return }  // 古い世代の結果は破棄
             apply(built: built, generation: generation)
             guard let controller = previewController else { return }

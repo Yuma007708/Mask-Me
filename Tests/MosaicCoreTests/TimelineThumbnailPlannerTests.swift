@@ -121,7 +121,12 @@ final class TimelineThumbnailPlannerTests: XCTestCase {
     }
 
     /// **件数の上限を掛けない**（先頭クリップが予算を食い切るバグの再発防止）。
-    /// 高倍率 × 長尺で 1 クリップが上限枠まで使っても、後続クリップの枠が出ること。
+    /// 1 クリップぶんの枠数は `slots()` 単体の計算と一致し（＝ここで追加の上限を掛けていない）、
+    /// かつ後続クリップの枠もその全数がちゃんと出ること。
+    ///
+    /// 新方式（固定グリッド）では `maximumSlotsPerClip`（60）ちょうどには揃わない
+    /// （量子化したセルが上限以下に収まった時点で打ち切るため）。ここでは `slots()` が
+    /// 単体で返す件数を正とし、それと `plan()` の結果が一致することを確かめる。
     func test_plan_doesNotCapCountSoLaterClipsSurvive() {
         let source = UUID()
         let long1 = clip(source: source, start: 0, end: 20)
@@ -134,12 +139,48 @@ final class TimelineThumbnailPlannerTests: XCTestCase {
         let requests = TimelineThumbnailPlanner.plan(layouts: layouts, clips: clips, geometry: dense,
                                                      visibleRange: 0...60, marginFactor: 0,
                                                      preferredSlotWidth: slotWidth, sourceDurations: [:])
+        var expectedTotal = 0
         for layout in layouts {
-            XCTAssertEqual(requests.filter { $0.clipID == layout.clipID }.count,
-                           TimelineThumbnailLayout.maximumSlotsPerClip,
-                           "クリップ \(layout.index) の枠が落ちている")
+            guard let layoutClip = clips.first(where: { $0.id == layout.clipID }) else {
+                return XCTFail("clip 欠落")
+            }
+            let expectedSlots = TimelineThumbnailLayout.slots(
+                clip: layoutClip, spanStart: layout.spanStart,
+                band: CompositionInterval(start: layout.bandStart, end: layout.bandEnd),
+                geometry: dense, preferredSlotWidth: slotWidth)
+            XCTAssertLessThanOrEqual(expectedSlots.count, TimelineThumbnailLayout.maximumSlotsPerClip)
+            XCTAssertEqual(requests.filter { $0.clipID == layout.clipID }.count, expectedSlots.count,
+                           "クリップ \(layout.index) の枠が落ちている、または追加で削られている")
+            expectedTotal += expectedSlots.count
         }
-        XCTAssertEqual(requests.count, TimelineThumbnailLayout.maximumSlotsPerClip * 3)
+        XCTAssertEqual(requests.count, expectedTotal)
+    }
+
+    /// 枠は素材時刻の固定グリッドに貼るので、先頭の枠は帯の左端より最大 1 セル左へ
+    /// はみ出す（`leadingOffset`）。**可視範囲の判定にこのはみ出しを足さないと、
+    /// 枠の中心が実際より右に見積もられ、可視範囲の右端にある枠が要求から落ちる**
+    /// （＝スクロールした先が灰色のまま残る）。
+    func test_plan_includesSlotsShiftedByLeadingOffset() {
+        let source = UUID()
+        // 素材開始をグリッド（0.5 秒）の境界からずらして leadingOffset を立てる。
+        let target = clip(source: source, start: 0.3, end: 6.3)
+        let layouts = TimelineBandLayout.clipLayouts(mapping: TimelineMapping(clips: [target]))
+        let layout = layouts[0]
+        let slots = TimelineThumbnailLayout.slots(
+            clip: target, spanStart: layout.spanStart,
+            band: CompositionInterval(start: layout.bandStart, end: layout.bandEnd),
+            geometry: geometry, preferredSlotWidth: slotWidth)
+        XCTAssertLessThan(slots.leadingOffset, 0, "グリッドが帯の左端よりはみ出す構成になっていない")
+
+        let slotDuration = geometry.duration(forWidth: slots.slotWidth)
+        // `duration(forWidth:)` は負を 0 に潰すので、符号は外に出して引く。
+        let gridStart = layout.bandStart - geometry.duration(forWidth: -slots.leadingOffset)
+        // 可視範囲の右端を、最後の枠の中心ちょうどに置く。
+        let lastCenter = gridStart + (Double(slots.count) - 0.5) * slotDuration
+        let requests = TimelineThumbnailPlanner.plan(layouts: layouts, clips: [target], geometry: geometry,
+                                                     visibleRange: 0...lastCenter, marginFactor: 0,
+                                                     preferredSlotWidth: slotWidth, sourceDurations: [:])
+        XCTAssertEqual(requests.count, slots.count, "可視範囲の右端にある枠が要求から落ちている")
     }
 
     // MARK: - 退化入力

@@ -153,7 +153,7 @@ struct SettingsView: View {
             }
 
             // 補助顔検出器の選択。FaceDetector と YuNet の個別トグル（デフォルト両方 ON）。
-            // Pro 機能：`EntitlementProvider` の isPro が false の時はトグルをロックする。
+            // 検出精度は無料でも全力（課金方針）なので、ここは Pro 権限で施錠しない。
             VStack(alignment: .leading, spacing: 6) {
                 HStack {
                     Label("補助検出器", systemImage: "wand.and.stars")
@@ -165,13 +165,13 @@ struct SettingsView: View {
                     title: "MediaPipe Face Detector",
                     subtitle: "BlazeFace。軽量・標準的な顔をカバー",
                     isOn: $store.settings.useFaceDetector,
-                    isLocked: !LocalEntitlementProvider.shared.isPro
+                    isLocked: false
                 )
                 AuxDetectorToggle(
                     title: "YuNet",
                     subtitle: "Core ML。小顔・横顔に強い",
                     isOn: $store.settings.useYunet,
-                    isLocked: !LocalEntitlementProvider.shared.isPro
+                    isLocked: false
                 )
             }
         }

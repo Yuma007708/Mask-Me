@@ -35,15 +35,22 @@ struct VideoCompositionConditions: Equatable {
     /// 解像度・向き（`preferredTransform`）が混在している。
     /// renderSize へ揃えるために装着する（S8 で正式解禁）。
     var hasMixedFormats = false
+    /// 出力解像度を先頭クリップの自然サイズから強制的に変える必要がある
+    /// （無料プランの解像度制限による縮小。`ExportRestrictionPolicy` 参照）。
+    /// これが真のときだけの単一クリップ・無変換タイムラインでも装着を強制しないと、
+    /// 縮小後のサイズがどこにも反映されない。
+    var forcesRenderSize = false
 
     /// build 中に集めたクリップ情報から判定材料を求める唯一の入口。
     static func from(placements: [ClipPlacement],
-                     overlaps: [TimelineMapping.Overlap]) -> VideoCompositionConditions {
+                     overlaps: [TimelineMapping.Overlap],
+                     forcesRenderSize: Bool = false) -> VideoCompositionConditions {
         let reference = placements.first?.format
         return VideoCompositionConditions(
             hasTransitions: !overlaps.isEmpty,
             hasRateChange: placements.contains { $0.clip.rate != 1.0 },
-            hasMixedFormats: placements.contains { $0.format != reference })
+            hasMixedFormats: placements.contains { $0.format != reference },
+            forcesRenderSize: forcesRenderSize)
     }
 }
 
@@ -63,6 +70,7 @@ enum VideoCompositionPlan: Equatable {
         let needsComposition = conditions.hasTransitions
             || conditions.hasRateChange
             || conditions.hasMixedFormats
+            || conditions.forcesRenderSize
         return needsComposition ? .attach : .none
     }
 }
@@ -87,19 +95,26 @@ enum VideoCompositionFactory {
     /// フレームレート不明時の既定値。
     static let defaultFrameRate: Double = 30
 
+    /// - Parameter renderSizeOverride: 非 nil のとき、先頭クリップから求まる自然な
+    ///   `renderSize(for:)` の代わりにこのサイズを使う（無料プランの解像度制限による
+    ///   縮小。`ExportRestrictionPolicy.clampedResolution` の結果を渡すこと）。
+    ///   これを渡すと、他の条件が無くても装着が強制される（`forcesRenderSize`）。
     /// - Returns: 装着する `AVMutableVideoComposition`（`.none` 判定なら nil）と、
     ///   顔座標を合成フレーム基準へ写すためのレイアウト（装着しないときは恒等）。
     static func make(placements: [ClipPlacement],
                      overlaps: [TimelineMapping.Overlap],
-                     totalDuration: Double)
+                     totalDuration: Double,
+                     renderSizeOverride: CGSize? = nil)
     -> (videoComposition: AVMutableVideoComposition?, layout: TimelineRenderLayout) {
-        let conditions = VideoCompositionConditions.from(placements: placements, overlaps: overlaps)
+        let conditions = VideoCompositionConditions.from(
+            placements: placements, overlaps: overlaps,
+            forcesRenderSize: renderSizeOverride != nil)
         guard VideoCompositionPlan.decide(conditions: conditions) == .attach,
               let first = placements.first else {
             return (nil, .identity)
         }
 
-        let renderSize = renderSize(for: first.format)
+        let renderSize = renderSizeOverride ?? renderSize(for: first.format)
         var layoutRects: [UUID: CGRect] = [:]
         var transforms: [UUID: CGAffineTransform] = [:]
         for placement in placements {

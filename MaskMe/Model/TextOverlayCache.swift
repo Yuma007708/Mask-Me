@@ -60,9 +60,36 @@ final class TextOverlayCache {
 
     private let device: MTLDevice
     private var entries: [TextRasterKey: Entry] = [:]
+    /// 透かし専用の 1 スロットキャッシュ（課金 P2）。
+    ///
+    /// **`TextRasterKey` を経由しない。** `TextRasterKey` は `TextItem` から
+    /// 作る前提のキーで、透かしは `TextItem` を作らない設計（`WatermarkCompositor`
+    /// の doc 参照）なので鍵にできない。透かしは文字列・見た目が不変な 1 種類しか
+    /// 無いため、辞書ではなく専用の 1 スロットで足りる。
+    private var watermarkEntry: Entry?
 
     init(device: MTLDevice) {
         self.device = device
+    }
+
+    /// 透かし（`ExportWatermark`）を描くためのテクスチャとラスタライズ時の px サイズ。
+    /// 初回だけラスタライズし、以降はキャッシュを返す（透かしは不変なので毎フレーム
+    /// 作り直さない）。失敗したら nil（呼び出し側は透かし無しで進めること）。
+    ///
+    /// - Parameter style: `ExportWatermark.style(canvasSize:)`。`fontSize` は
+    ///   ラスタライズに使わない（`TextRasterizer` は常に基準点数で焼く）ため、
+    ///   `canvasSize` が変わっても再ラスタライズは走らない。
+    func watermarkTexture(style: TextStyle) -> (texture: MTLTexture, pixelSize: (width: Double, height: Double))? {
+        if let entry = watermarkEntry {
+            return (entry.texture, entry.pixelSize)
+        }
+        guard let image = TextRasterizer.rasterize(text: ExportWatermark.text, style: style),
+              let texture = try? MetalTextureUtilities.texture(from: image, device: device) else {
+            return nil
+        }
+        let entry = Entry(texture: texture, pixelSize: (Double(image.width), Double(image.height)))
+        watermarkEntry = entry
+        return (entry.texture, entry.pixelSize)
     }
 
     /// `item` を描くためのテクスチャとラスタライズ時の px サイズ。失敗したら nil

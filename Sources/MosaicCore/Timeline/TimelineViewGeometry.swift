@@ -339,45 +339,52 @@ public enum TimelineBandLayout {
 
 }
 
-/// クリップ帯 1 本ぶんのサムネイル枠の配置。
+/// クリップ帯 1 本ぶんのサムネイル枠の配置。枠は帯をちょうど埋めるのではなく
+/// **素材時刻の固定グリッド**に貼られる。帯（トリム中は毎フレーム幅が変わる）はそのグリッドを
+/// 窓で切って見せるだけなので、はみ出す先頭枠は `leadingOffset` で左へずらす
+/// （`TimelineThumbnailLayout.slots` の doc 参照）。
 public struct TimelineThumbnailSlots: Equatable, Sendable {
     /// 枠の数（1 以上）。
     public let count: Int
-    /// 枠 1 つの幅（px）。帯をちょうど埋めるよう `preferredSlotWidth` から調整される。
+    /// 枠 1 つの幅（px）。グリッドのセル幅（`cell / clip.rate`）から導かれる。
     public let slotWidth: Double
     /// 各枠の中心に対応する素材時刻（秒。クリップの使用範囲内へクランプ済み）。
     public let sourceTimes: [Double]
+    /// 先頭枠が帯の左端よりどれだけ左にはみ出しているか（px）。範囲は `(-slotWidth, 0]`。
+    public let leadingOffset: Double
 
-    public init(count: Int, slotWidth: Double, sourceTimes: [Double]) {
+    public init(count: Int, slotWidth: Double, sourceTimes: [Double], leadingOffset: Double) {
         self.count = count
         self.slotWidth = slotWidth
         self.sourceTimes = sourceTimes
+        self.leadingOffset = leadingOffset
     }
 }
 
 /// サムネイル枠の配置計算。
-///
 /// **描画（`TimelineClipBandView`）と生成要求（`VideoTimelineView`）が同じ関数を使うこと。**
 /// 別々に計算すると要求したキーと描画で引くキーがずれ、生成済みなのに帯が
 /// 灰色のまま、という状態になる。
 public enum TimelineThumbnailLayout {
-    /// 1 クリップあたりのサムネイル枠の上限。
-    ///
-    /// 長尺 × 高倍率では帯の幅が数万 px になり、枠を素直に並べると 1 クリップで
-    /// 数千ビューになる（SwiftUI の `ForEach` は遅延生成しない）。上限を超える場合は
-    /// 枠を広げて数を抑える（コマは粗くなるが描画は詰まらない）。
+    /// 1 クリップあたりのサムネイル枠の上限。長尺 × 高倍率では帯の幅が数万 px になり、
+    /// 枠を素直に並べると 1 クリップで数千ビューになる（`ForEach` は遅延生成しない）。
+    /// 上限を超える場合は枠を広げて数を抑える（コマは粗くなるが描画は詰まらない）。
     public static let maximumSlotsPerClip = 60
+
+    /// 素材時刻グリッドの既定の量子（秒）。`TimelineThumbnailStore.bucketSeconds`
+    /// と一致させる値（`MosaicCore` はアプリ層へ依存できないため定数で持つ）。
+    public static let defaultGridQuantum: Double = 0.5
+
+    /// `cell *= 2` の繰り返し上限。異常な `gridQuantum` でも無限ループにしない安全弁。
+    private static let maximumCellDoublings: Int = 64
 
     /// 素材時刻は `bandOffset = band.start - spanStart` を基準に `clip.sourceStart` から測る。
     ///
     /// **トリム中のプレビューでは「下書きを適用したクリップ」と `spanStart: band.start` を
-    /// 渡すこと**（`TimelineClipBandView.previewClip`）。`clip` を未編集のまま渡すと
-    /// `.start` 側の外向きトリムで帯に出るコマと確定後に入る映像が食い違う:
-    /// `.start` のプレビューは `band.start` を動かさず右端だけ伸ばすので `bandOffset` は
-    /// 常に 0 のままで、帯には現行 `sourceStart` から**先**のコマが並ぶのに、実際に
-    /// 足されるのは `sourceStart` より**前**の素材になる。下書き適用済みクリップを渡せば
-    /// `.start` / `.end` のどちらでもコマと実際の映像が一致する。
-    ///
+    /// 渡すこと**（`TimelineClipBandView.previewClip`）。`clip` を未編集のまま渡すと `.start`
+    /// 側の外向きトリムで帯に出るコマと確定後に入る映像が食い違う（`.start` のプレビューは
+    /// `band.start` を動かさないので `bandOffset` が常に 0 のままになり、帯には現行
+    /// `sourceStart` より**先**のコマが並ぶのに、実際に足されるのはそれより**前**の素材になる）。
     /// - Parameters:
     ///   - spanStart: 素材時刻の原点にする合成時刻。通常は `TimelineClipLayout.spanStart`、
     ///     プレビューでは `band.start`（＝ `bandOffset` を 0 にする）。
@@ -387,28 +394,62 @@ public enum TimelineThumbnailLayout {
     ///     に固定すると伸ばした領域の全枠が現行 `sourceEnd` の 1 コマに張り付く
     ///     （実測: 6 枠中 4 枠が同一コマ）。この値を渡すと素材実尺まで先のコマを引ける。
     ///     nil のときは `clip.sourceEnd` が上限。
+    ///   - gridQuantum: 素材時刻グリッドのセル幅を丸める量子（秒）。`TimelineThumbnailStore.
+    ///     bucketSeconds` と一致させること。非有限・0 以下は望ましいセル長をそのまま使う。
     public static func slots(clip: TimelineClip,
                              spanStart: Double,
                              band: CompositionInterval,
                              geometry: TimelineGeometry,
                              preferredSlotWidth: Double,
-                             sourceDuration: Double? = nil) -> TimelineThumbnailSlots {
+                             sourceDuration: Double? = nil,
+                             gridQuantum: Double = defaultGridQuantum) -> TimelineThumbnailSlots {
         let width = geometry.width(forDuration: band.end - band.start)
         let preferred = preferredSlotWidth.isFinite && preferredSlotWidth > 0 ? preferredSlotWidth : 44
-        let ideal = width > 0 ? Int((width / preferred).rounded(.up)) : 1
-        let count = max(1, min(ideal, maximumSlotsPerClip))
-        let slotWidth = max(width, 1) / Double(count)
-        let slotDuration = geometry.duration(forWidth: slotWidth)
         let bandOffset = band.start - spanStart
         var ceiling = clip.sourceEnd
         if let sourceDuration, sourceDuration.isFinite, sourceDuration > ceiling { ceiling = sourceDuration }
         let upperBound = max(clip.sourceStart, ceiling.nextDown)
-        let times = (0..<count).map { slot -> Double in
-            let offsetInSpan = bandOffset + (Double(slot) + 0.5) * slotDuration
-            let raw = clip.sourceStart + offsetInSpan * clip.rate
-            return min(max(raw, clip.sourceStart), upperBound)
+        func degenerate() -> TimelineThumbnailSlots {
+            let time = min(max(clip.sourceStart, clip.sourceStart), upperBound)
+            return TimelineThumbnailSlots(count: 1, slotWidth: max(width, 1), sourceTimes: [time], leadingOffset: 0)
         }
-        return TimelineThumbnailSlots(count: count, slotWidth: slotWidth, sourceTimes: times)
+        guard width.isFinite, width > 0, clip.rate.isFinite, clip.rate != 0 else { return degenerate() }
+
+        let bandSourceStart = clip.sourceStart + bandOffset * clip.rate
+        let bandSourceEnd = clip.sourceStart + (bandOffset + (band.end - band.start)) * clip.rate
+        let idealCellSource = geometry.duration(forWidth: preferred) * clip.rate
+        let q: Double
+        if gridQuantum.isFinite, gridQuantum > 0 {
+            q = gridQuantum
+        } else if idealCellSource.isFinite, idealCellSource > 0 {
+            q = idealCellSource
+        } else {
+            q = 1
+        }
+        var cell = max(1, (idealCellSource / q).rounded()) * q
+        guard cell.isFinite, cell > 0 else { return degenerate() }
+        func gridStartAndCount(_ cell: Double) -> (start: Double, count: Int) {
+            let start = (bandSourceStart / cell).rounded(.down) * cell
+            let count = max(1, Int(((bandSourceEnd - start) / cell).rounded(.up)))
+            return (start, count)
+        }
+        var (gridStart, count) = gridStartAndCount(cell)
+        var doublings = 0
+        while count > maximumSlotsPerClip, doublings < maximumCellDoublings {
+            cell *= 2
+            (gridStart, count) = gridStartAndCount(cell)
+            doublings += 1
+        }
+        count = min(count, maximumSlotsPerClip)
+        guard cell.isFinite, cell > 0, gridStart.isFinite else { return degenerate() }
+        let slotWidth = max(geometry.width(forDuration: cell / clip.rate), 1)
+        let leadingOffsetRaw = -geometry.width(forDuration: (bandSourceStart - gridStart) / clip.rate)
+        let leadingOffset = leadingOffsetRaw.isFinite ? leadingOffsetRaw : 0
+        let times = (0..<count).map { slot -> Double in
+            min(max(gridStart + (Double(slot) + 0.5) * cell, clip.sourceStart), upperBound)
+        }
+        return TimelineThumbnailSlots(count: count, slotWidth: slotWidth, sourceTimes: times,
+                                      leadingOffset: leadingOffset)
     }
 }
 

@@ -246,13 +246,6 @@ extension VideoTimelineView {
         if kind == .mosaic { reselectApplyRange(near: (start + end) / 2) }
     }
 
-    func addApplyRangeAtPlayhead() {
-        let end = min(playheadTime + Self.defaultApplyRangeLength, totalDuration)
-        guard playheadTime < end else { return }
-        model.addMosaicApplyRange(fromCompositionTime: playheadTime, to: end)
-        reselectApplyRange(near: (playheadTime + end) / 2)
-    }
-
     /// 編集後に区間を引き直す（マージで id が変わり得るため id を保持し続けない）。
     /// 相互排他を効かせるため `rangeSelection` 経由で書く（クリップ選択が残らない）。
     func reselectApplyRange(near time: Double) {

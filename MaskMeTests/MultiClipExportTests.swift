@@ -1,5 +1,6 @@
 import XCTest
 import AVFoundation
+import Combine
 import Accelerate
 import MosaicCore
 import UIKit
@@ -393,7 +394,7 @@ final class MultiClipExportTests: XCTestCase {
         let sourceID = UUID()
         let clips = [TimelineClip(sourceID: sourceID, sourceStart: 0, sourceEnd: 2)]
         let composition = try await TimelineCompositionBuilder()
-            .build(clips: clips, sources: [sourceID: AVURLAsset(url: url)]).composition
+            .build(clips: clips, sources: [sourceID: AVURLAsset(url: url)], isPro: true).composition
 
         // 顔は画面右端（0.9）だけ。選択したターゲットは左端（0.2）に居る＝重心距離 0.7。
         let faceCentroid = CGPoint(x: 0.9, y: 0.5)
@@ -467,7 +468,7 @@ final class MultiClipExportTests: XCTestCase {
             TimelineClip(sourceID: sourceID, sourceStart: 0, sourceEnd: 1)
         ]
         let sources: [UUID: AVAsset] = [sourceID: AVURLAsset(url: url)]
-        let composition = try await TimelineCompositionBuilder().build(clips: clips, sources: sources).composition
+        let composition = try await TimelineCompositionBuilder().build(clips: clips, sources: sources, isPro: true).composition
 
         // 素材時刻キーのキャッシュ（各クリップの使用区間に 1 バケットずつ）
         let caches: [UUID: [Double: [FaceLandmarkSet]]] = [
@@ -502,7 +503,7 @@ final class MultiClipExportTests: XCTestCase {
         let sourceID = UUID()
         let clips = [TimelineClip(sourceID: sourceID, sourceStart: 0, sourceEnd: 2, rate: 2.0)]
         let composition = try await TimelineCompositionBuilder()
-            .build(clips: clips, sources: [sourceID: AVURLAsset(url: url)]).composition
+            .build(clips: clips, sources: [sourceID: AVURLAsset(url: url)], isPro: true).composition
 
         let exporter = try makeExporter()
         let outURL = try await exporter.export(
@@ -537,7 +538,7 @@ final class MultiClipExportTests: XCTestCase {
             TimelineClip(sourceID: sourceID, sourceStart: 2, sourceEnd: 3)
         ]
         let composition = try await TimelineCompositionBuilder()
-            .build(clips: clips, sources: [sourceID: AVURLAsset(url: url)]).composition
+            .build(clips: clips, sources: [sourceID: AVURLAsset(url: url)], isPro: true).composition
 
         let caches: [UUID: [Double: [FaceLandmarkSet]]] = [
             sourceID: [2.5: [fakeFace(cx: 0.5, cy: 0.5)]]
@@ -588,7 +589,7 @@ final class MultiClipExportTests: XCTestCase {
             TimelineClip(sourceID: sourceID, sourceStart: 2, sourceEnd: 3)
         ]
         let composition = try await TimelineCompositionBuilder()
-            .build(clips: clips, sources: [sourceID: AVURLAsset(url: url)]).composition
+            .build(clips: clips, sources: [sourceID: AVURLAsset(url: url)], isPro: true).composition
 
         let exporter = try makeExporter()
         let outURL = try await exporter.export(
@@ -628,7 +629,7 @@ final class MultiClipExportTests: XCTestCase {
             TimelineClip(sourceID: sourceID, sourceStart: 2, sourceEnd: 3)
         ]
         let composition = try await TimelineCompositionBuilder()
-            .build(clips: clips, sources: [sourceID: AVURLAsset(url: url)]).composition
+            .build(clips: clips, sources: [sourceID: AVURLAsset(url: url)], isPro: true).composition
 
         let exporter = try makeExporter()
         let outURL = try await exporter.export(
@@ -666,7 +667,7 @@ final class MultiClipExportTests: XCTestCase {
         let sourceID = UUID()
         let clips = [TimelineClip(sourceID: sourceID, sourceStart: 0, sourceEnd: 3)]
         let composition = try await TimelineCompositionBuilder()
-            .build(clips: clips, sources: [sourceID: AVURLAsset(url: url)]).composition
+            .build(clips: clips, sources: [sourceID: AVURLAsset(url: url)], isPro: true).composition
 
         let exporter = try makeExporter()
         let outURL = try await exporter.export(
@@ -701,7 +702,7 @@ final class MultiClipExportTests: XCTestCase {
         let sourceID = UUID()
         let clips = [TimelineClip(sourceID: sourceID, sourceStart: 0, sourceEnd: 2, rate: 2.0)]
         let composition = try await TimelineCompositionBuilder()
-            .build(clips: clips, sources: [sourceID: AVURLAsset(url: url)]).composition
+            .build(clips: clips, sources: [sourceID: AVURLAsset(url: url)], isPro: true).composition
 
         let audioTracks = try await composition.loadTracks(withMediaType: .audio)
         let audio = try XCTUnwrap(audioTracks.first, "合成に音声トラックが無い")
@@ -747,7 +748,7 @@ final class MultiClipExportTests: XCTestCase {
         ]
         let sources: [UUID: AVAsset] = [photoID: AVURLAsset(url: photo.url),
                                         videoID: AVURLAsset(url: videoURL)]
-        let composition = try await TimelineCompositionBuilder().build(clips: clips, sources: sources).composition
+        let composition = try await TimelineCompositionBuilder().build(clips: clips, sources: sources, isPro: true).composition
         let compositionDuration = try await composition.load(.duration)
         XCTAssertEqual(CMTimeGetSeconds(compositionDuration), 5.0, accuracy: 0.1,
                        "写真クリップ入り composition の尺が合成尺と一致しない")
@@ -801,7 +802,7 @@ final class MultiClipExportTests: XCTestCase {
         let transitions = [first.id: TransitionSpec(kind: .crossfade, duration: 0.5)]
         let built = try await TimelineCompositionBuilder().build(
             clips: [first, second], transitions: transitions,
-            sources: [sourceID: AVURLAsset(url: url)])
+            sources: [sourceID: AVURLAsset(url: url)], isPro: true)
         let videoComposition = try XCTUnwrap(built.videoComposition,
                                              "トランジションがあるのに videoComposition が無い")
         // 縦動画なので renderSize は 240x320（naturalSize 320x240 の 90 度回転後）。
@@ -867,7 +868,7 @@ final class MultiClipExportTests: XCTestCase {
         let sourceID = UUID()
         let clips = [TimelineClip(sourceID: sourceID, sourceStart: 0, sourceEnd: 2, rate: 2.0)]
         let built = try await TimelineCompositionBuilder().build(
-            clips: clips, sources: [sourceID: AVURLAsset(url: url)])
+            clips: clips, sources: [sourceID: AVURLAsset(url: url)], isPro: true)
         let videoComposition = try XCTUnwrap(built.videoComposition,
                                              "rate≠1 なのに videoComposition が装着されていない")
         XCTAssertLessThanOrEqual(
@@ -908,7 +909,7 @@ final class MultiClipExportTests: XCTestCase {
         let transitions = [first.id: TransitionSpec(kind: .crossfade, duration: 0.5)]
         let built = try await TimelineCompositionBuilder().build(
             clips: [first, second], transitions: transitions,
-            sources: [sourceID: AVURLAsset(url: url)])
+            sources: [sourceID: AVURLAsset(url: url)], isPro: true)
         XCTAssertNotNil(built.audioMix, "音声付きトランジションなのに audioMix が無い")
 
         let exporter = try makeExporter()
@@ -968,7 +969,7 @@ final class MultiClipExportTests: XCTestCase {
         let built = try await TimelineCompositionBuilder().build(
             clips: [clip], audioItems: [item],
             sources: [videoSource: AVURLAsset(url: silentURL),
-                      audioSource: AVURLAsset(url: musicURL)])
+                      audioSource: AVURLAsset(url: musicURL)], isPro: true)
         XCTAssertTrue(built.hasBackgroundAudio, "前提が崩れている（BGM が載っていない）")
         XCTAssertEqual(built.composition.tracks(withMediaType: .audio).count, 1,
                        "前提が崩れている（音声トラックが 1 本でないと穴を再現できない）")
@@ -1014,7 +1015,7 @@ final class MultiClipExportTests: XCTestCase {
             let built = try await TimelineCompositionBuilder().build(
                 clips: [clip], audioItems: [item],
                 sources: [videoSource: AVURLAsset(url: silentURL),
-                          audioSource: AVURLAsset(url: musicURL)])
+                          audioSource: AVURLAsset(url: musicURL)], isPro: true)
             let exporter = try makeExporter()
             let outURL = try await exporter.export(
                 asset: built.composition,
@@ -1061,7 +1062,7 @@ final class MultiClipExportTests: XCTestCase {
         let transitions = [first.id: TransitionSpec(kind: .crossfade, duration: 0.5)]
         let built = try await TimelineCompositionBuilder().build(
             clips: [first, second], transitions: transitions,
-            sources: [sourceID: AVURLAsset(url: url)])
+            sources: [sourceID: AVURLAsset(url: url)], isPro: true)
         XCTAssertNotNil(built.audioMix, "音声付きトランジションなのに audioMix が無い")
 
         let exporter = try makeExporter()
@@ -1194,7 +1195,7 @@ final class MultiClipExportTests: XCTestCase {
 
         func conditions(_ clips: [TimelineClip]) async throws -> AudioTrackConditions {
             let composition = try await TimelineCompositionBuilder()
-                .build(clips: clips, sources: sources).composition
+                .build(clips: clips, sources: sources, isPro: true).composition
             let tracks = try await composition.loadTracks(withMediaType: .audio)
             XCTAssertFalse(tracks.isEmpty, "合成に音声トラックが無い")
             return AudioTrackConditions.from(tracks: await AudioTrackData.load(from: tracks))
@@ -1235,7 +1236,7 @@ final class MultiClipExportTests: XCTestCase {
     private func audioTracks(_ clips: [TimelineClip],
                              sources: [UUID: AVAsset]) async throws -> [AVAssetTrack] {
         let composition = try await TimelineCompositionBuilder().build(clips: clips,
-                                                                      sources: sources).composition
+                                                                      sources: sources, isPro: true).composition
         let tracks = try await composition.loadTracks(withMediaType: .audio)
         XCTAssertFalse(tracks.isEmpty, "合成に音声トラックが無い")
         return tracks
@@ -1473,7 +1474,7 @@ final class MultiClipExportTests: XCTestCase {
         let sourceID = UUID()
         let clips = [TimelineClip(sourceID: sourceID, sourceStart: 0, sourceEnd: 2, rate: 2.0)]
         let composition = try await TimelineCompositionBuilder()
-            .build(clips: clips, sources: [sourceID: AVURLAsset(url: url)]).composition
+            .build(clips: clips, sources: [sourceID: AVURLAsset(url: url)], isPro: true).composition
 
         let exporter = try makeExporter()
         let outURL = try await exporter.export(
@@ -1513,7 +1514,7 @@ final class MultiClipExportTests: XCTestCase {
         let sourceID = UUID()
         let clips = [TimelineClip(sourceID: sourceID, sourceStart: 0, sourceEnd: 4, rate: 2.0)]
         let composition = try await TimelineCompositionBuilder()
-            .build(clips: clips, sources: [sourceID: AVURLAsset(url: url)]).composition
+            .build(clips: clips, sources: [sourceID: AVURLAsset(url: url)], isPro: true).composition
 
         let exporter = try makeExporter()
         let outURL = try await exporter.export(
@@ -1562,7 +1563,7 @@ final class MultiClipExportTests: XCTestCase {
         ]
         let composition = try await TimelineCompositionBuilder().build(
             clips: clips,
-            sources: [aID: AVURLAsset(url: url44), bID: AVURLAsset(url: url48)]).composition
+            sources: [aID: AVURLAsset(url: url44), bID: AVURLAsset(url: url48)], isPro: true).composition
 
         let exporter = try makeExporter()
         let outURL = try await exporter.export(
@@ -1608,7 +1609,7 @@ final class MultiClipExportTests: XCTestCase {
         let sources: [UUID: AVAsset] = [aID: AVURLAsset(url: videoAURL),
                                         photoID: AVURLAsset(url: photo.url),
                                         bID: AVURLAsset(url: videoBURL)]
-        let composition = try await TimelineCompositionBuilder().build(clips: clips, sources: sources).composition
+        let composition = try await TimelineCompositionBuilder().build(clips: clips, sources: sources, isPro: true).composition
 
         let exporter = try makeExporter()
         let outURL = try await exporter.export(
@@ -1659,7 +1660,7 @@ final class MultiClipExportTests: XCTestCase {
         let sources: [UUID: AVAsset] = [aID: AVURLAsset(url: videoAURL),
                                         photoID: AVURLAsset(url: photo.url),
                                         bID: AVURLAsset(url: videoBURL)]
-        let composition = try await TimelineCompositionBuilder().build(clips: clips, sources: sources).composition
+        let composition = try await TimelineCompositionBuilder().build(clips: clips, sources: sources, isPro: true).composition
 
         let exporter = try makeExporter()
         let outURL = try await exporter.export(
@@ -1703,7 +1704,7 @@ final class MultiClipExportTests: XCTestCase {
         ]
         let sources: [UUID: AVAsset] = [videoID: AVURLAsset(url: videoURL),
                                         photoID: AVURLAsset(url: photo.url)]
-        let composition = try await TimelineCompositionBuilder().build(clips: clips, sources: sources).composition
+        let composition = try await TimelineCompositionBuilder().build(clips: clips, sources: sources, isPro: true).composition
 
         let exporter = try makeExporter()
         let outURL = try await exporter.export(
@@ -1777,7 +1778,7 @@ final class MultiClipExportTests: XCTestCase {
         let photoID = UUID()
         let clips = [TimelineClip(sourceID: photoID, sourceStart: 0, sourceEnd: photo.duration)]
         let sources: [UUID: AVAsset] = [photoID: AVURLAsset(url: photo.url)]
-        let composition = try await TimelineCompositionBuilder().build(clips: clips, sources: sources).composition
+        let composition = try await TimelineCompositionBuilder().build(clips: clips, sources: sources, isPro: true).composition
         let mapping = TimelineMapping(clips: clips)
 
         // S11: `applyRanges: []` は「適用なし（全区間 OFF）」なので、そのままだと
@@ -1857,7 +1858,7 @@ final class MultiClipExportTests: XCTestCase {
         let sourceID = UUID()
         let clips = [TimelineClip(sourceID: sourceID, sourceStart: 0, sourceEnd: 2)]
         let composition = try await TimelineCompositionBuilder()
-            .build(clips: clips, sources: [sourceID: AVURLAsset(url: url)]).composition
+            .build(clips: clips, sources: [sourceID: AVURLAsset(url: url)], isPro: true).composition
         let mapping = TimelineMapping(clips: clips)
 
         // 1) 全区間を覆う区間（新規プロジェクトの既定状態）: 全編で検出が走る。
@@ -2078,7 +2079,7 @@ final class MultiClipExportTests: XCTestCase {
         let transitions = [clipA.id: TransitionSpec(kind: .crossfade, duration: 0.5)]
         let built = try await TimelineCompositionBuilder()
             .build(clips: [clipA, clipB], transitions: transitions,
-                   sources: [sourceA: AVURLAsset(url: urlA), sourceB: AVURLAsset(url: urlB)])
+                   sources: [sourceA: AVURLAsset(url: urlA), sourceB: AVURLAsset(url: urlB)], isPro: true)
         let mapping = TimelineMapping(clips: [clipA, clipB], transitions: transitions)
         let overlap = try XCTUnwrap(mapping.overlaps.first, "クロスフェードの重なりが作られていない")
         let caches = [
@@ -2179,7 +2180,7 @@ final class MultiClipExportTests: XCTestCase {
             TimelineClip(sourceID: sourceID, sourceStart: 0, sourceEnd: 4)
         }
         let composition = try await TimelineCompositionBuilder()
-            .build(clips: clips, sources: [sourceID: AVURLAsset(url: url)]).composition
+            .build(clips: clips, sources: [sourceID: AVURLAsset(url: url)], isPro: true).composition
 
         let before = mosaicTempFiles()
         let exporter = try makeExporter()
@@ -2224,7 +2225,7 @@ final class MultiClipExportTests: XCTestCase {
         let sourceID = UUID()
         let clips = [TimelineClip(sourceID: sourceID, sourceStart: 0, sourceEnd: 2)]
         let composition = try await TimelineCompositionBuilder()
-            .build(clips: clips, sources: [sourceID: AVURLAsset(url: url)]).composition
+            .build(clips: clips, sources: [sourceID: AVURLAsset(url: url)], isPro: true).composition
 
         let exporter = try makeExporter()
         // 書き出し前に cancel を撃っておく（フラグが残っていれば次も落ちる）。
@@ -2360,7 +2361,7 @@ final class MultiClipExportTests: XCTestCase {
             sourcePhoto: AVURLAsset(url: photo.url)
         ]
         let built = try await TimelineCompositionBuilder()
-            .build(clips: clips, transitions: transitions, sources: sources)
+            .build(clips: clips, transitions: transitions, sources: sources, isPro: true)
         let mapping = TimelineMapping(clips: clips, transitions: transitions)
 
         // 1) 合成尺: 4.0 + 2.0 + 3.0 − 0.5 − 0.5 = 8.0s
@@ -2519,7 +2520,7 @@ final class MultiClipExportTests: XCTestCase {
                     transitions: [UUID: TransitionSpec],
                     expectedFrames: Int) async throws -> Int {
             let built = try await TimelineCompositionBuilder()
-                .build(clips: clips, transitions: transitions, sources: assets)
+                .build(clips: clips, transitions: transitions, sources: assets, isPro: true)
             let outURL = try await makeExporter().export(
                 asset: built.composition,
                 mapping: TimelineMapping(clips: clips, transitions: transitions),
@@ -2682,7 +2683,7 @@ final class MultiClipExportTests: XCTestCase {
         func exportAt(rate: Double) async throws -> URL {
             let clips = [TimelineClip(sourceID: sourceID, sourceStart: 0, sourceEnd: 4, rate: rate)]
             let built = try await TimelineCompositionBuilder()
-                .build(clips: clips, sources: [sourceID: AVURLAsset(url: url)])
+                .build(clips: clips, sources: [sourceID: AVURLAsset(url: url)], isPro: true)
             return try await makeExporter().export(
                 asset: built.composition, mapping: TimelineMapping(clips: clips),
                 videoComposition: built.videoComposition, audioMix: built.audioMix,
@@ -2741,7 +2742,7 @@ final class MultiClipExportTests: XCTestCase {
         func measure(rate: Double, expected: Double) async throws {
             let clips = [TimelineClip(sourceID: sourceID, sourceStart: 0, sourceEnd: 2, rate: rate)]
             let built = try await TimelineCompositionBuilder()
-                .build(clips: clips, sources: [sourceID: AVURLAsset(url: url)])
+                .build(clips: clips, sources: [sourceID: AVURLAsset(url: url)], isPro: true)
             let started = CFAbsoluteTimeGetCurrent()
             let outURL = try await makeExporter().export(
                 asset: built.composition, mapping: TimelineMapping(clips: clips),
@@ -2832,7 +2833,7 @@ final class MultiClipExportTests: XCTestCase {
         let transitions = [clipA.id: TransitionSpec(kind: .crossfade, duration: 0.5)]
         let built = try await TimelineCompositionBuilder().build(
             clips: [clipA, clipB], transitions: transitions,
-            sources: [sourceA: AVURLAsset(url: urlA), sourceB: AVURLAsset(url: urlB)])
+            sources: [sourceA: AVURLAsset(url: urlA), sourceB: AVURLAsset(url: urlB)], isPro: true)
         XCTAssertEqual(built.outputSize, CGSize(width: 3840, height: 2160),
                        "4K 素材なのに出力解像度が 4K でない")
 
@@ -2846,7 +2847,7 @@ final class MultiClipExportTests: XCTestCase {
         // （2 系統デコードが同時に走らない構成）。所要時間の差がトランジションのコスト。
         let plainBuilt = try await TimelineCompositionBuilder().build(
             clips: [clipA, clipB],
-            sources: [sourceA: AVURLAsset(url: urlA), sourceB: AVURLAsset(url: urlB)])
+            sources: [sourceA: AVURLAsset(url: urlA), sourceB: AVURLAsset(url: urlB)], isPro: true)
         let plainStarted = CFAbsoluteTimeGetCurrent()
         let plainURL = try await makeExporter().export(
             asset: plainBuilt.composition,
@@ -2947,7 +2948,7 @@ final class MultiClipExportTests: XCTestCase {
         let transitions = [first.id: TransitionSpec(kind: .fadeToBlack, duration: duration)]
         let built = try await TimelineCompositionBuilder().build(
             clips: [first, second], transitions: transitions,
-            sources: [sourceID: AVURLAsset(url: url)])
+            sources: [sourceID: AVURLAsset(url: url)], isPro: true)
         XCTAssertNotNil(built.videoComposition, "fadeToBlack なのに videoComposition が無い")
 
         let exporter = try makeExporter()
@@ -3040,7 +3041,7 @@ final class MultiClipExportTests: XCTestCase {
         let item = TextItem(text: "MASK", compositionStart: 1, duration: 2,
                             center: .center, style: style, animation: .none)
         let built = try await TimelineCompositionBuilder().build(
-            clips: [clip], sources: [sourceID: AVURLAsset(url: url)])
+            clips: [clip], sources: [sourceID: AVURLAsset(url: url)], isPro: true)
 
         let exporter = try makeExporter()
         let outURL = try await exporter.export(
@@ -3084,7 +3085,7 @@ final class MultiClipExportTests: XCTestCase {
         let item = TextItem(text: "MASK", compositionStart: 0, duration: 4,
                             center: .center, style: style, animation: .fade)
         let built = try await TimelineCompositionBuilder().build(
-            clips: [clip], sources: [sourceID: AVURLAsset(url: url)])
+            clips: [clip], sources: [sourceID: AVURLAsset(url: url)], isPro: true)
 
         let exporter = try makeExporter()
         let outURL = try await exporter.export(
@@ -3117,8 +3118,15 @@ final class MultiClipExportTests: XCTestCase {
 /// 「builder が出す値」と「モデルの `@Published` が並べ替えに追随すること」を実測で固定する。
 @MainActor
 final class OutputResolutionTests: XCTestCase {
-    private func makeModel() -> MosaicEditorModel {
-        MosaicEditorModel(mode: .video, recents: RecentItemsStore())
+    /// **Pro 権限を明示して作る。** ここは出力解像度と並べ替えの検証であって課金の検証では
+    /// ないが、無料プランは出力を短辺 1080px へ落とす（課金 P1）ため、権限を指定せずに
+    /// 作ると `Entitlements.shared` の既定（＝未購入・無料）に引きずられ、2560x1440 を
+    /// 期待する検証が 1920x1080 で落ちる。**無料プラン側の挙動は
+    /// `test_freePlan_clampsOutputResolutionToShortSide1080` が別に固定する。**
+    private func makeModel(isPro: Bool = true) -> MosaicEditorModel {
+        let model = MosaicEditorModel(mode: .video, recents: RecentItemsStore())
+        model.entitlements = isPro ? LocalEntitlementProvider.shared : FreeEntitlementProvider()
+        return model
     }
 
     /// 指定解像度の単色動画（音声なし・30fps）。
@@ -3199,14 +3207,14 @@ final class OutputResolutionTests: XCTestCase {
         let largeClip = TimelineClip(sourceID: largeID, sourceStart: 0, sourceEnd: 0.5)
 
         let largeFirst = try await TimelineCompositionBuilder()
-            .build(clips: [largeClip, smallClip], sources: sources)
+            .build(clips: [largeClip, smallClip], sources: sources, isPro: true)
         XCTAssertEqual(largeFirst.outputSize, CGSize(width: 640, height: 480),
                        "先頭 640x480 のとき出力解像度が先頭基準になっていない")
         XCTAssertTrue(largeFirst.downscaledClipIDs.isEmpty,
                       "出力枠より小さいクリップ（拡大される側）が縮小扱いになっている")
 
         let smallFirst = try await TimelineCompositionBuilder()
-            .build(clips: [smallClip, largeClip], sources: sources)
+            .build(clips: [smallClip, largeClip], sources: sources, isPro: true)
         XCTAssertEqual(smallFirst.outputSize, CGSize(width: 320, height: 240),
                        "並べ替えで先頭が 320x240 になっても出力解像度が変わっていない")
         XCTAssertEqual(smallFirst.downscaledClipIDs, [largeClip.id],
@@ -3281,6 +3289,32 @@ final class OutputResolutionTests: XCTestCase {
         XCTAssertTrue(model.hasDownscaledClips,
                       "2560x1440 の動画が 1920x1080 枠へ縮小されるのに注意フラグが立たない")
     }
+
+    /// 無料プランでは出力解像度が短辺 1080px へ落ちること（課金 P1 の上限が
+    /// 実際に効いているかの回帰ガード）。
+    ///
+    /// 上の Pro 版（`test_photoClipFirst_...` 冒頭）が同じ 2560x1440 素材で
+    /// 2560x1440 のままになることと**対で読むこと**。ここが等しくなったら、
+    /// 無料プランの解像度上限が黙って効かなくなったということ。
+    func test_freePlan_clampsOutputResolutionToShortSide1080() async throws {
+        let video = try await makeSizedVideo(width: 2560, height: 1440, seconds: 0.4)
+        defer { try? FileManager.default.removeItem(at: video) }
+        let model = makeModel(isPro: false)
+        model.load(videoURL: video)
+        try await waitUntilLoaded(model)
+        await model.awaitPendingTimelineRebuild()
+
+        XCTAssertEqual(model.outputRenderSize, CGSize(width: 1920, height: 1080),
+                       "無料プランなのに 2560x1440 のまま書き出す設定になっている")
+    }
+}
+
+/// 常に無料プランを返すテスト用の `EntitlementProvider`。
+///
+/// `LocalEntitlementProvider` は常に Pro を返すので、無料側の検証はこちらを使う。
+private final class FreeEntitlementProvider: EntitlementProvider {
+    let isPro = false
+    var isProPublisher: AnyPublisher<Bool, Never> { Just(false).eraseToAnyPublisher() }
 }
 
 #endif

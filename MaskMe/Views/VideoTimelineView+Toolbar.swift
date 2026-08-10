@@ -20,7 +20,33 @@ extension VideoTimelineView {
     /// 横スクロールの向こう側に置く。**落とさずに残してある**理由は各項目の doc 参照。
     var toolItems: [TimelineToolItem] {
         [splitItem, mosaicItem, speedItem, volumeItem, addOrRemoveItem]
-            + [moveBackwardItem, moveForwardItem] + zoomItems + [addApplyRangeItem]
+            + [addTextItem, addAudioItem] + zoomItems
+    }
+
+    /// テキストを足す。**段の「＋」チップは置かない**（アイコン列に小さなボタンを
+    /// 重ねると、段を選ぶつもりの指が追加を押す）。追加の入口はツールバーに 1 本だけ。
+    private var addTextItem: TimelineToolItem {
+        TimelineToolItem(title: "テキスト", systemImage: "textformat",
+                         isEnabled: canAddTimedItem, separatorBefore: true) {
+            showTextInputSheet = true
+        }
+    }
+
+    /// BGM を足す。テキストと同じ理由でツールバーに置く。
+    private var addAudioItem: TimelineToolItem {
+        TimelineToolItem(title: "音楽", systemImage: "music.note",
+                         isEnabled: canAddTimedItem) {
+            showAudioPicker = true
+        }
+    }
+
+    /// 合成時刻アンカーのアイテム（テキスト・BGM）を足せるか。
+    ///
+    /// **プレイヘッドの位置に置く**ので、置ける時刻が無い（クリップが無い・
+    /// 終端にいる）ときは押せない。判定を追加処理と揃えておかないと
+    /// 「押せるのに何も起きない」になる。
+    private var canAddTimedItem: Bool {
+        !model.timeline.clips.isEmpty && totalDuration > 0 && playheadTime < totalDuration
     }
 
     /// モザイクの階層へ降りる入口。**ここが唯一の入口**
@@ -71,31 +97,6 @@ extension VideoTimelineView {
         TimelineToolItem(title: "追加", systemImage: "photo.on.rectangle",
                          isEnabled: !model.timeline.clips.isEmpty) {
             showMediaPicker = true
-        }
-    }
-
-    /// 長押しドラッグの代替。ドラッグは「同時に見えている範囲 + 自動スクロールが
-    /// 届く範囲」でしか届かないので、**画面外のクリップと入れ替える唯一の手段**。
-    private var moveBackwardItem: TimelineToolItem {
-        TimelineToolItem(title: "前へ", systemImage: "arrow.left",
-                         isEnabled: canMoveClip(by: -1), separatorBefore: true) {
-            moveSelectedClip(by: -1)
-        }
-    }
-
-    private var moveForwardItem: TimelineToolItem {
-        TimelineToolItem(title: "後へ", systemImage: "arrow.right",
-                         isEnabled: canMoveClip(by: 1)) { moveSelectedClip(by: 1) }
-    }
-
-    /// モザイクを掛ける区間を足す。
-    ///
-    /// **加工をレイヤーとして直接置けるようになったら外す**（そちらが本来の導線）。
-    /// 今はこれが区間を作る唯一の手段なので、外すと区間指定そのものができなくなる。
-    private var addApplyRangeItem: TimelineToolItem {
-        TimelineToolItem(title: "モザイク区間", systemImage: "plus.rectangle.on.rectangle",
-                         isEnabled: canAddApplyRange, separatorBefore: true) {
-            addApplyRangeAtPlayhead()
         }
     }
 
@@ -167,27 +168,4 @@ extension VideoTimelineView {
                                          selection: model.timelineSelection) != nil
     }
 
-    private var canAddApplyRange: Bool {
-        !model.timeline.clips.isEmpty && totalDuration > 0 && playheadTime < totalDuration
-    }
-}
-
-// MARK: - クリップの並べ替え（ボタン操作）
-
-private extension VideoTimelineView {
-    func canMoveClip(by offset: Int) -> Bool {
-        guard let index = selectedClipIndex else { return false }
-        let target = index + offset
-        return target >= 0 && target < model.timeline.clips.count
-    }
-
-    func moveSelectedClip(by offset: Int) {
-        guard let id = selectedClipID, let index = selectedClipIndex else { return }
-        model.moveClip(id: id, toIndex: index + offset)
-    }
-
-    var selectedClipIndex: Int? {
-        guard let selectedClipID else { return nil }
-        return model.timeline.clips.firstIndex { $0.id == selectedClipID }
-    }
 }

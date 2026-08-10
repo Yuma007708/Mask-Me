@@ -62,6 +62,26 @@ public struct TimelineRenderLayout: Equatable, Sendable {
         return sets.map { $0.remapped(into: rect) }
     }
 
+    /// 合成フレーム基準の正規化ランドマークを、素材フレーム基準へ逆写像する
+    /// （`remap(_ sets:clipID:)` の対）。
+    ///
+    /// **合成フレームで検出した顔を検出キャッシュへ書く前に必ず通すこと。** プレビューの
+    /// ライブ検出は `AVVideoComposition` を装着した合成フレーム（レターボックス込み）を
+    /// 見ているので、その座標をそのまま素材キーで保存すると、描画・書き出し側で
+    /// `remap` がもう一度掛かって二重にずれる（＝顔が素通しになる）。
+    ///
+    /// 配置が全面（恒等）のときは値をそのまま返す（浮動小数点の再計算誤差も入れない）。
+    ///
+    /// **矩形版（`inverseRemap(_ rect:clipID:)`）と違い、黒帯へのはみ出しを切り取らない。**
+    /// 顔のランドマークは顔の輪郭より外へ出ることがあり、切り取ると顔が痩せて
+    /// モザイクが小さくなる＝露出が増える方向へ倒れる。安全側は「素直に逆写像する」。
+    public func inverseRemap(_ sets: [FaceLandmarkSet], clipID: UUID?) -> [FaceLandmarkSet] {
+        let rect = placement(for: clipID)
+        guard rect != Self.unitRect else { return sets }
+        guard rect.width > 0, rect.height > 0 else { return sets }
+        return sets.map { $0.unmapped(from: rect) }
+    }
+
     /// 素材フレーム基準の正規化矩形を、合成フレーム基準へ写す
     /// （ランドマークの `remap` と同じ写像を矩形に適用したもの。`inverseRemap` の対）。
     /// 配置が全面（恒等）のときは値をそのまま返す（再計算誤差も入れない）。

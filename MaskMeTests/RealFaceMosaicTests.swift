@@ -155,7 +155,9 @@ final class RealFaceMosaicTests: XCTestCase {
         let sourceID = UUID()
         let clips = [TimelineClip(sourceID: sourceID, sourceStart: 0, sourceEnd: duration)]
         let composition = try await TimelineCompositionBuilder()
-            .build(clips: clips, sources: [sourceID: asset]).composition
+            // 検出精度の計測に課金の制限を持ち込まない（`isPro: true`）。
+            // 解像度を縮小されると顔の大きさが変わり、測っているものが変わる。
+            .build(clips: clips, sources: [sourceID: asset], isPro: true).composition
         let mapping = TimelineMapping(clips: clips)
         let half = duration / 2
 

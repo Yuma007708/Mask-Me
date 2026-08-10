@@ -166,6 +166,23 @@ public final class MosaicEditorModel: ObservableObject {
     /// 並べ替えで先頭クリップ＝出力解像度が変わると true / false が入れ替わる。
     @Published public internal(set) var hasDownscaledClips = false
 
+    /// 現在のタイムラインに適用される書き出し制限（`ExportRestrictionPolicy.decide` の結果）。
+    ///
+    /// **「書き出しボタンを押せるか」（UI）と「実際に何が起きるか」（`exportVideo()`）は
+    /// 必ずこの値を読むこと。** どちらも別々に判定関数を呼び直さない（呼び出しタイミングの
+    /// ずれで両者が食い違う事故を防ぐため）。値は `apply(built:generation:)` 経由で
+    /// タイムライン再構築のたびに更新される。
+    @Published public internal(set) var exportRestriction: ExportRestriction = .none
+
+    /// 課金権限の読み取り口（課金 P3b）。既定はアプリ唯一の注入点 `Entitlements.shared`。
+    ///
+    /// **`Entitlements.shared` をこのクラスの中から直接読まないこと。** 出力解像度の
+    /// 上限（無料プランは短辺 1080px）は権限で変わるため、`Entitlements.shared` を
+    /// 直接読むと**課金と無関係なテスト（解像度・並べ替え等）が権限の既定値に
+    /// 引きずられて落ちる**（実際 `OutputResolutionTests` の 3 件がそうなった）。
+    /// テストは Pro / 無料を明示して差し替えること。
+    var entitlements: EntitlementProvider = Entitlements.shared
+
     /// 動画の書き出し対象範囲（0...1 正規化）。
     /// エクスポート時は `AVAssetReaderTrackOutput` からのフレームのうち、
     /// この範囲外の `presentationTime` をスキップして出力尺を短縮する。
@@ -754,7 +771,8 @@ public final class MosaicEditorModel: ObservableObject {
                     .filter { sources[$0.sourceID] != nil }
                 let built = try await TimelineCompositionBuilder()
                     .build(clips: clips, transitions: timeline.transitions,
-                           audioItems: audioItems, sources: sources)
+                           audioItems: audioItems, sources: sources,
+                           isPro: entitlements.isPro)
                 let isStale = loadGeneration != timelineGeneration
                 if !isStale {
                     apply(built: built, generation: loadGeneration)
@@ -2077,6 +2095,15 @@ public final class MosaicEditorModel: ObservableObject {
             errorMessage = "タイムラインの更新が完了していません。もう一度お試しください"
             return
         }
+        // 無料プランの尺制限。**UI（書き出しボタンの活性表示）と同じ `exportRestriction`
+        // を読む**（判定関数をここで別途呼び直さない。二重判定は呼び出しタイミングの
+        // ずれで食い違う）。解像度超過（`.exceedsResolution`）は止めない
+        // （`TimelineCompositionBuilder.build` が既に縮小した `videoComposition` /
+        // `outputSize` を組んでいるので、ここでは何もしなくてよい）。
+        if let restrictionMessage = durationRestrictionMessage {
+            errorMessage = restrictionMessage
+            return
+        }
         guard let renderer else { return }
         // 書き出しは原寸のまま tmp へ書く。書き終わってから容量不足で失敗するより、
         // 開始前に見積もりと空き容量を比べて弾く（判断は core の純関数）。
@@ -2096,6 +2123,12 @@ public final class MosaicEditorModel: ObservableObject {
         // だけでプレビューの近傍ホールドが無いため、走査の途中で書き出すと
         // キャッシュが穴だらけのまま焼き込まれる。
         await awaitRegionSeeding()
+        await runExport(composition: composition, renderer: renderer)
+    }
+
+    /// `exportVideo()` の後半（exporter の生成〜書き出し〜保存〜後始末）だけを担う。
+    /// 複雑度・行数を抑えるための切り出しで、判断（ガード・制限判定）は呼び出し側に残す。
+    private func runExport(composition: AVAsset, renderer: MosaicRenderer) async {
         exportProgress = 0
         isExportCancelling = false
         isExportSaving = false
@@ -2139,6 +2172,10 @@ public final class MosaicEditorModel: ObservableObject {
                 applyRanges: timeline.applyRanges,
                 // 画面に置く文字（E3）。プレビューと同じ `timeline.textItems` を渡す。
                 textItems: timeline.textItems,
+                // 無料プランの透かし（課金 P2）。**`isPro` を直接見ない**。UI と同じ
+                // `exportRestriction`（`.exceedsResolution` でも真になる導出プロパティ）
+                // を読み、判定の根拠を 2 箇所に散らばらせない。
+                needsWatermark: exportRestriction.needsWatermark,
                 // 合成（トランジション・レターボックス・フレームレート上限）と
                 // 音声ミックスはプレビューと同じものを渡す。composition と必ず組で
                 // 差し替わる（`apply(built:generation:)`）ので世代がずれない。
@@ -2184,6 +2221,17 @@ public final class MosaicEditorModel: ObservableObject {
         isExportCancelling = false
         isExportSaving = false
         exportProgress = nil
+    }
+
+    /// 無料プランの尺超過で書き出しを止めるべきときのユーザー向け文言（それ以外は nil）。
+    ///
+    /// `exportRestriction` を読むだけの純粋な変換（判定そのものは
+    /// `ExportRestrictionPolicy.decide` の 1 箇所だけで行う）。`.exceedsResolution` /
+    /// `.watermarkOnly` / `.none` は書き出しを止めないので nil。
+    private var durationRestrictionMessage: String? {
+        guard case .exceedsDuration(let limit) = exportRestriction else { return nil }
+        return "無料プランで書き出せる長さは\(Int(limit))秒までです。"
+            + "Proにアップグレードすると制限なく書き出せます。"
     }
 
     /// 空き容量が足りないときのユーザー向け文言（足りていれば nil）。

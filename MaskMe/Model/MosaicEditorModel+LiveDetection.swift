@@ -181,6 +181,11 @@ extension MosaicEditorModel {
     /// nearestCachedFaces の体貼り付き防止の意味論をすべて維持するため）。
     /// 両キャッシュとも**同じ写像済み素材キー**を使う（片方だけ合成時刻キーだと、
     /// lookupFaces の素材時刻検索から取り残される）。
+    ///
+    /// **座標系（最重要）**: 引数の顔は**合成フレーム基準**（プレビューは
+    /// `videoComposition` 装着済みフレームをデコードする）。キャッシュは素材基準なので、
+    /// 書く前に `renderLayout.inverseRemap` で必ず戻す。戻さないと描画・書き出しで
+    /// `remap` がもう一度掛かって二重にずれ、顔が素通しになる。
     @MainActor
     func storeLiveDetection(_ detection: LiveDetectionResult, at t: Double, source: UIImage,
                             signatures: [FaceSignature?]? = nil) {
@@ -189,21 +194,31 @@ extension MosaicEditorModel {
             return
         }
         liveDetectionInFlight = false
-        let (sourceID, sourceTime) = resolveSourceTime(atComposition: t)
+        let resolved = resolveSourceLocation(atComposition: t)
+        let sourceID = resolved.sourceID
+        let sourceTime = resolved.time
+        // 合成 → 素材。`liveFlowCache` も `cacheStore` と同じ座標系でなければならない
+        // （`lookupFaces` は両者を同列に返し、呼び出し側は区別せず `remap` を掛ける）。
+        let sourceFaces = renderLayout.inverseRemap(detection.faces, clipID: resolved.clipID)
         cacheStore.store([], sourceID: sourceID, time: sourceTime)
         liveFlowCache[DetectionCacheKey(sourceID: sourceID, time: sourceTime, bucketFPS: liveBucketFPS)] =
-            detection.faces
+            sourceFaces
         #if DEBUG
         print("[MMLIVE] t=\(String(format: "%.2f", t)) flow faces=\(detection.faces.count)")
         #endif
         // 描画の重心マッチングが追跡位置と乖離しないよう位置だけ追従させる
-        // （検出率 liveMatchCounts / liveSampleCount には算入しない）。
-        updateFacePositions(with: detection.faces)
+        // （検出率 liveMatchCounts / liveSampleCount には算入しない）。**素材座標**を渡す。
+        updateFacePositions(with: sourceFaces)
         previewController?.invalidate()
     }
 
     /// `detectedFaces` の位置を検出/追跡結果へ追従させる（検出率には触らない）。
     /// マッチング規則は storeLiveDetection の検出率ループと同一。
+    ///
+    /// **`faces` は素材フレーム基準で渡すこと。** `displayFaces(at:matching:)`
+    /// （`MosaicEditorModel+DetectionCache.swift`）が「絞り込みは素材座標のまま、写像より
+    /// 前に行う」と定めている。合成座標を混ぜるとレターボックスぶん（実測で最大 0.175）
+    /// ずれ、選択した顔が照合できず**モザイクが乗らない**。
     @MainActor
     private func updateFacePositions(with faces: [FaceLandmarkSet]) {
         guard !faces.isEmpty else { return }
@@ -225,11 +240,20 @@ extension MosaicEditorModel {
     /// ライブ検出の1フレーム分を直接注入して選択層まで含めて検証するための可視性。
     /// `t` は**合成時刻**（クリップ未構築のテスト注入では恒等フォールバックにより
     /// 従来どおり素材時刻と同値）。
+    ///
+    /// **`faces` は合成フレーム基準**（`source` 画像と同じ座標系）。素材基準への逆写像は
+    /// ここで行う。恒等レイアウトでは `inverseRemap` が値をそのまま返す（挙動不変）。
     @MainActor
     func storeLiveDetection(_ faces: [FaceLandmarkSet], at t: Double, source: UIImage,
                             signatures: [FaceSignature?]? = nil) {
         liveDetectionInFlight = false
-        let (sourceID, sourceTime) = resolveSourceTime(atComposition: t)
+        let resolved = resolveSourceLocation(atComposition: t)
+        let sourceID = resolved.sourceID
+        let sourceTime = resolved.time
+        // 合成 → 素材。**キャッシュ・署名・`detectedFaces` はすべて素材座標**で、
+        // サムネイル生成だけが `source`（合成フレーム）座標を要る。`inverseRemap` は
+        // 件数も順序も変えないので `faces` / `signatures` と添字は一致する。
+        let sourceFaces = renderLayout.inverseRemap(faces, clipID: resolved.clipID)
         #if DEBUG
         // 実機デバッグ用: ライブ検出が「どの時刻に・何件」乗ったかの証跡。
         // 「途中スタートでモザイクなし」等の報告時に、検出が走っていないのか
@@ -243,26 +267,29 @@ extension MosaicEditorModel {
         // 「体にモザイクが乗る／モザイクがずれる」誤描画になる。また、空を記録する
         // ことで shouldDetectPreviewFrame が同じ顔なしフレームを再スキャンし続ける
         // 無駄も止まる（DetectionBridge / nearestCachedFaces は空エントリを無視する）。
-        cacheStore.store(faces, sourceID: sourceID, time: sourceTime)
+        cacheStore.store(sourceFaces, sourceID: sourceID, time: sourceTime)
         // 署名は顔と**同じ瞬間・同じキー**でしか書かない（添字がずれると別人の署名で
         // 判定してしまう）。件数が合わない呼び出しは `FaceSignatureCache` 側が弾く。
+        // 署名は**素材座標の顔**に結ぶ（`FaceSignatureSample.centroid` の doc どおり）。
         if let signatures {
-            signatureCache.store(signatures, for: faces, sourceID: sourceID, time: sourceTime)
+            signatureCache.store(signatures, for: sourceFaces, sourceID: sourceID, time: sourceTime)
         }
         // ポーズ中のシーク先で検出が終わったとき、次の displayLink を待たずに
         // モザイクを反映する（再生中は毎フレーム描画されるので実質無害）。
         previewController?.invalidate()
-        guard !faces.isEmpty else { return }
+        guard !sourceFaces.isEmpty else { return }
 
         // 先頭フレーム検出が失敗して顔候補が空だった場合の安全網。
         // load(videoURL:) の初期スキャンと同じ自動選択規則を適用する: 顔が 1 つなら
         // タップ不要で即モザイク。isSelected: false のままだと「冒頭に顔が写らない
         // 動画（後ろ向きスタート等）では最後まで一切モザイクが掛からない」になる。
         if detectedFaces.isEmpty {
-            detectedFaces = faces.enumerated().map { idx, lm in
+            detectedFaces = sourceFaces.enumerated().map { idx, lm in
                 FaceTarget(id: UUID(), landmarks: lm,
-                           thumbnail: generateThumbnail(for: lm, from: source),
-                           isSelected: faces.count == 1 && idx == 0,
+                           // サムネイルは `source`（**合成フレーム**）から切り出すので
+                           // 逆写像**前**の顔を渡す（素材座標だとずれた場所を切り出す）。
+                           thumbnail: generateThumbnail(for: faces[idx], from: source),
+                           isSelected: sourceFaces.count == 1 && idx == 0,
                            sourceID: sourceID)
             }
         }
@@ -272,16 +299,17 @@ extension MosaicEditorModel {
         while liveMatchCounts.count < detectedFaces.count { liveMatchCounts.append(0) }
         for (i, target) in detectedFaces.enumerated() {
             let tc = normalizedCentroid(of: target.landmarks)
-            if let matchedIndex = faces.indices.min(by: { a, b in
-                let ac = normalizedCentroid(of: faces[a]), bc = normalizedCentroid(of: faces[b])
+            // 照合は**素材座標同士**（閾値 0.5 は素材座標で調整されてきた値）。
+            if let matchedIndex = sourceFaces.indices.min(by: { a, b in
+                let ac = normalizedCentroid(of: sourceFaces[a]), bc = normalizedCentroid(of: sourceFaces[b])
                 return hypot(ac.x - tc.x, ac.y - tc.y) < hypot(bc.x - tc.x, bc.y - tc.y)
             }) {
-                let matched = faces[matchedIndex]
+                let matched = sourceFaces[matchedIndex]
                 let mc = normalizedCentroid(of: matched)
                 // 単一ターゲット × 単一検出のときは距離条件を課さない（同一人物とみなす）。
                 // フレームアウト→反対側から再インすると距離 0.5 を超え、位置追従だけでは
                 // 永久に再マッチできないため、この再捕捉規則が無いと「一度外れたら戻らない」。
-                let isSoleFacePair = detectedFaces.count == 1 && faces.count == 1
+                let isSoleFacePair = detectedFaces.count == 1 && sourceFaces.count == 1
                 if isSoleFacePair || hypot(mc.x - tc.x, mc.y - tc.y) < 0.5 {
                     liveMatchCounts[i] += 1
                     // ターゲット位置を最新の検出位置へ追従させる。顔追加時の初期位置の
@@ -342,145 +370,6 @@ extension MosaicEditorModel {
             if best == nil || d < best!.dist { best = (d, faces) }
         }
         return best?.faces ?? []
-    }
-
-    // フェーズ2でこのファイルに本格的に手を入れる際に解消する予定の構造的負債
-    // swiftlint:disable:next cyclomatic_complexity function_body_length
-    nonisolated private func runPreScan(
-        asset: AVAsset,
-        scanner: FaceLandmarking,
-        cropScanner: FaceLandmarking,
-        expectedFaceCount: Int,
-        cropRects: [CGRect] = []
-    ) async {
-        let dur: Double
-        do { dur = try await asset.load(.duration).seconds } catch {
-            print("[MMSCAN] EARLY-RETURN: duration load failed: \(error)")
-            return
-        }
-        print("[MMSCAN] start dur=\(dur) expectedFaces=\(expectedFaceCount) cropRects=\(cropRects.count)")
-        guard dur > 0 else {
-            print("[MMSCAN] EARLY-RETURN: dur<=0 (\(dur))")
-            return
-        }
-
-        let interval = 1.0 / 15.0   // 15fps（動きの速い顔と短時間アウトインの追従向上）
-        let generator = AVAssetImageGenerator(asset: asset)
-        generator.appliesPreferredTrackTransform = true
-        generator.requestedTimeToleranceBefore = CMTime(seconds: interval, preferredTimescale: 600)
-        generator.requestedTimeToleranceAfter = CMTime(seconds: interval, preferredTimescale: 600)
-
-        var sampleCount = 0
-        var matchCounts = [Int](repeating: 0, count: max(expectedFaceCount, 1))
-
-        var t = 0.0
-        while t <= dur {
-            guard !Task.isCancelled else { return }
-            // 再生中はハードウェアデコーダをプレビュー(AVPlayer)に明け渡す。スキャン用
-            // AVAssetImageGenerator と同時にデコーダを奪い合うと、実機では数秒後から
-            // copyCGImage が nil を返し続けスキャンが全滅する（再生していなければ最後まで
-            // 通ることを実機ログで確認済み）。再生が止まったら中断地点から自然に再開する。
-            while await MainActor.run(body: { [weak self] in self?.isPlaying ?? false }) {
-                guard !Task.isCancelled else { return }
-                try? await Task.sleep(nanoseconds: 200_000_000)
-            }
-            let cmTime = CMTime(seconds: t, preferredTimescale: 600)
-            // 各フレームで AVFoundation / MediaPipe が生成する autorelease 中間バッファを
-            // 毎フレーム解放する。これが無いと full-res フレーム（例: 588×1280）と検出中間
-            // バッファが蓄積し、実機のハードウェアデコーダがメモリ圧で失敗して copyCGImage が
-            // 数秒後から nil を返し始め、スキャンが途中で全滅する（キャッシュが冒頭数秒しか
-            // 埋まらず、再生時にほぼモザイクが出ない）。CI/DValidVideoTests は autoreleasepool を
-            // 使っているためこの症状は再現しない。
-            let frame: (faces: [FaceLandmarkSet], img: UIImage)? = autoreleasepool {
-                let cg: CGImage
-                do {
-                    cg = try generator.copyCGImage(at: cmTime, actualTime: nil)
-                } catch {
-                    let ns = error as NSError
-                    print("[MMSCAN] t=\(String(format: "%.2f", t)) copyCGImage=NIL domain=\(ns.domain) " +
-                          "code=\(ns.code) desc=\(ns.localizedDescription)")
-                    return nil
-                }
-                let img = UIImage(cgImage: cg)
-                // video モードで temporal tracking を活用しながら検出
-                var faces = scanner.allLandmarks(in: img, timestampMs: Int(t * 1000))
-                if sampleCount < 10 || sampleCount % 15 == 0 {
-                    print("[MMSCAN] t=\(String(format: "%.2f", t)) sample=\(sampleCount) faces=\(faces.count) " +
-                          "imgPx=\(cg.width)x\(cg.height)")
-                }
-
-                // ManualRegion の矩形クロップでも検出を試みる（小さい顔や検出しにくい顔への対応）
-                // クロップは image モードスキャナーを使用（video モードの timestamp 系列を保護）
-                for rect in cropRects {
-                    let pixelRect = CGRect(
-                        x: rect.origin.x * CGFloat(cg.width),
-                        y: rect.origin.y * CGFloat(cg.height),
-                        width: rect.width  * CGFloat(cg.width),
-                        height: rect.height * CGFloat(cg.height)
-                    )
-                    if let crop = cg.cropping(to: pixelRect) {
-                        let cropFaces = cropScanner.allLandmarks(in: UIImage(cgImage: crop))
-                        faces += cropFaces.map { $0.remapped(into: rect) }
-                    }
-                }
-                return (faces, img)
-            }
-            guard let frame else { t += interval; continue }
-            let faces = frame.faces
-            let img = frame.img
-
-            sampleCount += 1
-            let facesForCache = faces
-            let timeForCache = t
-            let matchCountsCopy = matchCounts
-            let updated = await MainActor.run { [weak self, img] () -> [Int] in
-                self?.storePreScanResult(facesForCache, at: timeForCache)
-                guard let self else { return matchCountsCopy }
-                // 初期フレーム検出が失敗して detectedFaces が空のまま残っている場合、
-                // プリスキャンで最初に見つかった顔を補完する（安全網）。
-                if !facesForCache.isEmpty && self.detectedFaces.isEmpty {
-                    // storeLiveDetection の安全網と同じ自動選択規則（単一顔なら即モザイク）。
-                    // プリスキャンは現在ロード中の素材全体を舐める前提の旧経路なので
-                    // 素材IDは currentSourceID 固定で良い。
-                    self.detectedFaces = facesForCache.enumerated().map { idx, lm in
-                        FaceTarget(id: UUID(), landmarks: lm,
-                                   thumbnail: self.generateThumbnail(for: lm, from: img),
-                                   isSelected: facesForCache.count == 1 && idx == 0,
-                                   sourceID: self.currentSourceID)
-                    }
-                }
-                var counts = matchCountsCopy
-                // detectedFaces がプリスキャン中に安全網で追加された場合に備えて配列を拡張する
-                while counts.count < self.detectedFaces.count { counts.append(0) }
-                for (i, target) in self.detectedFaces.enumerated() {
-                    let tc = self.normalizedCentroid(of: target.landmarks)
-                    if facesForCache.contains(where: { face in
-                        let fc = self.normalizedCentroid(of: face)
-                        return hypot(fc.x - tc.x, fc.y - tc.y) < 0.5
-                    }) {
-                        counts[i] += 1
-                    }
-                }
-                return counts
-            }
-            matchCounts = updated
-            t += interval
-        }
-
-        let finalSampleCount = sampleCount
-        let finalMatchCounts = matchCounts
-        await MainActor.run { [weak self] in
-            guard let self else { return }
-            print("[MMSCAN] DONE samples=\(finalSampleCount) cacheEntries=\(self.cacheStore.count) " +
-                  "detectedFaces=\(self.detectedFaces.count)")
-            if finalSampleCount > 0 {
-                for i in 0..<min(finalMatchCounts.count, self.detectedFaces.count) {
-                    self.detectedFaces[i].detectionRate =
-                        Double(finalMatchCounts[i]) / Double(finalSampleCount) * 100
-                }
-            }
-            self.isScanning = false
-        }
     }
 }
 

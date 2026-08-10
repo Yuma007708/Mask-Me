@@ -58,6 +58,14 @@ struct TimelineCompositionBuilder {
         /// （`AudioExportPipeline.decide(isTrimming:hasAudioMix:hasBackgroundAudio:conditions:)`）。
         /// BGM がある構成を圧縮パススルーで書き出してはならない。
         let hasBackgroundAudio: Bool
+        /// 現在のタイムラインに適用すべき書き出し制限（`ExportRestrictionPolicy.decide` の結果）。
+        ///
+        /// **UI（書き出しボタンの活性・案内表示）と `exportVideo()` の入口は必ずこの値を
+        /// 読むこと。** 両者が別々に `ExportRestrictionPolicy.decide` を呼び直すと、
+        /// 呼び出しタイミングのずれで「押せたのに止まる／止まるはずが書き出せる」という
+        /// 食い違いが起き得る。ここで 1 回だけ判定し、`apply(built:generation:)` を経由して
+        /// `MosaicEditorModel.exportRestriction` に届く値が唯一の情報源。
+        let exportRestriction: ExportRestriction
     }
 
     /// 映像トラックの混在判定用フォーマット（naturalSize / preferredTransform）。
@@ -85,10 +93,22 @@ struct TimelineCompositionBuilder {
     ///   を通した実効の列を渡すこと**（生の `audioItems` を渡すと、クリップを消して縮んだ
     ///   タイムラインの外へ挿入しにいく）。既定値 `[]` は `transitions` と同じ流儀だが、
     ///   アプリ本体の 2 経路（プレビュー再構築・書き出し）は必ず渡す。
+    /// - Parameter isPro: Pro 権限（`Entitlements.shared.isPro` を渡す）。
+    ///   `ExportRestrictionPolicy.decide` の入力にのみ使い、`Built.exportRestriction` へ届く。
+    ///
+    ///   **既定値を置かないこと。** 置くと渡し忘れが黙って通り、その経路だけ
+    ///   制限が外れる（無料なのに長尺も 4K も透かし無しで書き出せる）。課金の穴は
+    ///   例外が出ないので、気づくのは売上を見たときになる。この案件の他の
+    ///   「既定値を置かない」引数（`photoSourceIDs` / `hasAudioMix` /
+    ///   `hasBackgroundAudio`）と同じ理由で、渡し忘れをコンパイルエラーにする。
+    ///   既定 `true`（無制限）は、権限を意識しない既存の呼び出し（テスト等）の挙動を
+    ///   変えないための後方互換値。実アプリの 2 経路
+    ///   （プレビュー再構築・書き出し＝どちらも `rebuildComposition`）は必ず明示して渡す。
     func build(clips: [TimelineClip],
                transitions: [UUID: TransitionSpec] = [:],
                audioItems: [AudioItem] = [],
-               sources: [UUID: AVAsset]) async throws -> Built {
+               sources: [UUID: AVAsset],
+               isPro: Bool) async throws -> Built {
         let mapping = TimelineMapping(clips: clips, transitions: transitions)
         // 重なりがあるときだけ 2 トラックへ交互配置する。重なりが無い構成では
         // 従来どおり単一トラックのまま（無変換タイムラインの忠実度を壊さない）。
@@ -155,27 +175,44 @@ struct TimelineCompositionBuilder {
         // 長くなり得る。短い方を使うと末尾に instruction の隙間ができ、AVFoundation の
         // 検証（再生・書き出し）が破綻する。
         let compositionSeconds = CMTimeGetSeconds(composition.duration)
+        let totalDuration = max(mapping.totalDuration,
+                                compositionSeconds.isFinite ? compositionSeconds : 0)
+
+        // 出力解像度の**自然な**値の算出は `VideoCompositionFactory.renderSize(for:)` の
+        // 単一実装を使う（コア層に再実装しない。表示と実出力が食い違う二重管理を作らない
+        // ため。`TimelineOutputSummary` の doc 参照）。無料プランの書き出し制限は、この
+        // 自然な値の**結果に対して**判定・縮小する（`ExportRestrictionPolicy` の doc 参照）。
+        let naturalOutputSize = placements.first.map { VideoCompositionFactory.renderSize(for: $0.format) }
+            ?? .zero
+        let exportRestriction = ExportRestrictionPolicy.decide(
+            isPro: isPro, durationSeconds: totalDuration, resolution: naturalOutputSize)
+        let renderSizeOverride: CGSize?
+        if case .exceedsResolution(let limit) = exportRestriction {
+            renderSizeOverride = ExportRestrictionPolicy.clampedResolution(
+                naturalOutputSize, shortSideLimit: limit)
+        } else {
+            renderSizeOverride = nil
+        }
+
         let (videoComposition, layout) = VideoCompositionFactory.make(
             placements: placements, overlaps: mapping.overlaps,
-            totalDuration: max(mapping.totalDuration,
-                               compositionSeconds.isFinite ? compositionSeconds : 0))
+            totalDuration: totalDuration, renderSizeOverride: renderSizeOverride)
         let audioMix = AudioMixFactory.make(placements: placements,
                                             overlaps: mapping.overlaps,
                                             tracks: survivingAudio,
                                             backgroundItems: audioItems,
                                             backgroundTrack: backgroundTrack)
-        // 出力解像度の算出は `VideoCompositionFactory.renderSize(for:)` の単一実装を使う
-        // （コア層に再実装しない。表示と実出力が食い違う二重管理を作らないため。
-        // `TimelineOutputSummary` の doc 参照）。
-        let outputSize = placements.first.map { VideoCompositionFactory.renderSize(for: $0.format) }
-            ?? .zero
+        // 実際に適用された出力解像度（縮小したならそのサイズ）。UI・書き出しはこちらを
+        // 見ること（`outputSize` の doc 参照）。
+        let outputSize = renderSizeOverride ?? naturalOutputSize
         let downscaled = TimelineOutputSummary.downscaledIndices(
             renderSize: outputSize,
             displaySizes: placements.map { VideoCompositionFactory.displaySize(of: $0.format) })
         return Built(composition: composition, videoComposition: videoComposition,
                      audioMix: audioMix, layout: layout, outputSize: outputSize,
                      downscaledClipIDs: Set(downscaled.map { placements[$0].clip.id }),
-                     hasBackgroundAudio: backgroundTrack != nil)
+                     hasBackgroundAudio: backgroundTrack != nil,
+                     exportRestriction: exportRestriction)
     }
 
     /// BGM を専用トラック 1 本へ差し込む（E2）。

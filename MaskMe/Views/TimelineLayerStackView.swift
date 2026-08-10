@@ -100,12 +100,6 @@ struct TimelineLayerRailView: View {
     let visibleHeight: CGFloat
     let selectedKind: TimelineLayerRowKind?
     let onSelect: (TimelineLayerRowKind) -> Void
-    /// テキストの段に「＋」を足す導線（E3-3b）。**2 本目以降を追加する唯一の入口**
-    /// （空段のタップ＝`TimelineEmptyLayerRow`は 1 本目専用で、段が空でなくなると
-    /// 押せなくなる）。この行を横スクロールしない固定列（`TimelineLayerRailView`）に
-    /// 置くのは、テキストの帯が画面外へスクロールしていても常に押せるようにするため。
-    let onAddText: () -> Void
-
     var body: some View {
         VStack(spacing: TimelineMetrics.trackSpacing) {
             ForEach(kinds) { kind in
@@ -136,26 +130,5 @@ struct TimelineLayerRailView: View {
         // 人が読んでも「段の見出し」と「効果を開くボタン」は別物である。
         .accessibilityLabel("\(kind.title)の段")
         .accessibilityIdentifier("timeline.layerRail.\(kind.rawValue)")
-        .overlay(alignment: .topTrailing) {
-            if kind == .text { addTextBadge }
-        }
-    }
-
-    /// テキストの段アイコンの右上に乗せる小さな「＋」。**この段の当たり判定の内側へだけ
-    /// はみ出させる**（`RectangleHandleMath` 系のつまみと同じ理由: 中央揃えで隣の段へ
-    /// はみ出すと、隣の段のアイコンを押したつもりでテキストが増える事故になる）。
-    private var addTextBadge: some View {
-        Button(action: onAddText) {
-            Image(systemName: "plus.circle.fill")
-                .font(.system(size: 12, weight: .bold))
-                .symbolRenderingMode(.palette)
-                .foregroundStyle(.white, Color.accentColor)
-        }
-        .buttonStyle(.plain)
-        .frame(width: 22, height: 22)
-        .contentShape(Circle())
-        .offset(x: 6, y: -6)
-        .accessibilityLabel("テキストを追加")
-        .accessibilityIdentifier("timeline.layerRail.text.add")
     }
 }

@@ -80,6 +80,10 @@ targets:
       testTargets:
         - MaskMeTests
         - MaskMeUITests
+      # シミュレータで StoreKit の購入・復元を試すための構成ファイル（課金 P3b）。
+      # `storeKitConfiguration` は XcodeGen の Target Scheme で `run` アクションにのみ効く
+      # （`test` アクションには存在しないキー）。パスは schemePathPrefix 起点で解決される。
+      storeKitConfiguration: Products.storekit
 
   # OpenCV 疎 LK オプティカルフローのラッパー framework。
   # OpenCV を使ってよいのはこのターゲットだけ（公開 API は Foundation/UIKit 型のみ）。

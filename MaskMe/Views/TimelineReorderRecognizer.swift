@@ -13,6 +13,20 @@ import UIKit
 /// スクロールビュー自身に付ける名前。ここで受けたジェスチャの `location.x` は
 /// **可視領域左端からの px**（= 自動スクロールの入力）になり、`translation` は
 /// コンテンツの移動に影響されない純粋な指の移動量になる。
+///
+/// ## タイムラインのドラッグは必ずこの座標空間で受けること（`.local` は発振する）
+///
+/// クリップ帯のトリムつまみ・区間の端つまみ・区間本体は、いずれも**ドラッグの結果
+/// そのもので自分が動く**。既定の `.local` は「その View 自身の座標系」なので、
+/// 帯が縮んでつまみが戻ると `translation` もその分ずれてしまう。すると
+///
+///   指を動かす → 吸着が効いて帯が縮む → つまみが戻る →
+///   translation が変わって吸着が外れる → 帯が指の位置へ → つまみが動く → …
+///
+/// という**発振**になり、帯が 1 フレームおきに 2 つの位置を往復してちらつく。
+/// 実機のログで確定した挙動: 同じ指の動きに対して `translation` が -97 と -85 の
+/// **2 系列を交互に**取り、-85 側だけが吸着していた（`snap=16.425`）。
+/// **新しくドラッグを足すときも、対象が自分で動くなら必ずここを指定する。**
 enum TimelineCoordinateSpace {
     static let scroll = "timelineScroll"
 }
@@ -223,6 +237,19 @@ struct TimelineReorderRecognizer: UIViewRepresentable {
 
         /// **pan との同時認識を許す。** false だと長押し成立後に指を動かした瞬間
         /// どちらか一方しか生き残らず、並べ替えとスクロールのどちらかが死ぬ。
+        ///
+        /// ## トリムとの同時成立
+        ///
+        /// この recognizer は**スクロールビュー全体**に付いていて、ここが無条件 `true` を
+        /// 返し、`.began` の判定も「クリップ帯の bounds 内か」だけである。つまり
+        /// **端トリムのつまみを掴んだまま指を 0.3 秒止めると、長押しも成立し得る。**
+        /// そうなると帯の位置がトリムの伸縮と並べ替えの移動量の 2 通りで計算されるので、
+        /// `TimelineClipBandView` 側で `trimDraft != nil` のあいだは並べ替えを
+        /// 始めない・描かないようにしてある。
+        ///
+        /// **これはちらつきの原因ではなかった**（実機ログでは長押しは一度も成立して
+        /// おらず、真因は `TimelineCoordinateSpace` の doc にある `.local` の発振）。
+        /// 防御として妥当なので残している。
         func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
                                shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
             true

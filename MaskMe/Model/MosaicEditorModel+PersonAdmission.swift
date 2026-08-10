@@ -18,8 +18,14 @@ extension MosaicEditorModel {
     ///   絞り込みに掛かって素通しになる）。
     /// - この経路は `cacheStore` にも `liveFlowCache` にも一切書かない
     ///   （顔と空エントリの書き込みは `storeLiveDetection` が済ませている）。
+    ///
+    /// - Parameter faces: **素材フレーム基準**の顔（`detectedFaces[].landmarks` はこの座標系）。
+    /// - Parameter frameFaces: `frame`（合成フレーム）と同じ座標系の顔。サムネイルの
+    ///   切り出しにだけ使う。nil なら `faces` を使う（恒等レイアウトのテスト注入用）。
+    ///   `faces` と同じ順・同じ件数であること。
     @MainActor
-    func admitEmergingPersons(faces: [FaceLandmarkSet], signatures: [FaceSignature?],
+    func admitEmergingPersons(faces: [FaceLandmarkSet], frameFaces: [FaceLandmarkSet]? = nil,
+                              signatures: [FaceSignature?],
                               sourceID: UUID, sourceTime: Double, frame: UIImage) {
         let knownPersons = selectedPersonProfiles(of: detectedFaces)
         let admittedIndices = emergingPersonArbiter.observe(
@@ -27,20 +33,28 @@ extension MosaicEditorModel {
             sourceID: sourceID, sourceTime: sourceTime)
         guard !admittedIndices.isEmpty else { return }
 
+        let thumbnailFaces = (frameFaces?.count == faces.count ? frameFaces : nil) ?? faces
         for index in admittedIndices {
-            admitPerson(atIndex: index, faces: faces, signatures: signatures,
-                       sourceID: sourceID, frame: frame)
+            guard faces.indices.contains(index), signatures.indices.contains(index),
+                  let signature = signatures[index]
+            else { continue }
+            // サムネイルは `frame`（合成フレーム）から切り出すので、その座標系の顔を使う。
+            let thumbnailLandmarks = thumbnailFaces.indices.contains(index)
+                ? thumbnailFaces[index] : faces[index]
+            admitPerson(signature: signature, landmarks: faces[index],
+                        thumbnailLandmarks: thumbnailLandmarks,
+                        sourceID: sourceID, frame: frame)
         }
     }
 
     /// 1 人ぶんの確定を `detectedFaces` へ反映する。
+    ///
+    /// - Parameter landmarks: **素材フレーム基準**（`detectedFaces` へ載せる値）。
+    /// - Parameter thumbnailLandmarks: `frame` と同じ座標系（サムネイルの切り出し専用）。
     @MainActor
-    private func admitPerson(atIndex index: Int, faces: [FaceLandmarkSet],
-                             signatures: [FaceSignature?], sourceID: UUID, frame: UIImage) {
-        guard faces.indices.contains(index), signatures.indices.contains(index),
-              let signature = signatures[index]
-        else { return }
-
+    private func admitPerson(signature: FaceSignature, landmarks: FaceLandmarkSet,
+                             thumbnailLandmarks: FaceLandmarkSet,
+                             sourceID: UUID, frame: UIImage) {
         // 台帳へ登録する。nil（判断保留の帯）や、たまたま既存人物と一致した場合は
         // 追加を取りやめる——台帳と一覧の食い違い（同じ人物IDが2チップに割れる）を
         // 作らないため。
@@ -48,12 +62,11 @@ extension MosaicEditorModel {
               !detectedFaces.contains(where: { $0.personID == personID })
         else { return }
 
-        let landmarks = faces[index]
         // 新入りの初期検出率は「登場直後から満点」に見せる（0%だと「追えていない」
         // という誤ったサインになる）。`liveMatchCounts` 側の初期値と揃える。
         let initialRate: Double? = liveSampleCount > 0 ? 100 : nil
         let newTarget = FaceTarget(id: UUID(), landmarks: landmarks,
-                                   thumbnail: generateThumbnail(for: landmarks, from: frame),
+                                   thumbnail: generateThumbnail(for: thumbnailLandmarks, from: frame),
                                    isSelected: true, detectionRate: initialRate,
                                    sourceID: sourceID, personID: personID)
 

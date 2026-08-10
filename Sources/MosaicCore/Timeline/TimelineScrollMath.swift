@@ -350,10 +350,20 @@ public enum TimelineThumbnailPlanner {
                 band: CompositionInterval(start: layout.bandStart, end: layout.bandEnd),
                 geometry: geometry,
                 preferredSlotWidth: preferredSlotWidth,
-                sourceDuration: sourceDurations[clip.sourceID])
+                sourceDuration: sourceDurations[clip.sourceID],
+                gridQuantum: TimelineThumbnailLayout.defaultGridQuantum)
             let slotDuration = geometry.duration(forWidth: slots.slotWidth)
+            // **`leadingOffset` を必ず足すこと。** 枠は素材時刻の固定グリッドに貼るので、
+            // 先頭の枠は帯の左端より最大 1 セルぶん左へはみ出す（`slots` の doc）。
+            // これを落とすと枠の中心が実際より右に見積もられ、可視範囲の右端にある枠を
+            // 「範囲外」として要求から落とす（＝スクロールした先が灰色のまま残る）。
+            //
+            // **`duration(forWidth:)` に負値を渡さないこと。** 負の幅は 0 に潰される仕様なので
+            // （`TimelineGeometry.duration(forWidth:)`）、`leadingOffset` をそのまま渡すと
+            // 換算が常に 0 になり、この補正が黙って無効になる。符号は外に出して引く。
+            let gridStart = layout.bandStart - geometry.duration(forWidth: -slots.leadingOffset)
             for (slot, sourceTime) in slots.sourceTimes.enumerated() {
-                let slotCenter = layout.bandStart + (Double(slot) + 0.5) * slotDuration
+                let slotCenter = gridStart + (Double(slot) + 0.5) * slotDuration
                 guard slotCenter >= lower, slotCenter <= upper else { continue }
                 indexed.append((indexed.count,
                                 TimelineThumbnailSlotRequest(clipID: layout.clipID,

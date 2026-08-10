@@ -33,9 +33,21 @@ import SwiftUI
 struct VideoTimelineView: View {
     @ObservedObject var model: MosaicEditorModel
 
-    @StateObject var thumbnails = TimelineThumbnailStore()
+    /// サムネイルの倉庫。**`@StateObject` にしないこと（＝購読しないこと）。**
+    ///
+    /// この View は倉庫のメソッド（`setPlaying` / `setSuspended` / `reset` など）を
+    /// 呼ぶだけで、画像そのものは読まない。購読すると**コマが 1 枚届くたびに
+    /// タイムライン全体の body が作り直される**。実測では、帯を 90px ドラッグする間に
+    /// コマが 11 枚届き、そのたびに親が再評価されて **body の作り直しが 25 回**
+    /// 走っていた（指の追従は 11 回）。帯の位置が前後にちらつく実機報告の原因。
+    ///
+    /// 画像を読むのは `TimelineClipBandView` だけなので、購読はあちらの
+    /// `@ObservedObject` に閉じる（`trimPreviewRelay` と同じ設計）。
+    @State var thumbnails = TimelineThumbnailStore()
     /// 素材ごとの音声波形（`TimelineWaveformStore` の doc 参照。1 素材 1 回で終わる）。
-    @StateObject var waveforms = TimelineWaveformStore()
+    /// 音声波形の倉庫。`thumbnails` と同じ理由で**購読しない**
+    /// （この View は `reset()` を呼ぶだけ。波形を読むのは `TimelineClipBandView`）。
+    @State var waveforms = TimelineWaveformStore()
     @Environment(\.scenePhase) private var scenePhase
     @State var geometry = TimelineGeometry()
     @State var speedSheetClipID: UUID?
@@ -75,10 +87,6 @@ struct VideoTimelineView: View {
     /// キャッシュ済みも数えると、常に同じ順の `clipLayouts` の先頭 2 クリップが予算を
     /// 食い切り、3 本目以降が永久に要求されない。
     static let thumbnailRequestLimit = 120
-    /// 「モザイク区間」ボタンで足す区間の既定長（秒）。
-    /// `addApplyRangeAtPlayhead()`（`VideoTimelineLayerViewport.swift`）が参照するため
-    /// file-private にはできない。
-    static let defaultApplyRangeLength = 2.0
     /// サムネイル再要求のデバウンス（ナノ秒）。スクロール・ピンチ中は毎フレーム
     /// トリガが飛ぶので、指が止まってからまとめて 1 回だけ走査する。
     static let thumbnailRefreshDelay: UInt64 = 180_000_000
@@ -245,8 +253,7 @@ struct VideoTimelineView: View {
                     // 中身が未実装の段は押しても何もしない（`isImplemented`）。
                     guard kind.isImplemented else { return }
                     model.enterDock(.face)
-                },
-                onAddText: { showTextInputSheet = true })
+                })
         }
         // プレイヘッドは**スクロールしない層**に置き、可視領域の中央へ固定する
         // （`TimelinePlayheadView` の doc）。中身の側に置くと、シークとスクロールの
@@ -392,7 +399,7 @@ struct VideoTimelineView: View {
         model.trimClip(id: clipID, sourceStart: bounds.sourceStart, sourceEnd: bounds.sourceEnd)
     }
 
-    // `commitApplyEdge` / `commitApplyMove` / `reselectApplyRange` / `addApplyRangeAtPlayhead` は
+    // `commitApplyEdge` / `commitApplyMove` / `reselectApplyRange` は
     // file_length の都合で `VideoTimelineLayerViewport.swift` へ移してある
     // （あちらもレイヤー段の確定を扱うので境界として自然）。
 

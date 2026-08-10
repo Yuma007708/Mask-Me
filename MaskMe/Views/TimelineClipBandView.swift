@@ -150,7 +150,9 @@ struct TimelineClipBandView: View {
         // **当たり判定と印は `.offset` より前に置くこと。** 後ろだと当たり判定が元の位置に
         // 取り残され、2 本目以降が「見えているのに触れない」（`TimelineClipSelectionUITests`）。
         .contentShape(Rectangle())
-        .onTapGesture { selectedClipID = layout.clipID }
+        .onTapGesture {
+            selectedClipID = layout.clipID
+        }
         .overlay {
             Color.clear
                 .allowsHitTesting(false)
@@ -176,12 +178,18 @@ struct TimelineClipBandView: View {
                 band: CompositionInterval(start: band.start, end: band.end),
                 geometry: geometry,
                 preferredSlotWidth: Double(TimelineMetrics.thumbnailSlotWidth),
-                sourceDuration: model.sourceDuration(forClipID: layout.clipID))
+                sourceDuration: model.sourceDuration(forClipID: layout.clipID),
+                gridQuantum: TimelineThumbnailStore.bucketSeconds)
             HStack(spacing: 0) {
                 ForEach(0..<slots.count, id: \.self) { slot in
                     thumbnailSlot(layout, slots: slots, slot: slot)
                 }
             }
+            // 枠は素材時刻の固定グリッドに貼ってあるので、帯の左端とグリッドの先頭枠が
+            // ずれることがある（トリム中に帯幅が変わってもグリッドは動かない = ちらつき対策）。
+            // `leadingOffset` でそのずれぶんだけ左へ寄せ、`.clipped()` で帯の外へ
+            // はみ出したぶんを切る（無いと隣のクリップに被る）。
+            .offset(x: CGFloat(slots.leadingOffset))
             .frame(width: max(width, 2), height: TimelineMetrics.clipHeight, alignment: .leading)
             .clipped()
         } else {
@@ -218,30 +226,18 @@ struct TimelineClipBandView: View {
         // 写真素材は全フレーム同一なので素材時刻 0 に丸めて 1 枚を使い回す。
         let time = model.timeline.clampedSourceTime(slots.sourceTimes[slot], sourceID: layout.sourceID)
         let slotWidth = CGFloat(slots.slotWidth)
-        if let image = thumbnails.image(sourceID: layout.sourceID, sourceTime: time) {
-            Image(uiImage: image)
-                .resizable()
-                .scaledToFill()
-                .frame(width: slotWidth, height: TimelineMetrics.clipHeight)
-                .clipped()
-        } else {
-            placeholderSlot(width: slotWidth)
-        }
-    }
-
-    /// 未生成の枠。**黒一色にしない**（1 回の要求数には上限があり、上限で切り捨てられた枠が
-    /// 「読み込み中」と区別できなくなる。薄いグレー + アイコンで「コマがまだ無い」と分かる形にする）。
-    private func placeholderSlot(width: CGFloat) -> some View {
-        ZStack {
-            Rectangle()
-                .fill(Color.white.opacity(0.10))
-            if width >= 24 {
-                Image(systemName: "photo")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.white.opacity(0.28))
-            }
-        }
-        .frame(width: width, height: TimelineMetrics.clipHeight)
+        // **`.equatable()` で包む。** この帯は `model` を購読しているので、プレビューの
+        // 再描画・検出結果・再生位置といった**コマの絵と無関係な更新でも body が
+        // 作り直される**（実測: 帯を 90px ドラッグする間に model が 61 回変化し、
+        // 帯の再構築が 20 回走った）。画像と幅が同じなら描き直す必要は無いので、
+        // ここで止める。
+        //
+        // **包むのはこの葉だけにすること。** `@ObservedObject`（`thumbnails` /
+        // `trimPreviewRelay`）を持つ View を `.equatable()` で包むと、購読していた
+        // 更新が届かなくなる（コマが永久に出ない・トリムの追随が止まる）。
+        ThumbnailSlotView(image: thumbnails.image(sourceID: layout.sourceID, sourceTime: time),
+                          width: slotWidth)
+            .equatable()
     }
 
     // MARK: - トリム
@@ -280,8 +276,10 @@ struct TimelineClipBandView: View {
                            height: TimelineMetrics.clipHeight)
                     .contentShape(Rectangle())
             }
+            .accessibilityIdentifier(edge == .start ? "timeline.trimHandle.start" : "timeline.trimHandle.end")
+            // `coordinateSpace` は `.local` 禁止（`TimelineCoordinateSpace` の doc）。
             .highPriorityGesture(
-                DragGesture(minimumDistance: 1)
+                DragGesture(minimumDistance: 1, coordinateSpace: .named(TimelineCoordinateSpace.scroll))
                     .updating($trimDraft) { value, draft, _ in
                         if draft == nil { haptics.begin() }
                         let snapped = snappedTrimDelta(layout, edge: edge,
@@ -345,6 +343,7 @@ struct TimelineClipBandView: View {
     // MARK: - 並べ替え
 
     private func reorderTranslation(_ layout: TimelineClipLayout) -> Double? {
+        guard trimDraft == nil else { return nil }  // トリム中は並べ替えを描かない
         guard let draft = reorderDraft, draft.clipID == layout.clipID else { return nil }
         return draft.translationSeconds
     }
@@ -357,6 +356,7 @@ struct TimelineClipBandView: View {
     /// （クリップごとに当て板を置くと、短いクリップで領域が消える・進行中に frame が
     /// 変わるといった旧実装の不安定さがそのまま残る）。
     private func beginReorder(at location: CGPoint) {
+        guard trimDraft == nil else { return }  // トリム中は並べ替えを始めない
         guard let layout = reorderTarget(atContentX: Double(location.x)) else { return }
         reorderStartScrollOffset = autoScroll.scrollOffset
         reorderDraft = ReorderDraft(clipID: layout.clipID, translationSeconds: 0)

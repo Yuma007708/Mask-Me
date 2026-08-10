@@ -26,6 +26,11 @@ struct MaskMeApp: App {
                 // ディレクトリ列挙と削除は同期 IO なので、起動パスを塞がないよう
                 // バックグラウンドへ逃がす（結果は UI に影響しない）。
                 Task.detached(priority: .background) { TempMediaJanitor.sweep() }
+                // 課金権限（StoreKit）の初回観測と `Transaction.updates` 購読を開始する。
+                // `onAppear` は複数回呼ばれうるが、`start()` 自身が二重購読を防ぐ。
+                if let storeKitProvider = Entitlements.shared as? StoreKitEntitlementProvider {
+                    storeKitProvider.start()
+                }
             }
         }
     }

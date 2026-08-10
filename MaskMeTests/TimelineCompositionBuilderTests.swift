@@ -147,7 +147,7 @@ final class TimelineCompositionBuilderTests: XCTestCase {
         let built = try await TimelineCompositionBuilder().build(
             clips: [clip], audioItems: [item],
             sources: [videoSource: AVURLAsset(url: videoURL),
-                      audioSource: AVURLAsset(url: audioURL)])
+                      audioSource: AVURLAsset(url: audioURL)], isPro: true)
 
         XCTAssertTrue(built.hasBackgroundAudio, "BGM を置いたのに hasBackgroundAudio が false")
         let audioTracks = built.composition.tracks(withMediaType: .audio)
@@ -191,7 +191,7 @@ final class TimelineCompositionBuilderTests: XCTestCase {
         let built = try await TimelineCompositionBuilder().build(
             clips: [clip], audioItems: [item],
             sources: [videoSource: AVURLAsset(url: videoURL),
-                      audioSource: AVURLAsset(url: audioURL)])
+                      audioSource: AVURLAsset(url: audioURL)], isPro: true)
 
         XCTAssertTrue(built.hasBackgroundAudio)
         let filled = built.composition.tracks(withMediaType: .audio)[0]
@@ -219,7 +219,7 @@ final class TimelineCompositionBuilderTests: XCTestCase {
         let built = try await TimelineCompositionBuilder().build(
             clips: [clip], audioItems: [item],
             sources: [videoSource: AVURLAsset(url: videoURL),
-                      audioSource: AVURLAsset(url: silentURL)])
+                      audioSource: AVURLAsset(url: silentURL)], isPro: true)
 
         XCTAssertFalse(built.hasBackgroundAudio, "音声の無い素材を BGM として載せている")
         XCTAssertTrue(built.composition.tracks(withMediaType: .audio).isEmpty,
@@ -235,7 +235,7 @@ final class TimelineCompositionBuilderTests: XCTestCase {
         let clip = TimelineClip(sourceID: videoSource, sourceStart: 0, sourceEnd: 2)
 
         let built = try await TimelineCompositionBuilder().build(
-            clips: [clip], sources: [videoSource: AVURLAsset(url: videoURL)])
+            clips: [clip], sources: [videoSource: AVURLAsset(url: videoURL)], isPro: true)
 
         XCTAssertFalse(built.hasBackgroundAudio)
         XCTAssertNil(built.audioMix, "BGM が無いのに audioMix が付いた（パススルーが効かなくなる）")
@@ -251,7 +251,7 @@ final class TimelineCompositionBuilderTests: XCTestCase {
         let clip = TimelineClip(sourceID: sourceID, sourceStart: 0, sourceEnd: 2)
         let builder = TimelineCompositionBuilder()
         let composition = try await builder.build(
-            clips: [clip], sources: [sourceID: AVURLAsset(url: url)]).composition
+            clips: [clip], sources: [sourceID: AVURLAsset(url: url)], isPro: true).composition
 
         let duration = try await composition.load(.duration)
         XCTAssertEqual(CMTimeGetSeconds(duration), 2.0, accuracy: 0.15)
@@ -270,7 +270,7 @@ final class TimelineCompositionBuilderTests: XCTestCase {
         let second = TimelineClip(sourceID: sourceID, sourceStart: 2, sourceEnd: 3)
 
         let composition = try await TimelineCompositionBuilder()
-            .build(clips: [first, second], sources: sources).composition
+            .build(clips: [first, second], sources: sources, isPro: true).composition
 
         let duration = try await composition.load(.duration)
         XCTAssertEqual(CMTimeGetSeconds(duration), 2.0, accuracy: 0.15)
@@ -280,7 +280,7 @@ final class TimelineCompositionBuilderTests: XCTestCase {
     func test_missingSourceThrows() async throws {
         let clip = TimelineClip(sourceID: UUID(), sourceStart: 0, sourceEnd: 1)
         do {
-            _ = try await TimelineCompositionBuilder().build(clips: [clip], sources: [:]).composition
+            _ = try await TimelineCompositionBuilder().build(clips: [clip], sources: [:], isPro: true).composition
             XCTFail("素材欠落を検出できていない")
         } catch TimelineCompositionBuilder.BuildError.missingSource {
             // 期待どおり
@@ -297,7 +297,7 @@ final class TimelineCompositionBuilderTests: XCTestCase {
         let sourceID = UUID()
         let clip = TimelineClip(sourceID: sourceID, sourceStart: 0, sourceEnd: 2, rate: 0.5)
         let composition = try await TimelineCompositionBuilder()
-            .build(clips: [clip], sources: [sourceID: AVURLAsset(url: url)]).composition
+            .build(clips: [clip], sources: [sourceID: AVURLAsset(url: url)], isPro: true).composition
 
         let duration = try await composition.load(.duration)
         XCTAssertEqual(CMTimeGetSeconds(duration), 4.0, accuracy: 0.15,
@@ -312,7 +312,7 @@ final class TimelineCompositionBuilderTests: XCTestCase {
         let sourceID = UUID()
         let clip = TimelineClip(sourceID: sourceID, sourceStart: 0, sourceEnd: 2, rate: 2.0)
         let composition = try await TimelineCompositionBuilder()
-            .build(clips: [clip], sources: [sourceID: AVURLAsset(url: url)]).composition
+            .build(clips: [clip], sources: [sourceID: AVURLAsset(url: url)], isPro: true).composition
 
         let duration = try await composition.load(.duration)
         XCTAssertEqual(CMTimeGetSeconds(duration), 1.0, accuracy: 0.15,
@@ -332,7 +332,7 @@ final class TimelineCompositionBuilderTests: XCTestCase {
         let fast = TimelineClip(sourceID: sourceID, sourceStart: 1, sourceEnd: 3, rate: 2.0)
 
         let composition = try await TimelineCompositionBuilder()
-            .build(clips: [normal, fast], sources: sources).composition
+            .build(clips: [normal, fast], sources: sources, isPro: true).composition
 
         let duration = try await composition.load(.duration)
         XCTAssertEqual(CMTimeGetSeconds(duration), 2.0, accuracy: 0.15)
@@ -364,7 +364,7 @@ final class TimelineCompositionBuilderTests: XCTestCase {
             TimelineClip(sourceID: smallID, sourceStart: 0, sourceEnd: 1),
             TimelineClip(sourceID: largeID, sourceStart: 0, sourceEnd: 1)
         ]
-        let built = try await TimelineCompositionBuilder().build(clips: clips, sources: sources)
+        let built = try await TimelineCompositionBuilder().build(clips: clips, sources: sources, isPro: true)
 
         let duration = try await built.composition.load(.duration)
         XCTAssertEqual(CMTimeGetSeconds(duration), 2.0, accuracy: 0.15,
@@ -392,7 +392,7 @@ final class TimelineCompositionBuilderTests: XCTestCase {
         let built = try await TimelineCompositionBuilder().build(
             clips: [TimelineClip(sourceID: sourceID, sourceStart: 0, sourceEnd: 1),
                     TimelineClip(sourceID: sourceID, sourceStart: 1, sourceEnd: 2)],
-            sources: [sourceID: AVURLAsset(url: url)])
+            sources: [sourceID: AVURLAsset(url: url)], isPro: true)
         XCTAssertNil(built.videoComposition, "無変換構成に videoComposition が装着された")
         XCTAssertNil(built.audioMix, "無変換構成に audioMix が装着された")
         XCTAssertEqual(built.layout, .identity)
@@ -414,7 +414,7 @@ final class TimelineCompositionBuilderTests: XCTestCase {
 
         let built = try await TimelineCompositionBuilder().build(
             clips: [first, second], transitions: transitions,
-            sources: [sourceID: AVURLAsset(url: url)])
+            sources: [sourceID: AVURLAsset(url: url)], isPro: true)
 
         let tracks = try await built.composition.loadTracks(withMediaType: .video)
         XCTAssertEqual(tracks.count, 2, "トランジションがあるのに単一トラックのまま（重なりを表現できない）")
@@ -443,7 +443,7 @@ final class TimelineCompositionBuilderTests: XCTestCase {
             clips[1].id: TransitionSpec(kind: .wipeLeft, duration: 0.4)
         ]
         let built = try await TimelineCompositionBuilder().build(
-            clips: clips, transitions: transitions, sources: [sourceID: AVURLAsset(url: url)])
+            clips: clips, transitions: transitions, sources: [sourceID: AVURLAsset(url: url)], isPro: true)
         let videoComposition = try XCTUnwrap(built.videoComposition)
         let instructions = videoComposition.instructions
         XCTAssertGreaterThan(instructions.count, 3, "重なりのランプ分割点で instruction が割れていない")
@@ -486,7 +486,7 @@ final class TimelineCompositionBuilderTests: XCTestCase {
         let silent = try await TimelineCompositionBuilder().build(
             clips: [first, second],
             transitions: [first.id: TransitionSpec(kind: .crossfade, duration: 0.5)],
-            sources: [sourceID: AVURLAsset(url: url)])
+            sources: [sourceID: AVURLAsset(url: url)], isPro: true)
         XCTAssertNil(silent.audioMix, "音声が 1 本も無いのに audioMix が付いている")
 
         // 音量調整だけ（トランジション無し）でも audioMix が要る
@@ -510,7 +510,7 @@ final class TimelineCompositionBuilderTests: XCTestCase {
         let composition = try await TimelineCompositionBuilder().build(
             clips: [TimelineClip(sourceID: firstID, sourceStart: 0, sourceEnd: 1),
                     TimelineClip(sourceID: secondID, sourceStart: 0, sourceEnd: 1)],
-            sources: [firstID: AVURLAsset(url: firstURL), secondID: AVURLAsset(url: secondURL)]).composition
+            sources: [firstID: AVURLAsset(url: firstURL), secondID: AVURLAsset(url: secondURL)], isPro: true).composition
 
         let duration = try await composition.load(.duration)
         XCTAssertEqual(CMTimeGetSeconds(duration), 2.0, accuracy: 0.15)
