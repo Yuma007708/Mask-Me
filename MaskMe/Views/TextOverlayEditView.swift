@@ -124,7 +124,7 @@ struct TextOverlayEditView: View {
             .position(x: shown.x, y: shown.y)
             .accessibilityElement(children: .contain)
             .accessibilityIdentifier("editor.text.item")
-            .accessibilityLabel("テキスト: \(item.text)")
+            .accessibilityLabel(item.role == .sticker ? "ステッカー: \(item.text)" : "テキスト: \(item.text)")
             .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
     }
 

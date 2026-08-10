@@ -151,6 +151,29 @@ extension MosaicEditorModel {
         applyTimelineEdit { $0.flippingClipHorizontally(clipID: id) }
     }
 
+    /// 指定クリップの色調補正（明るさ・コントラスト・彩度・暖かみ）を設定する（P4）。
+    ///
+    /// `applyTimelineEdit` 経由なので undo/redo（`EditSnapshot.timeline`）と下書き
+    /// （`TimelineState` の Codable）にそのまま載る。色調補正は合成尺・composition の
+    /// 構造（トランジション・レターボックス）を一切変えないが、`TimelineStateColorGradeEditing`
+    /// の doc どおり `applyTimelineEdit` を通す規約に揃える（他の設定系 API と同じ理由）。
+    public func setColorGrade(clipID: UUID, _ colorGrade: ColorGrade) {
+        applyTimelineEdit { $0.settingColorGrade(clipID: clipID, colorGrade: colorGrade) }
+    }
+
+    /// 現在のタイムラインの**すべての**クリップへ同じ色調補正を適用する（P4）。
+    ///
+    /// **1 回の `applyTimelineEdit` にまとめる。** クリップごとに `setColorGrade` を
+    /// 繰り返し呼ぶと、クリップ数だけ composition 再構築と undo エントリが積まれる
+    /// （「すべてのクリップに適用」ボタン 1 回の操作が undo で 1 回に戻らなくなる）。
+    public func applyColorGradeToAllClips(_ colorGrade: ColorGrade) {
+        applyTimelineEdit { state in
+            state.clips.reduce(state) { partial, clip in
+                partial.settingColorGrade(clipID: clip.id, colorGrade: colorGrade)
+            }
+        }
+    }
+
     /// 素材IDに対応するローカルファイル URL（サムネイル生成用）。
     ///
     /// load / 下書き復元 / 写真クリップ追加の経路の asset は常に `AVURLAsset` である。
@@ -417,11 +440,17 @@ extension MosaicEditorModel {
             .filter { sourcesSnapshot[$0.sourceID] != nil }
         // 出力の画面比率も await を跨ぐ前に閉じ込める（他のスナップショットと同じ理由）。
         let aspectRatioSnapshot = timeline.aspectRatio
+        let muteRangesSnapshot = timeline.clipAudioMuteRanges
+        // BGM ダッキング（E2-3）の根拠も他のスナップショットと同じ位置（await を跨ぐ前）で
+        // 閉じ込める（`TimelineCompositionBuilder.build(clipDuckRanges:)` の doc 参照）。
+        let duckRangesSnapshot = timeline.clipDuckRanges
         do {
             let built = try await TimelineCompositionBuilder()
                 .build(clips: clipsSnapshot, transitions: transitionsSnapshot,
                        audioItems: audioItemsSnapshot, sources: sourcesSnapshot,
                        aspectRatio: aspectRatioSnapshot,
+                       clipAudioMuteRanges: muteRangesSnapshot,
+                       clipDuckRanges: duckRangesSnapshot,
                        isPro: entitlements.isPro)
             guard generation == timelineGeneration else { return }  // 古い世代の結果は破棄
             apply(built: built, generation: generation)

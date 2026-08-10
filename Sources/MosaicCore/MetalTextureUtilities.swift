@@ -217,5 +217,22 @@ extension MosaicRenderer {
         renderText(input: input, into: output, textTexture: textTexture, layout: layout, waitForCompletion: true)
         return output
     }
+
+    /// `grade` の色調補正を適用し、新規テクスチャを返す。
+    ///
+    /// **呼び出し側が `grade.isIdentity` を見て呼ぶかどうかを決めること**
+    /// （`renderColorGrade` の doc 参照）。ここは常に 1 パス発行する
+    /// （出力テクスチャの確保に失敗したら nil）。
+    @discardableResult
+    public func renderColorGradeToNewTexture(
+        input: MTLTexture,
+        grade: ColorGrade
+    ) -> MTLTexture? {
+        guard let output = MetalTextureUtilities.makeOutputTexture(like: input, device: device) else {
+            return nil
+        }
+        renderColorGrade(input: input, into: output, grade: grade, waitForCompletion: true)
+        return output
+    }
 }
 #endif

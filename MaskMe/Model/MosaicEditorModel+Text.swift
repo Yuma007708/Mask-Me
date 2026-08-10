@@ -77,6 +77,26 @@ extension MosaicEditorModel {
     /// 新規テキストの既定の長さ（秒）。プレイヘッド位置に置いたとき、指で伸縮しなくても
     /// 掴んで動かせる幅を確保する。
     public static let defaultTextDuration: Double = 3.0
+
+    // MARK: - ステッカー（絵文字の重ね、S12）
+
+    /// ステッカー（絵文字 1 個）を 1 本追加する（UI からの入口）。
+    ///
+    /// **活性条件・置く場所は `addTextItem` と同じ。** ツールバー・空段どちらの入口も
+    /// 同じシート（`TimelineTextInputSheet`）を通るため、文字とステッカーで判定を
+    /// 割らない。書記素クラスタ 1 個への切り詰めはコア層
+    /// （`TimelineState.addingStickerItem` → `normalizedTextItems`）が行うので、
+    /// ここでは前後の空白を落として空かどうかだけを見る。
+    public func addStickerItem(_ emoji: String, atCompositionTime start: Double,
+                               duration: Double = MosaicEditorModel.defaultTextDuration) {
+        guard mode == .video, !timeline.clips.isEmpty else {
+            errorMessage = "動画の読み込みが完了してからステッカーを追加してください"
+            return
+        }
+        let trimmed = emoji.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        applyTimelineEdit { $0.addingStickerItem(trimmed, atCompositionTime: start, duration: duration) }
+    }
 }
 
 #endif

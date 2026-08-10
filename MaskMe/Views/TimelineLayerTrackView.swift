@@ -9,19 +9,23 @@ import UIKit
 /// `default` 無しで網羅しているため対応漏れがビルドで検出できる
 /// （`TimelineSelection.prune` と同じ考え方。`TimelineLayerKind` の doc 参照）。
 enum TimelineLayerAppearance {
-    static func label(for kind: TimelineLayerKind) -> String {
+    /// `isSticker` は `.text` の段でだけ意味を持つ（`TimelineApplySpan` は中身を
+    /// 持たないので、呼び出し側 = `TimelineLayerTrackView` が `rangeID` を
+    /// `model.timeline.textItems` の `id` で引いて渡す。`TimelineApplySpan` に
+    /// 表示専用フィールドを生やさない、という設計判断は doc 参照）。
+    static func label(for kind: TimelineLayerKind, isSticker: Bool = false) -> String {
         switch kind {
         case .mosaic: return "モザイク"
         case .audio: return "音楽"
-        case .text: return "テキスト"
+        case .text: return isSticker ? "ステッカー" : "テキスト"
         }
     }
 
-    static func systemImage(for kind: TimelineLayerKind) -> String {
+    static func systemImage(for kind: TimelineLayerKind, isSticker: Bool = false) -> String {
         switch kind {
         case .mosaic: return "squareshape.split.3x3"
         case .audio: return "music.note"
-        case .text: return "textformat"
+        case .text: return isSticker ? "face.smiling" : "textformat"
         }
     }
 
@@ -108,6 +112,14 @@ struct TimelineLayerTrackView: View {
     /// 段送りの算術は 1 箇所（`TimelineLayerScrollMath`）に保ったまま見え方を合わせる。
     let onVerticalDrag: (CGFloat) -> Void
     let onVerticalDragEnded: () -> Void
+    /// `.text` の段の帯ラベルを「テキスト」「ステッカー」へ出し分けるための材料。
+    ///
+    /// **`TimelineApplySpan` には表示専用フィールドを足さない。** `.mosaic` / `.audio`
+    /// にとって無意味なフィールドを型に生やすと、その 2 種の呼び出し側が常に
+    /// ダミー値を渡す羽目になる。代わりにこの View 側が `span.rangeID`（＝
+    /// `TextItem.id`）で `model.timeline.textItems` を引く。`.mosaic` / `.audio` の
+    /// 段では既定の空配列のままでよい。
+    var textItems: [TextItem] = []
 
     @GestureState private var draft: ApplyDraft?
     @GestureState private var moveState: MoveGestureState?
@@ -200,7 +212,7 @@ struct TimelineLayerTrackView: View {
             // つまみの識別子（`timeline.applySpan.handle.*`）が外から見えなくなる。
             // UI テストがつまみを掴めず「選択できていない」と誤読する。
             .accessibilityIdentifier("timeline.applySpan")
-            .accessibilityLabel("\(TimelineLayerAppearance.label(for: span.kind))区間")
+            .accessibilityLabel("\(TimelineLayerAppearance.label(for: span.kind, isSticker: isSticker(span)))区間")
             .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
             .overlay(alignment: .leading) { chipLabel(span, width: width, isSelected: isSelected) }
             .overlay(alignment: .leading) {
@@ -269,8 +281,9 @@ struct TimelineLayerTrackView: View {
     @ViewBuilder
     private func chipLabel(_ span: TimelineApplySpan, width: CGFloat, isSelected: Bool) -> some View {
         let leading = (isSelected ? TimelineMetrics.handleWidth : 0) + 4
-        let label = TimelineLayerAppearance.label(for: span.kind)
-        let systemImage = TimelineLayerAppearance.systemImage(for: span.kind)
+        let sticker = isSticker(span)
+        let label = TimelineLayerAppearance.label(for: span.kind, isSticker: sticker)
+        let systemImage = TimelineLayerAppearance.systemImage(for: span.kind, isSticker: sticker)
         if width >= leading + 52 {
             Label(label, systemImage: systemImage)
                 .font(TimelinePalette.badgeFont)
@@ -409,6 +422,13 @@ struct TimelineLayerTrackView: View {
             span: span, kind: kind, translationPixels: translation, context: context)
         return (ApplyDraft(rangeID: span.rangeID, clipID: span.anchorClipID,
                            start: result.start, end: result.end), result.snappedTo)
+    }
+
+    /// `span` がステッカー（`TextItemRole.sticker`）かどうか。`.mosaic` / `.audio` は
+    /// 常に false（`rangeID` が `TextItem.id` ではないので引く意味が無い）。
+    private func isSticker(_ span: TimelineApplySpan) -> Bool {
+        guard span.kind == .text else { return false }
+        return textItems.first(where: { $0.id == span.rangeID })?.role == .sticker
     }
 
     private func displayBounds(_ span: TimelineApplySpan) -> (start: Double, end: Double) {

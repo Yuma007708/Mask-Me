@@ -39,7 +39,46 @@ final class ObjectMaskEditOperationsTests: XCTestCase {
         return (result[0], result[1])
     }
 
+    /// 傾きを持つマスク（x は動かさず、角度だけ 0.5 rad で一定）。
+    private func tiltedMask(clipID: UUID, angle: Double = 0.5) -> ObjectMask {
+        ObjectMask(id: UUID(), anchor: .clip(clipID: clipID, sourceID: sourceID),
+                   keyframes: [ObjectMask.Keyframe(sourceTime: 0, rect: rect(x: 0.4), angle: angle),
+                               ObjectMask.Keyframe(sourceTime: 10, rect: rect(x: 0.4), angle: angle)])!
+    }
+
     // MARK: - 本丸: 分割で見え方が変わらない
+
+    /// **分割で矩形の傾きが落ちないこと。**
+    ///
+    /// 境界のキーフレームを `angle` 無しで作ると、`Keyframe.init` の既定 0 が入り、
+    /// 分割点の前後で矩形が**無回転へ戻る**。傾けた矩形は「検出が効かない斜めの顔」を
+    /// 手で隠すために置くものなので、無回転に戻ると顔からずれて**素通しになる**。
+    /// 位置（`rect`）だけを見る既存テストはこの欠落を捕まえられない。
+    func test_分割しても矩形の傾きが変わらない() throws {
+        let clipID = UUID()
+        let mask = tiltedMask(clipID: clipID)
+        let parts = try XCTUnwrap(split(mask, at: 3))
+
+        for t in stride(from: 0.0, through: 10.0, by: 0.25) {
+            let expected = mask.angle(atSourceTime: t)
+            let actual = t < 3 ? parts.front.angle(atSourceTime: t) : parts.back.angle(atSourceTime: t)
+            XCTAssertEqual(actual, expected, accuracy: 1e-9,
+                           "素材時刻 \(t) で分割前後の傾きが違う（矩形が無回転へ戻っている）")
+        }
+    }
+
+    /// 写真クリップの分割でも傾きが落ちないこと（`photoSplit` は
+    /// `ObjectMask.single` を使っており、角度を渡す口が無かった）。
+    func test_写真クリップを分割しても矩形の傾きが変わらない() throws {
+        let clipID = UUID()
+        let mask = tiltedMask(clipID: clipID)
+        let parts = try XCTUnwrap(split(mask, at: 3, isPhoto: true))
+
+        XCTAssertEqual(parts.front.angle(atSourceTime: 0), 0.5, accuracy: 1e-9,
+                       "写真の分割で前半の傾きが落ちた")
+        XCTAssertEqual(parts.back.angle(atSourceTime: 0), 0.5, accuracy: 1e-9,
+                       "写真の分割で後半の傾きが落ちた")
+    }
 
     /// **分割前後で全時刻の矩形が一致する。**
     ///

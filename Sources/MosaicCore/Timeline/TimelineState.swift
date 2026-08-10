@@ -32,6 +32,16 @@ public struct TimelineState: Codable, Equatable, Sendable {
     /// したがって区間 0 本は「まだ何も掛けていない」か「ユーザーが全部消した」のどちらかで、
     /// **どちらも掛けない意図として同じに扱ってよい**。
     public var applyRanges: [MosaicApplyRange]
+    /// クリップ内の元音声を消音する区間（`clipID` + 素材時刻アンカー）。
+    ///
+    /// **空なら消音なし（全区間で元の音量が鳴る）**。`applyRanges` と意味が逆であることに
+    /// 注意（`ClipAudioMuteRange` 型の doc 参照）。新規クリップに自動で消音区間を配る
+    /// 生成器は無い（`fullCoverRange` に相当するものは存在しない）ので、区間 0 本は
+    /// 「まだ誰も触っていない」以外の意味を持たない。
+    public var clipAudioMuteRanges: [ClipAudioMuteRange]
+    /// クリップ内で声が鳴っていると検出された素材時刻区間（BGM ダッキングの根拠。`ClipDuckRange` 型 doc 参照）。
+    /// `clipAudioMuteRanges` と同じ追従規則。対話編集の入口は無く `AudioDuckingDetector` の生成結果を保持する。
+    public var clipDuckRanges: [ClipDuckRange]
     /// BGM（E2）。**合成時刻アンカー**で、`compositionStart` 昇順・互いに重ならない
     /// （不変条件 I-A1。正規化は `normalizedAudioItems`）。
     ///
@@ -45,8 +55,8 @@ public struct TimelineState: Codable, Equatable, Sendable {
     /// BGM と違い**重なってよい**（複数の文字を同時に出せる）。重なりを禁じる理由が
     /// 無いためで、描画は `textItems` の順（＝ `compositionStart` 昇順）に重ねる。
     ///
-    /// クリップを消して合成尺が縮んだときの扱いは BGM と同じ（データは温存し、
-    /// 表示と描画は `effectiveTextItems(totalDuration:)` だけを見る）。
+    /// クリップを消して合成尺が縮んだときの扱いは BGM と同じ（データは温存し、表示と
+    /// 描画は `effectiveTextItems(totalDuration:)` だけを見る）。役割は `TextItem.role`。
     public var textItems: [TextItem]
     /// 素材メタ情報（キーは素材ID = `TimelineClip.sourceID` または `AudioItem.sourceID`）。
     /// エントリが無い素材は動画（`TimelineSource.Kind.video`）として扱う
@@ -60,14 +70,15 @@ public struct TimelineState: Codable, Equatable, Sendable {
     /// **同時に**決める。両者は `apply(built:generation:)` で必ず組で差し替わるので、
     /// 「プレビューだけ比率が変わる／書き出しだけ変わる」は構造上起こらない。
     ///
-    /// 座標系への影響は `TimelineAspectRatio` の doc を参照（素材は切り取らず、
-    /// レターボックスで縮んだぶんは `TimelineRenderLayout.remap` が顔座標側にも同じ写像を
-    /// 掛ける）。
+    /// 座標系への影響は `TimelineAspectRatio` の doc を参照（素材は切り取らず、レターボックスで
+    /// 縮んだぶんは `TimelineRenderLayout.remap` が顔座標側にも同じ写像を掛ける）。
     public var aspectRatio: TimelineAspectRatio
 
     public init(clips: [TimelineClip] = [],
                 transitions: [UUID: TransitionSpec] = [:],
                 applyRanges: [MosaicApplyRange] = [],
+                clipAudioMuteRanges: [ClipAudioMuteRange] = [],
+                clipDuckRanges: [ClipDuckRange] = [],
                 audioItems: [AudioItem] = [],
                 textItems: [TextItem] = [],
                 sources: [UUID: TimelineSource] = [:],
@@ -77,6 +88,8 @@ public struct TimelineState: Codable, Equatable, Sendable {
         self.clips = clips
         self.transitions = transitions
         self.applyRanges = applyRanges
+        self.clipAudioMuteRanges = clipAudioMuteRanges
+        self.clipDuckRanges = clipDuckRanges
         self.sources = sources
         self.aspectRatio = aspectRatio
     }
@@ -96,7 +109,19 @@ public struct TimelineState: Codable, Equatable, Sendable {
     /// - v5: `aspectRatio`（出力の画面比率）を追加。**v4 以前の JSON はキーが無いので
     ///   `.source`（素材に合わせる ＝ 従来挙動）として復元する**。既存キーの意味は
     ///   変えていないので移行処理は要らない。
-    public static let currentSchemaVersion = 5
+    /// - v6: `TextItem.role`（`.text` / `.sticker`）と `clipAudioMuteRanges`
+    ///   （クリップ内消音区間）を追加。どちらもキーの有無だけで後方互換を取る
+    ///   （`role` は無い・未知の文字列なら `.text`、消音区間は無ければ空配列）ので
+    ///   移行処理は要らない。**この 2 つは別ブランチで実装され、マージで同じ版へ
+    ///   合流した**（片方だけを見て「v6 = ステッカー」と読まないこと）。
+    /// - v7: `TimelineClip.colorGrade`（色調補正）と、`clipDuckRanges` /
+    ///   `AudioItem.duckingGain`（BGM ダッキング）を追加。**v6 と同じく別ブランチで
+    ///   実装され、マージで同じ版へ合流した**（片方だけを見て「v7 = 色調補正」と読まないこと）。
+    ///   `colorGrade` は `TimelineState` のトップレベルキーではなく `TimelineClip` 自身の
+    ///   Codable にキーが増えただけなので `TimelineStateCodable` 側の移行処理は要らない
+    ///   （`orientation` と同じ規約。キーが無い v6 以前の下書きは `ColorGrade.identity` =
+    ///   無補正で復元される）。ダッキング側もキーの有無だけで後方互換を取る。
+    public static let currentSchemaVersion = 7
 
     // MARK: - 素材種別（写真クリップの時刻規則）
 
@@ -230,11 +255,19 @@ public struct TimelineState: Codable, Equatable, Sendable {
         }
         // 分割点の素材時刻 = 後半クリップの sourceStart（`TimelineEditOperations.split`）。
         // 写真クリップは分割せず前後へ「全体を覆う区間」を配る（`isPhoto`）。
+        let isPhoto = sourceKind(of: front.sourceID) == .photo
         let newRanges = MosaicApplyGate.ranges(splittingClip: front, into: back,
                                                atSourceTime: back.sourceStart,
-                                               isPhoto: sourceKind(of: front.sourceID) == .photo,
+                                               isPhoto: isPhoto,
                                                existing: applyRanges)
-        let state = replacing(clips: newClips, transitions: newTransitions, applyRanges: newRanges)
+        // 消音区間も同じ境界規則で前後へ振り分ける（`ClipAudioMuteRange` 型 doc 参照）。
+        let newMuteRanges = ClipAudioMuteGate.ranges(splittingClip: front, into: back,
+                                                     atSourceTime: back.sourceStart,
+                                                     isPhoto: isPhoto,
+                                                     existing: clipAudioMuteRanges)
+        let newDuckRanges = duckRanges(splittingFront: front, into: back, isPhoto: isPhoto)
+        let state = replacing(clips: newClips, transitions: newTransitions, applyRanges: newRanges,
+                              clipAudioMuteRanges: newMuteRanges, clipDuckRanges: newDuckRanges)
             .normalizingTransitions()
         return TimelineEdit(state, lineage: [.split(front: front.id, back: back.id)])
     }
@@ -255,7 +288,11 @@ public struct TimelineState: Codable, Equatable, Sendable {
             newTransitions.removeValue(forKey: clips[index - 1].id)
         }
         let newRanges = MosaicApplyGate.ranges(removingClipID: clipID, from: applyRanges)
-        return replacing(clips: newClips, transitions: newTransitions, applyRanges: newRanges)
+        // そのクリップの消音区間も消す（`clipID` は復活しないため。適用区間と同じ理由）。
+        let newMuteRanges = ClipAudioMuteGate.ranges(removingClipID: clipID, from: clipAudioMuteRanges)
+        let newDuckRanges = duckRanges(removingClipID: clipID)
+        return replacing(clips: newClips, transitions: newTransitions, applyRanges: newRanges,
+                         clipAudioMuteRanges: newMuteRanges, clipDuckRanges: newDuckRanges)
     }
 
     /// 指定したクリップを `toIndex` の位置へ並べ替える。
@@ -323,12 +360,14 @@ public struct TimelineState: Codable, Equatable, Sendable {
         let newClips = TimelineEditOperations.trim(clips: clips, clipID: clipID,
                                                    sourceStart: sourceStart, sourceEnd: sourceEnd)
         guard newClips != clips else { return self }
-        var newRanges: [MosaicApplyRange]?
-        if let trimmed = newClips.first(where: { $0.id == clipID }),
-           sourceKind(of: trimmed.sourceID) == .photo {
-            newRanges = MosaicApplyGate.ranges(trimmingPhotoClip: trimmed, existing: applyRanges)
+        let trimmedPhoto = newClips.first { $0.id == clipID && sourceKind(of: $0.sourceID) == .photo }
+        let newRanges = trimmedPhoto.map { MosaicApplyGate.ranges(trimmingPhotoClip: $0, existing: applyRanges) }
+        let newMuteRanges = trimmedPhoto.map {
+            ClipAudioMuteGate.ranges(trimmingPhotoClip: $0, existing: clipAudioMuteRanges)
         }
-        return replacing(clips: newClips, transitions: transitions, applyRanges: newRanges)
+        let newDuckRanges = trimmedPhoto.map { duckRanges(trimmingPhotoClip: $0) }
+        return replacing(clips: newClips, transitions: transitions, applyRanges: newRanges,
+                         clipAudioMuteRanges: newMuteRanges, clipDuckRanges: newDuckRanges)
             .normalizingTransitions()
     }
 
@@ -353,40 +392,6 @@ public struct TimelineState: Codable, Equatable, Sendable {
         let newClips = TimelineEditOperations.setVolume(clips: clips, clipID: clipID, volume: volume)
         guard newClips != clips else { return self }
         return replacing(clips: newClips, transitions: transitions)
-    }
-
-    /// 指定したクリップの向き（90 度単位の回転 + 左右反転）を設定する。
-    ///
-    /// **`normalizingTransitions()` は通さない**（`settingVolume` と同じ理由。向きは
-    /// 合成尺 `duration` を一切変えないので、トランジションのクランプ条件に影響しない）。
-    /// 適用区間にも何もしない（素材時刻アンカーなので、向きを変えても「素材のどこに
-    /// モザイクを掛けるか」は変わらない。変わるのは**画面のどこに出るか**だけで、
-    /// それは `TimelineRenderLayout` の写像が担当する）。
-    public func settingOrientation(clipID: UUID, orientation: ClipOrientation) -> TimelineState {
-        let newClips = TimelineEditOperations.setOrientation(
-            clips: clips, clipID: clipID, orientation: orientation)
-        guard newClips != clips else { return self }
-        return replacing(clips: newClips, transitions: transitions)
-    }
-
-    /// 指定したクリップを**画面で見て**反時計回りに 90 度回す。
-    public func rotatingClipLeft(clipID: UUID) -> TimelineState {
-        guard let clip = clips.first(where: { $0.id == clipID }) else { return self }
-        return settingOrientation(clipID: clipID, orientation: clip.orientation.rotatedLeft())
-    }
-
-    /// 指定したクリップを**画面で見て**時計回りに 90 度回す。
-    public func rotatingClipRight(clipID: UUID) -> TimelineState {
-        guard let clip = clips.first(where: { $0.id == clipID }) else { return self }
-        return settingOrientation(clipID: clipID, orientation: clip.orientation.rotatedRight())
-    }
-
-    /// 指定したクリップを**画面で見て**左右反転する
-    /// （`ClipOrientation.flippedHorizontally()` の doc 参照。回転も逆向きになる）。
-    public func flippingClipHorizontally(clipID: UUID) -> TimelineState {
-        guard let clip = clips.first(where: { $0.id == clipID }) else { return self }
-        return settingOrientation(clipID: clipID,
-                                  orientation: clip.orientation.flippedHorizontally())
     }
 
     /// クリップをタイムライン末尾へ追加する（素材メタも同時登録できる）。
@@ -418,59 +423,31 @@ public struct TimelineState: Codable, Equatable, Sendable {
     }
 
     // MARK: - トランジションの編集（S9）
-
-    /// クリップ境界に設定できるトランジションの最大 duration（秒）。
-    ///
-    /// `= min(両クリップ合成尺)/2`。設定できない境界（`clipID` が不在・末尾クリップ・
-    /// 上限が `TransitionSpec.minimumDuration` 未満）では nil を返す。
-    /// UI はこれをスライダーの上限に使い、「設定したのに黙って消える」状態を避ける。
-    public func maximumTransitionDuration(afterClipID clipID: UUID) -> Double? {
-        guard let index = clips.firstIndex(where: { $0.id == clipID }), index + 1 < clips.count else { return nil }
-        let cap = min(clips[index].duration, clips[index + 1].duration) / 2
-        guard cap.isFinite, cap >= TransitionSpec.minimumDuration else { return nil }
-        return cap
-    }
-
-    /// 指定した先行クリップの直後の境界にトランジションを設定する（種類・長さの変更も同じ入口）。
-    ///
-    /// duration は `maximumTransitionDuration(afterClipID:)` へクランプする。
-    /// クランプ後に `TransitionSpec.minimumDuration` を下回る境界では設定せず self を返す
-    /// （他の編集操作と同じ「失敗時は self」契約）。
-    public func settingTransition(afterClipID clipID: UUID,
-                                  kind: TransitionKind,
-                                  duration: Double) -> TimelineState {
-        guard let cap = maximumTransitionDuration(afterClipID: clipID), duration.isFinite else { return self }
-        let clamped = min(max(duration, TransitionSpec.minimumDuration), cap)
-        var result = self
-        result.transitions[clipID] = TransitionSpec(kind: kind, duration: clamped)
-        return result
-    }
-
-    /// 指定した先行クリップの直後の境界からトランジションを取り除く。
-    /// 設定が無ければ self を返す。
-    public func removingTransition(afterClipID clipID: UUID) -> TimelineState {
-        guard transitions[clipID] != nil else { return self }
-        var result = self
-        result.transitions.removeValue(forKey: clipID)
-        return result
-    }
+    //
+    // `maximumTransitionDuration(afterClipID:)` / `settingTransition(afterClipID:kind:duration:)` /
+    // `removingTransition(afterClipID:)` は `TimelineStateTransitionEditing.swift`。
 
     /// clips / transitions（と必要なら applyRanges）を差し替えた新しい状態。
     ///
     /// 編集操作が `TimelineState(clips:transitions:applyRanges:)` を直接呼ぶと
     /// `sources`（素材メタ）が黙って落ちるため、内部の再構築はこのヘルパに集約する。
-    /// `applyRanges` を省略すると現在の区間をそのまま維持する
-    /// （`moving` / `trimming` / `settingRate` は区間を書き換えない）。
+    /// `applyRanges` / `clipAudioMuteRanges` を省略すると現在の区間をそのまま維持する
+    /// （`moving` / `settingRate` は両方とも書き換えない。`trimming` は写真クリップのときだけ
+    /// 両方を書き換える）。
     ///
     /// **`internal`（`private` ではない）のは、複製のように別ファイルへ分けた編集操作
     /// （`TimelineStateDuplication.swift`）からも同じヘルパを通すため。** モジュール外へは出さない。
     func replacing(clips newClips: [TimelineClip],
                    transitions newTransitions: [UUID: TransitionSpec],
-                   applyRanges newApplyRanges: [MosaicApplyRange]? = nil) -> TimelineState {
+                   applyRanges newApplyRanges: [MosaicApplyRange]? = nil,
+                   clipAudioMuteRanges newMuteRanges: [ClipAudioMuteRange]? = nil,
+                   clipDuckRanges newDuckRanges: [ClipDuckRange]? = nil) -> TimelineState {
         var result = self
         result.clips = newClips
         result.transitions = newTransitions
         if let newApplyRanges { result.applyRanges = newApplyRanges }
+        if let newMuteRanges { result.clipAudioMuteRanges = newMuteRanges }
+        if let newDuckRanges { result.clipDuckRanges = newDuckRanges }
         return result
     }
 

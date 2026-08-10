@@ -398,6 +398,15 @@ public final class VideoMosaicExporter: @unchecked Sendable {
     /// アンカーは常にトリム前の合成タイムライン上にある）。
     private var textTotalDuration: Double = 0
 
+    /// クリップごとの色調補正（P4）。`MosaicEditorModel` は
+    /// `timeline.clips` から `[id: colorGrade]` を射影して渡す。`TimelineState` を
+    /// まるごと保持しない（`mapping`/`applyRanges`/`textItems` と同じ、必要な射影だけを
+    /// 保持する既存の流儀）。合成時刻での重なりブレンドは `colorGrade(at:)` が
+    /// `mapping.sourceLocations(at:)` と `ColorGrade.blend` を直接使って行う
+    /// （`TimelineState.colorGrade(atComposition:)` と同じ手順。あちらへ委譲しないのは
+    /// このクラスが `TimelineState` を持たず `TimelineMapping` だけを持つため）。
+    private var colorGrades: [UUID: ColorGrade] = [:]
+
     /// 無料プランの透かし（課金 P2）を焼き込むか。export 開始時に設定する。
     ///
     /// **`isPro` を直接見ない。** 判定の根拠は `Built.exportRestriction.needsWatermark`
@@ -495,6 +504,10 @@ public final class VideoMosaicExporter: @unchecked Sendable {
         /// 画面に置く文字（E3）。`MosaicEditorModel` は `timeline.textItems` を渡す。
         /// 素材アンカーを持たないので `mapping` による写像は不要（合成時刻のまま使う）。
         textItems: [TextItem] = [],
+        /// クリップごとの色調補正（P4）。`MosaicEditorModel` は
+        /// `Dictionary(uniqueKeysWithValues: timeline.clips.map { ($0.id, $0.colorGrade) })`
+        /// を渡す。キーに無いクリップは `.identity` として扱う（`colorGrade(at:)` 参照）。
+        colorGrades: [UUID: ColorGrade] = [:],
         /// 無料プランの透かし（課金 P2）を焼き込むか。
         ///
         /// `MosaicEditorModel` は `exportRestriction.needsWatermark` を渡す
@@ -552,6 +565,7 @@ public final class VideoMosaicExporter: @unchecked Sendable {
         self.objectTracks = objectTracks
         self.textItems = textItems
         self.textTotalDuration = mapping.totalDuration
+        self.colorGrades = colorGrades
         self.needsWatermark = needsWatermark
         let videoTracks = try await asset.loadTracks(withMediaType: .video)
         guard let videoTrack = videoTracks.first else {
@@ -1140,6 +1154,12 @@ public final class VideoMosaicExporter: @unchecked Sendable {
             ? []
             : textItems.visibleTextItems(atComposition: timeSec, totalDuration: textTotalDuration)
 
+        // 色調補正（P4）。判定時刻はテキスト・検出ゲートと同じ timeSec
+        // （写像・トリムシフト前の合成時刻）。`mapping` が空（素の AVAsset 書き出し・
+        // クリップ未構築）なら `sourceLocations` が空を返し `.identity` に落ちる
+        // （`colorGrade(mapping:at:)` の doc 参照）。
+        let grade = colorGrade(mapping: mapping, at: timeSec)
+
         let r0 = CFAbsoluteTimeGetCurrent()
         try? mosaicFrame(
             sourceBuffer: sourceBuffer,
@@ -1150,6 +1170,7 @@ public final class VideoMosaicExporter: @unchecked Sendable {
             backgroundBlock: backgroundBlock,
             textItems: visibleText,
             textCompositionTime: timeSec,
+            colorGrade: grade,
             adaptor: adaptor,
             input: input,
             cache: cache
@@ -1266,6 +1287,7 @@ public final class VideoMosaicExporter: @unchecked Sendable {
         backgroundBlock: Float,
         textItems: [TextItem],
         textCompositionTime: Double,
+        colorGrade: ColorGrade,
         adaptor: AVAssetWriterInputPixelBufferAdaptor,
         input: AVAssetWriterInput,
         cache: CVMetalTextureCache
@@ -1279,12 +1301,19 @@ public final class VideoMosaicExporter: @unchecked Sendable {
             throw ExportError.pixelBufferPoolUnavailable
         }
 
+        // 色調補正（P4）は「モザイクの前」（`ColorGradeCompositor` の doc・規則 1）。
+        // 検出（`refreshDetection`）は `frame.sourceBuffer`（この `inputTexture` の
+        // 元になった生バッファ）を直接見ており、この合成を経由しないので影響を受けない
+        // （規則 3）。`grade.isIdentity` なら `ColorGradeCompositor.apply` が
+        // `inputTexture` をそのまま返すので 1 パスも発行されない。
+        let gradedTexture = ColorGradeCompositor.apply(grade: colorGrade, renderer: renderer, input: inputTexture)
+
         // 背景パスがある場合は、顔モザイクを中間テクスチャに描いてから背景を出力に重ねる。
         // どちらの分岐も最終的に `outputTexture` へモザイク済みの絵を書く。
         if let backgroundMask,
-           let intermediate = MetalTextureUtilities.makeOutputTexture(like: inputTexture, device: renderer.device) {
+           let intermediate = MetalTextureUtilities.makeOutputTexture(like: gradedTexture, device: renderer.device) {
             renderer.render(
-                input: inputTexture, into: intermediate,
+                input: gradedTexture, into: intermediate,
                 landmarkSets: landmarkSets, additionalPaths: additionalPaths,
                 waitForCompletion: true
             )
@@ -1295,7 +1324,7 @@ public final class VideoMosaicExporter: @unchecked Sendable {
             )
         } else {
             renderer.render(
-                input: inputTexture, into: outputTexture,
+                input: gradedTexture, into: outputTexture,
                 landmarkSets: landmarkSets, additionalPaths: additionalPaths,
                 waitForCompletion: true
             )
@@ -1350,6 +1379,22 @@ public final class VideoMosaicExporter: @unchecked Sendable {
     /// `cache` は素材スコープ（キーは素材内時刻）、`time` は写像済みの素材内時刻。
     private func lookupCache(_ cache: [Double: [FaceLandmarkSet]], at time: Double) -> [FaceLandmarkSet] {
         DetectionBridge(interpolates: true).faces(in: cache, at: time)
+    }
+
+    /// 指定した合成時刻に効く色調補正（P4）。
+    ///
+    /// 合成時刻に効く色調補正。**手順は `ColorGradeResolver.resolve`（コア層）が唯一の
+    /// 実装**で、ここはクリップの引き方（`colorGrades` の辞書引き）を渡すだけ。
+    ///
+    /// このクラスは `TimelineState` を持たないので
+    /// `TimelineState.colorGrade(atComposition:)` はそのまま呼べないが、**だからと
+    /// いって同じ手順を書き写さない。** 書き写すと、プレビュー（`TimelineState` 側）と
+    /// 書き出し（ここ）で片方だけ変わって黙ってずれる——この案件が繰り返してきた
+    /// 事故の形そのものになる。
+    private func colorGrade(mapping: TimelineMapping, at compositionTime: Double) -> ColorGrade {
+        ColorGradeResolver.resolve(mapping: mapping, at: compositionTime) { [colorGrades] clipID in
+            colorGrades[clipID] ?? .identity
+        }
     }
 
     /// 合成時刻を素材位置へ解決する。半開区間の外に出た有限時刻（終端フレームの

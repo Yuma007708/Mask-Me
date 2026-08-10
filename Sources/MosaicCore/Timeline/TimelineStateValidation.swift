@@ -18,8 +18,26 @@ extension TimelineState {
     ///   区間生成器（`fullCoverRange` / 分割追従 / v1 移行）の写真扱いの退行はここで落ちる。
     /// - 素材メタ辞書のキーが `TimelineSource.id` と一致すること
     public func validate() -> Bool {
-        validateTransitions() && validateApplyRanges()
-            && validateAudioItems() && validateTextItems() && validateSources()
+        validateTransitions() && validateApplyRanges() && validateClipAudioMuteRanges()
+            && validateClipDuckRanges() && validateAudioItems() && validateTextItems()
+            && validateSources() && validateColorGrades()
+    }
+
+    /// 各クリップの色調補正が許容範囲に収まっていること。
+    ///
+    /// `ColorGrade` は `didSet`/`init`/`init(from:)` の 3 経路すべてでクランプしているため
+    /// 通常はここで落ちることは無い安全網だが、`TimelineClip.colorGrade` へ直接代入する
+    /// テストコード（フューザ等）が将来 `ColorGrade` の内部を迂回しないことの機械的な
+    /// 裏取りとして置く（他の値域チェック（`validateApplyRanges` 等）と同じ立て付け）。
+    private func validateColorGrades() -> Bool {
+        for clip in clips {
+            let grade = clip.colorGrade
+            guard ColorGrade.brightnessRange.contains(grade.brightness),
+                  ColorGrade.contrastRange.contains(grade.contrast),
+                  ColorGrade.saturationRange.contains(grade.saturation),
+                  ColorGrade.warmthRange.contains(grade.warmth) else { return false }
+        }
+        return true
     }
 
     /// トランジションのキーが実在する非末尾クリップで、長さが両隣の半分以下であること。
@@ -41,6 +59,47 @@ extension TimelineState {
             guard let clip = clips.first(where: { $0.id == range.clipID }),
                   clip.sourceID == range.sourceID else { return false }
             guard sourceKind(of: clip.sourceID) != .photo || range.sourceStart == 0 else { return false }
+        }
+        return true
+    }
+
+    /// 消音区間が実在クリップを指し、素材が一致し、写真は 0 始まりで、
+    /// **同じクリップ内で重ならず正規化済み**であること（`ClipAudioMuteGate.merged` の契約）。
+    /// 重なりを許すと、端ドラッグ・移動で片方だけ掴んだときに「消したはずの区間が
+    /// 裏に残る」状態になる（`MosaicApplyRange` の同種の不変条件と同じ理由）。
+    private func validateClipAudioMuteRanges() -> Bool {
+        for range in clipAudioMuteRanges {
+            guard range.sourceStart.isFinite, range.sourceEnd.isFinite,
+                  range.sourceStart < range.sourceEnd else { return false }
+            guard let clip = clips.first(where: { $0.id == range.clipID }),
+                  clip.sourceID == range.sourceID else { return false }
+            guard sourceKind(of: clip.sourceID) != .photo || range.sourceStart == 0 else { return false }
+        }
+        for (_, group) in Dictionary(grouping: clipAudioMuteRanges, by: \.clipID) {
+            let sorted = group.sorted { $0.sourceStart < $1.sourceStart }
+            for index in 1..<sorted.count where sorted[index].sourceStart < sorted[index - 1].sourceEnd - 1e-9 {
+                return false
+            }
+        }
+        return true
+    }
+
+    /// 声区間（ダッキング根拠）が実在クリップを指し、素材が一致し、写真は 0 始まりで、
+    /// **同じクリップ内で重ならず正規化済み**であること。`validateClipAudioMuteRanges` と
+    /// 同じ規則（`ClipDuckGate.merged` の契約）。
+    private func validateClipDuckRanges() -> Bool {
+        for range in clipDuckRanges {
+            guard range.sourceStart.isFinite, range.sourceEnd.isFinite,
+                  range.sourceStart < range.sourceEnd else { return false }
+            guard let clip = clips.first(where: { $0.id == range.clipID }),
+                  clip.sourceID == range.sourceID else { return false }
+            guard sourceKind(of: clip.sourceID) != .photo || range.sourceStart == 0 else { return false }
+        }
+        for (_, group) in Dictionary(grouping: clipDuckRanges, by: \.clipID) {
+            let sorted = group.sorted { $0.sourceStart < $1.sourceStart }
+            for index in 1..<sorted.count where sorted[index].sourceStart < sorted[index - 1].sourceEnd - 1e-9 {
+                return false
+            }
         }
         return true
     }
@@ -71,6 +130,11 @@ extension TimelineState {
     /// テキストが昇順で、文面・位置・スタイルが有効域に収まること。
     ///
     /// **重なりは許す**（複数の文字を同時に出せる。BGM との違い）ので順序だけを見る。
+    ///
+    /// **`fontSize` の上限判定は `normalizedTextItems` と同じ 1 本
+    /// （`TextItemRole.maximumFontSize`）を見る。** 二重に書くと「正規化は通すが
+    /// validate は落ちる」状態を作れてしまう。`.sticker` は文字数も 1（書記素
+    /// クラスタ 1 個）まで。
     private func validateTextItems() -> Bool {
         var previousStart = -Double.infinity
         for item in textItems {
@@ -82,7 +146,9 @@ extension TimelineState {
                   item.center.isFinite,
                   item.center.x >= 0, item.center.x <= 1,
                   item.center.y >= 0, item.center.y <= 1,
-                  item.style == item.style.clamped else { return false }
+                  item.style == item.style.clamped(maximumFontSize: item.role.maximumFontSize)
+            else { return false }
+            guard item.role != .sticker || item.text.count == 1 else { return false }
             guard item.compositionStart >= previousStart - 1e-9 else { return false }
             previousStart = item.compositionStart
         }

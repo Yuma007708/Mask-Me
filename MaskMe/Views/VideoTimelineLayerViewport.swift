@@ -128,7 +128,10 @@ extension VideoTimelineView {
                     trimPreviewRelay: trimPreviewRelay,
                     selectedRangeID: layerSelection(for: .text), onCommit: commit,
                     onVerticalDrag: updateLayerScroll(translationHeight:),
-                    onVerticalDragEnded: endLayerScrollDrag)
+                    onVerticalDragEnded: endLayerScrollDrag,
+                    // 帯のラベルを「テキスト」「ステッカー」へ出し分けるための材料
+                    // （`TimelineLayerTrackView.textItems` の doc 参照）。
+                    textItems: model.timeline.textItems)
                     .accessibilityElement(children: .contain)
                     .accessibilityIdentifier("timeline.textTrack")
             }

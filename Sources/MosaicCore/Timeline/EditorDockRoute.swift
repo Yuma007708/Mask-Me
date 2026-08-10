@@ -22,6 +22,15 @@ public enum EditorDockRoute: String, Equatable, Sendable, CaseIterable {
     case background
     /// 手で置く矩形（追加＋粗さ）。
     case rectangle
+    /// 色調補正（プリセットのチップ＋詳細スライダーへの入口）。`mosaic` を経由せず
+    /// `root`（クリップ選択時のツールバー）から直接入る。顔・背景・矩形と違って
+    /// ON/OFF の効果フラグを持たない（既定値 `.identity` が「無補正」を兼ねるので、
+    /// 顔モザイクのような `faceMosaicOn` 相当のフラグが要らない）。
+    case colorGrade
+    /// クリップの向き（回転・反転）。以前は「回転」「反転」の 2 ボタンだったものを
+    /// 1 段へ畳んである（ツールバーの枠が足りないため。`VideoTimelineView+Toolbar` の
+    /// doc 参照）。`colorGrade` と同じく `root` から直接入り、効果フラグを持たない。
+    case transform
 
     /// 戻る `‹` の行き先。`root` は最上段なので自分自身を返す
     /// （＝ `root` では `‹` を出さない。`showsBackButton` を使う）。
@@ -30,6 +39,7 @@ public enum EditorDockRoute: String, Equatable, Sendable, CaseIterable {
         case .root: return .root
         case .mosaic: return .root
         case .face, .background, .rectangle: return .mosaic
+        case .colorGrade, .transform: return .root
         }
     }
 
@@ -45,7 +55,7 @@ public enum EditorDockRoute: String, Equatable, Sendable, CaseIterable {
     public var showsBlockSizeSlider: Bool {
         switch self {
         case .face, .background, .rectangle: return true
-        case .root, .mosaic: return false
+        case .root, .mosaic, .colorGrade, .transform: return false
         }
     }
 }
@@ -71,6 +81,10 @@ public enum EditorDockNavigation {
         case (.root, .mosaic):
             return .mosaic
         case (.mosaic, .face), (.mosaic, .background), (.mosaic, .rectangle):
+            return destination
+        // `colorGrade` / `transform` は `mosaic` を経由しない（クリップ選択時の
+        // ツールバーから直接入る。`mosaic` はモザイクの種類選びだけの入口）。
+        case (.root, .colorGrade), (.root, .transform):
             return destination
         default:
             return current

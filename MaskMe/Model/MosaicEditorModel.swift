@@ -836,6 +836,7 @@ public final class MosaicEditorModel: ObservableObject {
                     .build(clips: clips, transitions: timeline.transitions,
                            audioItems: audioItems, sources: sources,
                            aspectRatio: timeline.aspectRatio,
+                           clipAudioMuteRanges: timeline.clipAudioMuteRanges,
                            isPro: entitlements.isPro)
                 let isStale = loadGeneration != timelineGeneration
                 if !isStale {
@@ -2236,6 +2237,10 @@ public final class MosaicEditorModel: ObservableObject {
                 applyRanges: timeline.applyRanges,
                 // 画面に置く文字（E3）。プレビューと同じ `timeline.textItems` を渡す。
                 textItems: timeline.textItems,
+                // クリップごとの色調補正（P4）。プレビューと同じ `TimelineClip.colorGrade`
+                // を渡す（`colorGrade(atComposition:)` と同じ手順で exporter 側が
+                // 重なりブレンドする。`VideoMosaicExporter.colorGrades` の doc 参照）。
+                colorGrades: Dictionary(uniqueKeysWithValues: timeline.clips.map { ($0.id, $0.colorGrade) }),
                 // 無料プランの透かし（課金 P2）。**`isPro` を直接見ない**。UI と同じ
                 // `exportRestriction`（`.exceedsResolution` でも真になる導出プロパティ）
                 // を読み、判定の根拠を 2 箇所に散らばらせない。

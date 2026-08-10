@@ -64,6 +64,23 @@ enum TimelineVolumeAvailability {
             return false
         }
     }
+
+    /// BGM ダッキング（E2-3）UI の現在状態。**BGM を選んでいるときだけ**呼ぶ想定
+    /// （`TimelineVolumeSheet` の `fadeConfig` と同じ排他規則）。
+    ///
+    /// `isEnabled` は `AudioItem.duckingGain < 1` そのもの（別のフラグを持たない。
+    /// 「OFF は `duckingGain = 1`」という `MosaicEditorModel.setDuckingEnabled` の規約と
+    /// 1 対 1 で対応させ、状態がずれないようにするため）。
+    struct DuckingState: Equatable {
+        let isEnabled: Bool
+        let gain: Float
+    }
+
+    /// 指定 BGM のダッキング UI 状態を返す。対象が存在しなければ nil（ボタン自体を出さない）。
+    static func duckingState(timeline: TimelineState, audioItemID: UUID) -> DuckingState? {
+        guard let item = timeline.audioItems.first(where: { $0.id == audioItemID }) else { return nil }
+        return DuckingState(isEnabled: item.duckingGain < 1, gain: item.duckingGain)
+    }
 }
 
 /// クリップ音量シート（0〜100% の**線形**スライダー + ミュートトグル）。
@@ -90,9 +107,35 @@ struct TimelineVolumeSheet: View {
         let onApply: (Double, Double) -> Void
     }
 
+    /// クリップ内消音区間（区間ミュート）の UI 用の文脈。**BGM（`fadeConfig` あり）では
+    /// 出さない**（区間ミュートは `TimelineClip` の元音声だけの機能。`fadeConfig` と
+    /// 排他に扱う）。
+    struct MuteRangeConfig {
+        /// いまプレイヘッドが消音区間の中にいるか（ボタンのラベルを切り替える）。
+        let isMutedAtPlayhead: Bool
+        /// 「この区間を消音」／「消音を解除」タップの入口。
+        let onToggle: () -> Void
+    }
+
+    /// BGM ダッキング（E2-3）の UI 用の文脈。**BGM（`fadeConfig` あり）のときだけ**出す
+    /// （`MuteRangeConfig` と同じ排他規則。区間ミュートはクリップの元音声だけの機能）。
+    struct DuckingConfig {
+        /// 現在の状態（`TimelineVolumeAvailability.duckingState` が唯一の情報源）。
+        let state: TimelineVolumeAvailability.DuckingState
+        /// トグルの確定。ON にするときは呼び出し側が決めた gain（弱／中／強のいずれか）を渡す。
+        /// OFF にするときは `gain` を無視してよい（モデル側で `1` に固定する）。
+        let onSetEnabled: (Bool, Float) -> Void
+        /// 弱／中／強プリセットの選択（ON 状態でだけ意味を持つ）。
+        let onSelectGain: (Float) -> Void
+        /// 「もう一度検出する」タップの入口。
+        let onRedetect: () -> Void
+    }
+
     let initialVolume: Float
     let onApply: (Float) -> Void
     let fadeConfig: FadeConfig?
+    let muteRangeConfig: MuteRangeConfig?
+    let duckingConfig: DuckingConfig?
 
     @Environment(\.dismiss) private var dismiss
     @State private var sliderValue: Double
@@ -101,18 +144,32 @@ struct TimelineVolumeSheet: View {
     @State private var volumeBeforeMute: Double
     @State private var fadeIn: Double
     @State private var fadeOut: Double
+    /// ダッキング OFF で戻す gain。OFF にする瞬間の値を覚えておき、次に ON にしたときの
+    /// 既定へ使う（`volumeBeforeMute` と同じ「直前値へ復帰する」流儀）。
+    @State private var duckingGainBeforeOff: Double
 
     private static let presets: [Float] = [0.25, 0.5, 0.75, 1]
+    /// ダッキングの強さプリセット（弱／中／強）。ON にした瞬間の既定は「中」。
+    static let duckingPresets: [(label: String, gain: Float)] = [
+        ("弱", 0.5), ("中", 0.25), ("強", 0.125)
+    ]
 
-    init(initialVolume: Float, fadeConfig: FadeConfig? = nil, onApply: @escaping (Float) -> Void) {
+    init(initialVolume: Float, fadeConfig: FadeConfig? = nil,
+         muteRangeConfig: MuteRangeConfig? = nil, duckingConfig: DuckingConfig? = nil,
+         onApply: @escaping (Float) -> Void) {
         self.initialVolume = initialVolume
         self.fadeConfig = fadeConfig
+        self.muteRangeConfig = muteRangeConfig
+        self.duckingConfig = duckingConfig
         self.onApply = onApply
         let clamped = Double(TimelineClip.clampedVolume(initialVolume))
         _sliderValue = State(initialValue: clamped)
         _volumeBeforeMute = State(initialValue: clamped > 0 ? clamped : 1)
         _fadeIn = State(initialValue: fadeConfig?.initialFadeIn ?? 0)
         _fadeOut = State(initialValue: fadeConfig?.initialFadeOut ?? 0)
+        let initialDuckGain = Double(duckingConfig?.state.gain ?? Self.duckingPresets[1].gain)
+        _duckingGainBeforeOff = State(
+            initialValue: initialDuckGain < 1 ? initialDuckGain : Double(Self.duckingPresets[1].gain))
     }
 
     private var volume: Float { TimelineClip.clampedVolume(Float(sliderValue)) }
@@ -164,6 +221,14 @@ struct TimelineVolumeSheet: View {
                 fadeSection(fadeConfig)
             }
 
+            if let duckingConfig {
+                duckingSection(duckingConfig)
+            }
+
+            if let muteRangeConfig {
+                muteRangeSection(muteRangeConfig)
+            }
+
             Text(fadeConfig != nil
                  ? "BGM だけに掛かります（元動画の音声・モザイク区間は変わりません）"
                  : "元素材の音声だけに掛かります（合成尺・モザイク区間は変わりません）")
@@ -175,7 +240,81 @@ struct TimelineVolumeSheet: View {
                 .buttonStyle(.borderedProminent)
         }
         .padding(24)
-        .presentationDetents([.height(fadeConfig != nil ? 460 : 320)])
+        .presentationDetents([.height(sheetHeight)])
+    }
+
+    private var sheetHeight: CGFloat {
+        if fadeConfig != nil { return duckingConfig != nil ? 560 : 460 }
+        return muteRangeConfig != nil ? 400 : 320
+    }
+
+    /// BGM ダッキング（E2-3）のセクション。トグル + 強さプリセット + 再検出ボタン。
+    /// **BGM（`fadeConfig` あり）のときだけ呼ばれる**（同型冒頭 doc の排他規則）。
+    private func duckingSection(_ config: DuckingConfig) -> some View {
+        VStack(spacing: 8) {
+            Divider()
+            Toggle("声に合わせて下げる", isOn: Binding(
+                get: { config.state.isEnabled },
+                set: { toggleDucking(to: $0, config: config) }))
+                .font(.footnote.weight(.medium))
+            if config.state.isEnabled {
+                HStack(spacing: 8) {
+                    ForEach(Self.duckingPresets, id: \.gain) { preset in
+                        Button(preset.label) { selectDuckingGain(preset.gain, config: config) }
+                            .font(.footnote.weight(.medium))
+                            .buttonStyle(.bordered)
+                            .tint(abs(config.state.gain - preset.gain) < 1e-3 ? .accentColor : .secondary)
+                    }
+                }
+                Button("もう一度検出する") { config.onRedetect() }
+                    .font(.footnote)
+                    .buttonStyle(.bordered)
+            }
+            Text("声がある区間だけ自動で BGM を下げます（元動画の音声は変わりません）")
+                .font(.caption2)
+                .multilineTextAlignment(.center)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    /// ダッキングのトグル確定。OFF → ON では直前値（無ければ「中」）を渡し、
+    /// ON → OFF では現在値を「戻す先」として覚えておく（`toggleMute` と同じ流儀）。
+    private func toggleDucking(to enabled: Bool, config: DuckingConfig) {
+        if enabled {
+            config.onSetEnabled(true, Float(duckingGainBeforeOff))
+        } else {
+            duckingGainBeforeOff = Double(config.state.gain)
+            config.onSetEnabled(false, 1)
+        }
+    }
+
+    /// プリセット（弱／中／強）の選択。選んだ値を「戻す先」としても覚える。
+    private func selectDuckingGain(_ gain: Float, config: DuckingConfig) {
+        duckingGainBeforeOff = Double(gain)
+        config.onSelectGain(gain)
+    }
+
+    /// 区間ミュート（プレイヘッド起点）のセクション。**トグル 1 個だけ**
+    /// （長さや位置の微調整は帯のトリムハンドルに任せる。ここは「足す／消す」の
+    /// 入口に絞る）。
+    private func muteRangeSection(_ config: MuteRangeConfig) -> some View {
+        VStack(spacing: 6) {
+            Divider()
+            Button {
+                config.onToggle()
+            } label: {
+                Label(config.isMutedAtPlayhead ? "この区間の消音を解除" : "この区間を消音",
+                     systemImage: config.isMutedAtPlayhead ? "speaker.wave.2.fill" : "speaker.slash.fill")
+                    .font(.footnote.weight(.medium))
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered)
+            .tint(config.isMutedAtPlayhead ? .accentColor : .red)
+            Text("プレイヘッドの位置を起点に、この帯の消音区間を足す／消します")
+                .font(.caption2)
+                .multilineTextAlignment(.center)
+                .foregroundStyle(.secondary)
+        }
     }
 
     /// フェードイン／アウトのスライダー（E2-2）。BGM のときだけ出す。

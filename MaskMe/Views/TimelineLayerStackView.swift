@@ -15,17 +15,19 @@ enum TimelineLayerRowKind: String, CaseIterable, Identifiable {
     case mosaic
     /// BGM・効果音（E2 で実装済み）。
     case audio
-    /// 画面に置く文字（E3-3a で実装済み）。プレビュー上のドラッグ配置と
-    /// スタイル設定シートは E3-3b（未実装）。
+    /// 画面に置く文字・絵文字ステッカー（E3-3a / S12 で実装済み）。
     case text
 
     var id: String { rawValue }
 
+    /// **`rawValue`（accessibility 識別子 `timeline.layer.text.empty` の素）は
+    /// `text` のまま変えない。** ここは表示名だけの変更（S12: ステッカーを相乗りさせた
+    /// ので「文字・ステッカー」に広げる）。
     var title: String {
         switch self {
         case .mosaic: return "エフェクト"
         case .audio: return "音声"
-        case .text: return "テキスト"
+        case .text: return "文字・ステッカー"
         }
     }
 
@@ -43,7 +45,7 @@ enum TimelineLayerRowKind: String, CaseIterable, Identifiable {
         switch self {
         case .mosaic: return "エフェクトを追加"
         case .audio: return "音声を追加"
-        case .text: return "テキストを追加"
+        case .text: return "文字・ステッカーを追加"
         }
     }
 

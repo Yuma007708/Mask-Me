@@ -120,11 +120,22 @@ struct TimelineCompositionBuilder {
     ///   差し替わる。新しい経路からこの builder を呼ぶときは必ず
     ///   `timeline.aspectRatio` を渡すこと（既定値 `.source` は、比率を意識しない
     ///   既存の呼び出し＝テストの挙動を変えないための後方互換値）。
+    /// - Parameter clipAudioMuteRanges: クリップ内消音区間（`timeline.clipAudioMuteRanges`）。
+    ///   既定値 `[]`（消音なし）は Core 層の規約と同じ「触っていなければ元の音声のまま」
+    ///   （`ClipAudioMuteRange` 型の doc 参照）と一致するので、他の「既定値を置かない」
+    ///   引数と違い安全に既定化できる。実アプリの 2 経路は必ず `timeline.clipAudioMuteRanges`
+    ///   を渡す。
+    /// - Parameter clipDuckRanges: BGM ダッキング（E2-3）の根拠となる声区間
+    ///   （`timeline.clipDuckRanges`）。既定値 `[]`（ダッキングなし）は
+    ///   `clipAudioMuteRanges` と同じ理由で安全に既定化できる。実アプリの 2 経路は必ず
+    ///   `timeline.clipDuckRanges` を渡す。
     func build(clips: [TimelineClip],
                transitions: [UUID: TransitionSpec] = [:],
                audioItems: [AudioItem] = [],
                sources: [UUID: AVAsset],
                aspectRatio: TimelineAspectRatio = .source,
+               clipAudioMuteRanges: [ClipAudioMuteRange] = [],
+               clipDuckRanges: [ClipDuckRange] = [],
                isPro: Bool) async throws -> Built {
         let mapping = TimelineMapping(clips: clips, transitions: transitions)
         // 重なりがあるときだけ 2 トラックへ交互配置する。重なりが無い構成では
@@ -208,11 +219,10 @@ struct TimelineCompositionBuilder {
         let (videoComposition, layout) = VideoCompositionFactory.make(
             placements: placements, overlaps: mapping.overlaps,
             totalDuration: totalDuration, renderSizeOverride: renderSizeOverride)
-        let audioMix = AudioMixFactory.make(placements: placements,
-                                            overlaps: mapping.overlaps,
-                                            tracks: survivingAudio,
-                                            backgroundItems: background.items,
-                                            backgroundTrack: backgroundTrack)
+        let audioMix = AudioMixFactory.make(
+            placements: placements, overlaps: mapping.overlaps, tracks: survivingAudio,
+            mapping: mapping, muteRanges: clipAudioMuteRanges, backgroundItems: background.items,
+            backgroundTrack: backgroundTrack, clipDuckRanges: clipDuckRanges)
         // 実際に適用された出力解像度（縮小したならそのサイズ）。UI・書き出しはこちらを
         // 見ること（`outputSize` の doc 参照）。
         let outputSize = clampedOutputSize

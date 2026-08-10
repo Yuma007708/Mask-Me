@@ -30,8 +30,13 @@ extension VideoTimelineView {
     /// | 選択 | 並び |
     /// |---|---|
     /// | 無し | モザイク / テキスト / 音楽 / 比率 / 追加 |
-    /// | クリップ | 分割 / 複製 / 速度 / 音量 / 回転 / 反転 / 削除 |
+    /// | クリップ | 分割 / 複製 / フィルター / 速度 / 変形 / 音量 / 削除 |
     /// | 加工レイヤー（テキスト・BGM・モザイク区間） | 削除 |
+    ///
+    /// **「回転」「反転」は「変形」1 つに畳んである（P4）。** 以前「左回転」「右回転」を
+    /// 1 ボタンへ畳んだのと同じ理由（枠が足りない）。「フィルター」を足すぶんの枠を
+    /// ここで作った。段の中身（回転・反転の実ボタン）は `EditorDockView.transformButtons`
+    /// （`EditorDockRoute.transform`）にある。
     ///
     /// ズームは**どの段でも末尾に置く**（ピンチが使えないときの代替という
     /// アクセシビリティ上の役割があり、落とせない。`zoomItems` の doc 参照）。
@@ -40,10 +45,15 @@ extension VideoTimelineView {
     }
 
     /// 選択状態で入れ替わる部分（ズームを除く）。
-    private var selectionToolItems: [TimelineToolItem] {
+    ///
+    /// **`private` を外していない理由が無くなったので `private` を外してある。**
+    /// テスト（`ToolbarItemCountTests`）が「クリップ選択時は 7 個以下」を数えるために
+    /// `@testable import` 経由で直接読む。活性判定・並びは実行と同じこの 1 箇所が
+    /// 唯一の情報源（`splitItem` 等の doc と同じ理由）。
+    var selectionToolItems: [TimelineToolItem] {
         if selectedClip != nil {
-            return [splitItem, duplicateItem, speedItem, volumeItem,
-                    rotateItem, flipItem, removeItem]
+            return [splitItem, duplicateItem, filterItem, speedItem,
+                    transformItem, volumeItem, removeItem]
         }
         if selectedLayer != nil {
             // 加工レイヤーは中身の編集をプレビュー・帯側が持っているので、
@@ -53,30 +63,23 @@ extension VideoTimelineView {
         return [mosaicItem, addTextItem, addAudioItem, aspectRatioItem, addMediaItem]
     }
 
-    /// クリップを時計回りに 90 度回す。
+    /// クリップの向き（回転・反転）の段へ降りる入口（P4）。
     ///
-    /// **1 ボタンに畳んである**（押すたびに 90 度）。一般的な編集アプリはどれもこの形で、
-    /// 左回転は 3 回押せば届く。左右 2 ボタンに分けていた版は、ただでさえ狭い段を
-    /// 1 枠余計に使っていた。
-    private var rotateItem: TimelineToolItem {
-        let target = selectedClipID
-        return TimelineToolItem(title: "回転", systemImage: "rotate.right",
-                                isEnabled: selectedClip != nil, separatorBefore: true) {
-            guard let target else { return }
-            model.rotateClipRight(id: target)
+    /// **回転・反転は「変形」1 つに畳んである**（押すたびに実行する即時ボタンではなく、
+    /// `EditorDockRoute.transform` の段を開く形にした）。以前の「左回転」「右回転」
+    /// 1 ボタン統合と同じ判断（枠が足りない）。実ボタンは `EditorDockView.transformButtons`。
+    private var transformItem: TimelineToolItem {
+        TimelineToolItem(title: "変形", systemImage: "rotate.right",
+                         isEnabled: selectedClip != nil, separatorBefore: true) {
+            model.enterDock(.transform)
         }
     }
 
-    /// クリップを左右反転する。
-    private var flipItem: TimelineToolItem {
-        let target = selectedClipID
-        return TimelineToolItem(
-            title: "反転",
-            systemImage: "arrow.left.and.right.righttriangle.left.righttriangle.right",
-            isEnabled: selectedClip != nil
-        ) {
-            guard let target else { return }
-            model.flipClipHorizontally(id: target)
+    /// 色調補正の段へ降りる入口（P4）。
+    private var filterItem: TimelineToolItem {
+        TimelineToolItem(title: "フィルター", systemImage: "camera.filters",
+                         isEnabled: selectedClip != nil) {
+            model.enterDock(.colorGrade)
         }
     }
 

@@ -169,9 +169,18 @@ public enum ObjectMaskEditOperations {
 
     private static func videoSplit(mask: ObjectMask, front: TimelineClip, back: TimelineClip,
                                    at split: Double) -> [ObjectMask] {
-        let boundary = ObjectMask.Keyframe(sourceTime: split, rect: mask.rect(atSourceTime: split))
+        // **角度も必ず渡すこと。** `Keyframe.init` の `angle` は既定 0 なので、
+        // 省くと境界のキーフレームだけ無回転になり、分割点へ向かって傾きが
+        // 0 まで滑り落ちる（実測: 0.5 rad の矩形が 0.46 → 0.42 → … → 0）。
+        // 傾けた矩形は「検出が効かない斜めの顔」を手で隠すために置くものなので、
+        // 無回転へ戻ると顔からずれて**素通しになる**。位置だけを見るテストでは
+        // この欠落を捕まえられない（`test_分割しても矩形の傾きが変わらない` が番人）。
+        let boundary = ObjectMask.Keyframe(sourceTime: split,
+                                           rect: mask.rect(atSourceTime: split),
+                                           angle: mask.angle(atSourceTime: split))
         let frontFrames = mask.keyframes.filter { $0.sourceTime < split } + [boundary]
-        let backFrames = [ObjectMask.Keyframe(sourceTime: split, rect: boundary.rect)]
+        let backFrames = [ObjectMask.Keyframe(sourceTime: split, rect: boundary.rect,
+                                              angle: boundary.angle)]
             + mask.keyframes.filter { $0.sourceTime > split }
         // `isRegionPlaceholder` は分割の前後どちらにも引き継ぐ（第2段が矩形サーチ由来の
         // 暫定マスクを見分けるためのフラグなので、分割で片方だけ落とすと見失う）。
@@ -193,13 +202,56 @@ public enum ObjectMaskEditOperations {
     private static func photoSplit(mask: ObjectMask, front: TimelineClip,
                                    back: TimelineClip) -> [ObjectMask] {
         let rect = mask.rect(atSourceTime: 0)
+        // 傾きも渡すこと（`videoSplit` と同じ理由。省くと写真の分割で矩形が
+        // 完全に無回転へ戻り、斜めの顔から外れる）。
+        let angle = mask.angle(atSourceTime: 0)
         let frontMask = ObjectMask.single(id: mask.id,
                                           anchor: .clip(clipID: front.id, sourceID: front.sourceID),
-                                          rect: rect, isRegionPlaceholder: mask.isRegionPlaceholder)
+                                          rect: rect, angle: angle,
+                                          isRegionPlaceholder: mask.isRegionPlaceholder)
         let backMask = ObjectMask.single(anchor: .clip(clipID: back.id, sourceID: back.sourceID),
-                                         rect: rect, isRegionPlaceholder: mask.isRegionPlaceholder)
+                                         rect: rect, angle: angle,
+                                         isRegionPlaceholder: mask.isRegionPlaceholder)
         guard let frontMask, let backMask else { return [mask] }
         return [frontMask, backMask]
+    }
+
+    // MARK: - フリーズフレーム
+
+    /// フリーズフレーム挿入（`TimelineState.freezing`）にマスクを追従させる。
+    ///
+    /// **これは見落とすと致命的な経路である。** 手描き矩形は「検出が効かない顔」を隠す
+    /// 最後の手段なので、引き継がれないと検出も矩形も無いフレームが生まれる
+    /// （＝そのコマだけ顔が露出する）。
+    ///
+    /// 元クリップ（`clipID`）に属する各マスクを、フリーズ点の**素材時刻**
+    /// （`sourceTime`。`TimelineState.freezingEdit` が分割した場合は分割点の素材時刻、
+    /// 分割しなかった場合は挿入直後のクリップの `sourceStart`）で解決し、
+    /// **キーフレーム 1 個（`sourceTime == 0`）** のマスクとして `freezeClip` 用に作る。
+    /// 解決には `ObjectMask.rect(atSourceTime:)` / `angle(atSourceTime:)`（補間 + 端 clamp）を
+    /// そのまま使う——分岐を書き写すと `videoSplit` と同じ「端で位置が飛ぶ」事故を再生産する。
+    ///
+    /// - **元クリップのマスクは一切変更しない**（`existing` に含まれる元のエントリはそのまま
+    ///   残り、新しいマスクが追加されるだけ。`masks(duplicatingClipID:into:existing:)` と
+    ///   同じ「複製」の扱いであり、フリーズクリップは元クリップの延長ではなく独立した
+    ///   静止画クリップだからである）。
+    /// - `ObjectMask.id` は新規発番する（複製・分割の後半と同じ理由。同じ id が並ぶと
+    ///   `ForEach` / `firstIndex(where:)` が片方にしか当たらない）。
+    /// - `isRegionPlaceholder` は引き継ぐ（分割・複製と同じ規則）。
+    /// - 対象クリップにマスクが 0 本なら、追加も 0 本（`existing` をそのまま返す）。
+    public static func masks(freezingClip clipID: UUID, atSourceTime sourceTime: Double,
+                             into freezeClip: TimelineClip,
+                             existing: [ObjectMask]) -> [ObjectMask] {
+        let frozen = existing.compactMap { mask -> ObjectMask? in
+            guard mask.anchor.clipID == clipID else { return nil }
+            let keyframe = ObjectMask.Keyframe(sourceTime: 0,
+                                               rect: mask.rect(atSourceTime: sourceTime),
+                                               angle: mask.angle(atSourceTime: sourceTime))
+            return ObjectMask(anchor: .clip(clipID: freezeClip.id, sourceID: freezeClip.sourceID),
+                              keyframes: [keyframe],
+                              isRegionPlaceholder: mask.isRegionPlaceholder)
+        }
+        return existing + frozen
     }
 
     // MARK: - 削除

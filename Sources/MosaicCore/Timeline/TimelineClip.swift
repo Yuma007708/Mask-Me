@@ -40,13 +40,21 @@ public struct TimelineClip: Identifiable, Hashable, Sendable, Codable {
     /// `VideoCompositionFactory.fitTransform` と同じ `ClipOrientation` から作られる。
     public var orientation: ClipOrientation
 
+    /// クリップに掛ける色調補正（明るさ・コントラスト・彩度・暖かみ）。既定は無補正。
+    ///
+    /// クランプは `ColorGrade` 自身の 1 箇所（`didSet` / `init` / `init(from:)` の
+    /// 3 経路）に閉じている。`TimelineClip` 側でこの値をさらにクランプする必要はない
+    /// （`orientation` と同じく、値型自身が不変条件を守る設計）。
+    public var colorGrade: ColorGrade
+
     public init(id: UUID = UUID(),
                 sourceID: UUID,
                 sourceStart: Double,
                 sourceEnd: Double,
                 originalAudioVolume: Float = 1.0,
                 rate: Double = 1.0,
-                orientation: ClipOrientation = .identity) {
+                orientation: ClipOrientation = .identity,
+                colorGrade: ColorGrade = .identity) {
         self.id = id
         self.sourceID = sourceID
         self.sourceStart = sourceStart
@@ -55,6 +63,7 @@ public struct TimelineClip: Identifiable, Hashable, Sendable, Codable {
         self.originalAudioVolume = Self.clampedVolume(originalAudioVolume)
         self.rate = Self.clampedRate(rate)
         self.orientation = orientation
+        self.colorGrade = colorGrade
     }
 
     /// このクリップが合成タイムライン上で占める長さ（秒）。
@@ -77,15 +86,18 @@ public struct TimelineClip: Identifiable, Hashable, Sendable, Codable {
     // MARK: - Codable
 
     private enum CodingKeys: String, CodingKey {
-        case id, sourceID, sourceStart, sourceEnd, originalAudioVolume, rate, orientation
+        case id, sourceID, sourceStart, sourceEnd, originalAudioVolume, rate, orientation, colorGrade
     }
 
     /// `rate` キーを持たない旧 JSON（rate 導入前に保存された下書き）も
     /// 等速（1.0）としてデコードできるようにする。`orientation` も同じ規約で、
     /// キーが無い旧下書きは**回転なし・反転なし**（`ClipOrientation.identity`）になる。
+    /// `colorGrade`（v7 で追加）も同じ規約で、キーが無い v6 以前の下書きは
+    /// **無補正**（`ColorGrade.identity`）になる。
     ///
     /// **`init(from:)` は didSet を経由しない**ため、`rate`・`originalAudioVolume` の
     /// どちらも明示的にクランプする（壊れた下書きから範囲外の値が入るのを防ぐ）。
+    /// `colorGrade` 自身のクランプは `ColorGrade.init(from:)` が別途行う。
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         self.id = try container.decode(UUID.self, forKey: .id)
@@ -97,5 +109,7 @@ public struct TimelineClip: Identifiable, Hashable, Sendable, Codable {
         self.rate = Self.clampedRate(try container.decodeIfPresent(Double.self, forKey: .rate) ?? 1.0)
         self.orientation = try container.decodeIfPresent(
             ClipOrientation.self, forKey: .orientation) ?? .identity
+        self.colorGrade = try container.decodeIfPresent(
+            ColorGrade.self, forKey: .colorGrade) ?? .identity
     }
 }

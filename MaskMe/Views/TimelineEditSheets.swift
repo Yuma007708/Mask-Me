@@ -46,6 +46,9 @@ struct TimelineSpeedSheet: View {
     /// 選べる倍率の上限（クリップ尺から決まる）。
     let maximumRate: Double
     let onApply: (Double) -> Void
+    /// フリーズフレームの UI。**ツールバーへ 8 個目を足さない**ため、この速度シートへ
+    /// 相乗りさせてある（`TimelineFreezeFrameSection` の doc 参照）。nil なら出さない。
+    let freeze: TimelineFreezeFrameSection.Context?
 
     @Environment(\.dismiss) private var dismiss
     @State private var sliderValue: Double
@@ -54,9 +57,11 @@ struct TimelineSpeedSheet: View {
 
     init(initialRate: Double,
          maximumRate: Double = TimelineClip.rateRange.upperBound,
+         freeze: TimelineFreezeFrameSection.Context? = nil,
          onApply: @escaping (Double) -> Void) {
         self.initialRate = initialRate
         self.maximumRate = maximumRate
+        self.freeze = freeze
         self.onApply = onApply
         let clamped = min(initialRate, maximumRate)
         _sliderValue = State(initialValue: TimelineRateScale.sliderValue(forRate: clamped))
@@ -116,9 +121,13 @@ struct TimelineSpeedSheet: View {
 
             Button("完了") { dismiss() }
                 .buttonStyle(.borderedProminent)
+
+            if let freeze {
+                TimelineFreezeFrameSection(context: freeze)
+            }
         }
         .padding(24)
-        .presentationDetents([.height(320)])
+        .presentationDetents([.height(freeze != nil ? 460 : 320)])
     }
 }
 
@@ -249,32 +258,75 @@ struct TimelineTransitionSheet: View {
     }
 }
 
-/// テキスト入力シート（E3-3a）。文面だけを受ける。
+/// テキスト入力 / ステッカー選択シート（E3-3a, S12）。上部の `Picker` で「文字」と
+/// 「ステッカー」を切り替える。**ツールバーに 6 個目のボタンを足さない**ための相乗り
+/// （`VideoTimelineView+Toolbar.swift` の `addTextItem` の doc 参照。未選択時で既に
+/// 5 個 + ズームがあり、6 個目以降は画面外へ出ることが実測されている）。
 ///
 /// **見た目（フォント・色・位置）の設定はここに置かない**（E3-3b の範囲）。
-/// このシートで確定した `TextItem` は既定のスタイル（`TextStyle()`）で
+/// 文字は既定のスタイル（`TextStyle()`）、ステッカーは `TextStyle.stickerDefault` で
 /// プレイヘッド位置・既定の長さ（`MosaicEditorModel.defaultTextDuration`）に置かれる。
 ///
-/// **空文字は追加ボタンを押せない形で塞ぐ。** コア層（`TimelineState.addingTextItem`）も
-/// 空文字を弾くが、ボタンを押せる見た目のまま何も起きないのは「壊れている」と読まれるため、
-/// UI 側でも同じ判定（前後の空白を落として空かどうか）で活性を決める。
+/// **空文字は追加ボタンを押せない形で塞ぐ。** コア層（`TimelineState.addingTextItem` /
+/// `addingStickerItem`）も空文字を弾くが、ボタンを押せる見た目のまま何も起きないのは
+/// 「壊れている」と読まれるため、UI 側でも同じ判定（前後の空白を落として空かどうか）で
+/// 活性を決める。
 struct TimelineTextInputSheet: View {
-    let onAdd: (String) -> Void
+    let onAddText: (String) -> Void
+    let onAddSticker: (String) -> Void
 
     @Environment(\.dismiss) private var dismiss
     @State private var text: String = ""
+    @State private var mode: Mode = .text
 
-    /// 追加ボタンの活性判定。**`onAdd` に渡す実行と同じ判定**（前後の空白を落として空かどうか）。
-    /// 別々に書くと「押せるのに何も起きない」を作れる（コア層の
+    /// 文字入力かステッカー選択か。
+    enum Mode: String, CaseIterable, Identifiable {
+        case text
+        case sticker
+
+        var id: String { rawValue }
+
+        var title: String {
+            switch self {
+            case .text: return "文字"
+            case .sticker: return "ステッカー"
+            }
+        }
+    }
+
+    /// 追加ボタンの活性判定。**`onAddText` に渡す実行と同じ判定**（前後の空白を落として
+    /// 空かどうか）。別々に書くと「押せるのに何も起きない」を作れる（コア層の
     /// `TimelineState.addingTextItem` と同じ理由）。
     private var trimmed: String { text.trimmingCharacters(in: .whitespacesAndNewlines) }
     private var canAdd: Bool { !trimmed.isEmpty }
 
     var body: some View {
         VStack(spacing: 18) {
-            Text("テキストを追加")
+            Text(mode == .text ? "テキストを追加" : "ステッカーを追加")
                 .font(.headline)
 
+            Picker("種類", selection: $mode) {
+                ForEach(Mode.allCases) { candidate in
+                    Text(candidate.title).tag(candidate)
+                }
+            }
+            .pickerStyle(.segmented)
+            .padding(.horizontal, 4)
+
+            switch mode {
+            case .text: textInputSection
+            case .sticker: stickerPickerSection
+            }
+        }
+        .padding(24)
+        // ステッカー側はグリッドぶん縦に長いので、大きい detent も許す。
+        .presentationDetents(mode == .text ? [.height(260)] : [.height(440), .large])
+    }
+
+    // MARK: - 文字入力
+
+    private var textInputSection: some View {
+        VStack(spacing: 18) {
             TextField("表示する文字", text: $text, axis: .vertical)
                 .textFieldStyle(.roundedBorder)
                 .lineLimit(1...4)
@@ -290,14 +342,51 @@ struct TimelineTextInputSheet: View {
                 .foregroundStyle(.secondary)
 
             Button("追加") {
-                onAdd(trimmed)
+                onAddText(trimmed)
                 dismiss()
             }
             .buttonStyle(.borderedProminent)
             .disabled(!canAdd)
         }
-        .padding(24)
-        .presentationDetents([.height(260)])
+    }
+
+    // MARK: - ステッカー選択
+
+    /// カテゴリ別のグリッド。**タップで即座に追加して閉じる**（文字入力のような
+    /// 確定ボタンを挟まない。絵文字はその場で結果が見えるので、選ぶ＝決めるでよい）。
+    private var stickerPickerSection: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                ForEach(StickerCategory.allCases, id: \.self) { category in
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(category.displayName)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                        LazyVGrid(columns: Array(repeating: GridItem(.flexible()), count: 6), spacing: 8) {
+                            ForEach(StickerCatalog.items(in: category), id: \.self) { emoji in
+                                stickerButton(emoji)
+                            }
+                        }
+                    }
+                }
+            }
+            .padding(.horizontal, 2)
+        }
+        .frame(maxHeight: 340)
+    }
+
+    private func stickerButton(_ emoji: String) -> some View {
+        Button {
+            onAddSticker(emoji)
+            dismiss()
+        } label: {
+            Text(emoji)
+                .font(.system(size: 30))
+                .frame(width: 44, height: 44)
+                .background(Color.gray.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("ステッカー \(emoji) を追加")
     }
 }
 

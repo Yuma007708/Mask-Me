@@ -17,6 +17,11 @@ import SwiftUI
 struct TimelineTextStyleSheet: View {
     let initialStyle: TextStyle
     let initialAnimation: TextAnimation
+    /// 対象の役割。**ステッカーは見た目の編集項目を絞る**（サイズ・不透明度・
+    /// アニメーションだけ）。書体・文字色・縁取り・背景帯は文字専用の項目で、
+    /// 絵文字は自前の色を持つため意味が薄い上、**縁取りは端末・絵文字によって
+    /// 描画が破綻する**ため UI ごと出さない（`TextRasterizer` の対象外）。
+    let role: TextItemRole
     let onApplyStyle: (TextStyle) -> Void
     let onApplyAnimation: (TextAnimation) -> Void
 
@@ -32,11 +37,12 @@ struct TimelineTextStyleSheet: View {
         RGBAColor(red: 0.20, green: 0.48, blue: 0.98)
     ]
 
-    init(initialStyle: TextStyle, initialAnimation: TextAnimation,
+    init(initialStyle: TextStyle, initialAnimation: TextAnimation, role: TextItemRole,
          onApplyStyle: @escaping (TextStyle) -> Void,
          onApplyAnimation: @escaping (TextAnimation) -> Void) {
         self.initialStyle = initialStyle
         self.initialAnimation = initialAnimation
+        self.role = role
         self.onApplyStyle = onApplyStyle
         self.onApplyAnimation = onApplyAnimation
         _style = State(initialValue: initialStyle)
@@ -46,14 +52,18 @@ struct TimelineTextStyleSheet: View {
     var body: some View {
         ScrollView {
             VStack(spacing: 20) {
-                Text("テキストの見た目")
+                Text(role == .sticker ? "ステッカーの見た目" : "テキストの見た目")
                     .font(.headline)
 
-                fontFamilySection
                 fontSizeSection
-                colorSection(title: "文字色", selected: style.color) { style.color = $0; apply() }
-                strokeSection
-                backgroundSection
+                if role == .sticker {
+                    opacitySection
+                } else {
+                    fontFamilySection
+                    colorSection(title: "文字色", selected: style.color) { style.color = $0; apply() }
+                    strokeSection
+                    backgroundSection
+                }
                 animationSection
 
                 Button("完了") { dismiss() }
@@ -61,7 +71,7 @@ struct TimelineTextStyleSheet: View {
             }
             .padding(24)
         }
-        .presentationDetents([.height(620), .large])
+        .presentationDetents(role == .sticker ? [.height(420)] : [.height(620), .large])
     }
 
     // MARK: - 書体
@@ -100,10 +110,31 @@ struct TimelineTextStyleSheet: View {
 
     // MARK: - 文字サイズ
 
+    /// スライダーの上限は役割ごとに違う（`TextItemRole.maximumFontSize`）。
+    /// **実際のクランプはコア層（`TimelineState.settingTextStyle`）が対象アイテムの
+    /// `role` から行う**ので、ここでの上限違いは UI 上の見え方を実際の可動域へ
+    /// 合わせるためのものであって、安全側の判定そのものはコア層 1 本にある。
     private var fontSizeSection: some View {
-        section(title: "文字サイズ（\(Int((style.fontSize * 100).rounded()))%）") {
+        section(title: "\(role == .sticker ? "サイズ" : "文字サイズ")（\(Int((style.fontSize * 100).rounded()))%）") {
             Slider(value: $style.fontSize,
-                  in: TextStyle.minimumFontSize...TextStyle.maximumFontSize) { editing in
+                  in: TextStyle.minimumFontSize...role.maximumFontSize) { editing in
+                if !editing { apply() }
+            }
+        }
+    }
+
+    // MARK: - 不透明度（ステッカー専用）
+
+    /// ステッカーには文字色の概念が薄いので色プリセットは出さず、代わりに
+    /// `style.color.alpha` を「不透明度」として直接編集する。CoreText はカラー絵文字を
+    /// 描くとき前景色の RGB を無視するが、**alpha は合成の不透明度としてそのまま効く**
+    /// （`TextRasterizer.rasterize` が `NSAttributedString.foregroundColor` へそのまま渡す）。
+    private var opacitySection: some View {
+        section(title: "不透明度（\(Int((style.color.alpha * 100).rounded()))%）") {
+            Slider(value: Binding(
+                get: { style.color.alpha },
+                set: { style.color.alpha = $0 }
+            ), in: 0...1) { editing in
                 if !editing { apply() }
             }
         }
@@ -235,7 +266,7 @@ struct EditorTextStyleSheetModifier: ViewModifier {
     private var sheetContent: some View {
         if let id = itemID, let item = model.timeline.textItems.first(where: { $0.id == id }) {
             TimelineTextStyleSheet(
-                initialStyle: item.style, initialAnimation: item.animation,
+                initialStyle: item.style, initialAnimation: item.animation, role: item.role,
                 onApplyStyle: { model.setTextStyle(id: id, style: $0) },
                 onApplyAnimation: { model.setTextAnimation(id: id, animation: $0) })
         }

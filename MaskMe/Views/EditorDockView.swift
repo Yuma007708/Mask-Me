@@ -28,6 +28,17 @@ struct EditorDockView: View {
     /// `root` に並べる編集の道具。タイムライン側の文脈（選択・プレイヘッド・ズーム）に
     /// 依存するので、組み立ては `VideoTimelineView+Toolbar` が持ち、ここは並べるだけ。
     let rootItems: [TimelineToolItem]
+    /// 色調補正の詳細（4 スライダー）シートの提示条件。
+    ///
+    /// **この View だけが持つローカル状態。** `speedSheetClipID` のように
+    /// `VideoTimelineView` の `@State` へは上げていない — `.colorGrade` 段の中身
+    /// （プリセットのチップ列）が既にこの View に閉じているため、詳細シートも
+    /// ここへ閉じたほうが導線が 1 箇所で完結する（`TimelineEditSheetsModifier` を
+    /// 経由させると提示条件の分岐がもう 1 段増えるだけで得るものがない）。
+    /// **既知のトレードオフ**: `TimelineEditSheetsModifier.isSheetPresented` の
+    /// サムネイル抑止対象に入らない（このシートを開いている間もサムネイル生成が
+    /// 止まらない）。安全性には無関係な UI 上の細かな非効率のみ。
+    @State private var showColorGradeDetail = false
 
     /// 段の高さ。**階層で変えないこと。**
     static let height: CGFloat = 52
@@ -47,6 +58,7 @@ struct EditorDockView: View {
         .padding(.horizontal, 10)
         .frame(height: Self.height)
         .animation(.easeOut(duration: 0.18), value: model.dockRoute)
+        .sheet(isPresented: $showColorGradeDetail) { colorGradeDetailSheet }
     }
 
     // **この HStack に `accessibilityIdentifier` を付けないこと。**
@@ -86,7 +98,74 @@ struct EditorDockView: View {
             FaceSelectorView(model: model, compact: true,
                              showsRectangleTool: false, showsFaces: false)
             blockSizeSlider
+        case .colorGrade:
+            colorGradeChips
+        case .transform:
+            transformButtons
         }
+    }
+
+    /// 色調補正（P4）。**上段はプリセットのチップ列だけ**（52pt の固定段に収まる範囲）。
+    /// 4 本のスライダーは `showColorGradeDetail` シート側（`TimelineColorGradeSheet`）に
+    /// ある（`EditorDockView.height` を階層で変えない契約のため。段そのものの doc 参照）。
+    /// 対象は選択中のクリップ（`model.timelineSelection.clipID`）。選択が無ければ
+    /// 全チップを非活性にする（押しても何も起きないボタンは出さない）。
+    private var colorGradeChips: some View {
+        let clipID = model.timelineSelection.clipID
+        let currentGrade = clipID.flatMap { id in
+            model.timeline.clips.first(where: { $0.id == id })?.colorGrade
+        } ?? .identity
+        let matching = ColorGradePreset.matching(currentGrade)
+        return ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                ForEach(ColorGradePreset.allCases, id: \.self) { preset in
+                    dockButton(title: preset.displayName, systemImage: preset.symbolName,
+                              isActive: matching == preset) {
+                        guard let clipID else { return }
+                        model.setColorGrade(clipID: clipID, preset.grade)
+                    }
+                }
+                Divider().frame(height: 26)
+                dockButton(title: "詳細", systemImage: "slider.horizontal.3", isActive: false) {
+                    showColorGradeDetail = true
+                }
+                Spacer(minLength: 0)
+            }
+        }
+        .disabled(clipID == nil)
+    }
+
+    /// 詳細シート（明るさ・コントラスト・彩度・暖かみの 4 スライダー）。
+    @ViewBuilder
+    private var colorGradeDetailSheet: some View {
+        if let clipID = model.timelineSelection.clipID,
+           let clip = model.timeline.clips.first(where: { $0.id == clipID }) {
+            TimelineColorGradeSheet(
+                initialGrade: clip.colorGrade,
+                onApply: { grade in model.setColorGrade(clipID: clipID, grade) },
+                onApplyToAll: { grade in model.applyColorGradeToAllClips(grade) })
+        }
+    }
+
+    /// クリップの向き（回転・反転）。以前の「回転」「反転」2 ボタンをここへ畳んである
+    /// （`EditorDockRoute.transform` の doc・`VideoTimelineView+Toolbar` の doc 参照）。
+    /// 押すたびに即実行（スライダーではないので確定の概念が無い）。
+    private var transformButtons: some View {
+        let clipID = model.timelineSelection.clipID
+        return HStack(spacing: 6) {
+            dockButton(title: "回転", systemImage: "rotate.right", isActive: false) {
+                guard let clipID else { return }
+                model.rotateClipRight(id: clipID)
+            }
+            dockButton(title: "反転",
+                      systemImage: "arrow.left.and.right.righttriangle.left.righttriangle.right",
+                      isActive: false) {
+                guard let clipID else { return }
+                model.flipClipHorizontally(id: clipID)
+            }
+            Spacer(minLength: 0)
+        }
+        .disabled(clipID == nil)
     }
 
     /// モザイクの種類選び。ON になっている効果は点灯させて、

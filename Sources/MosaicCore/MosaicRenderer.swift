@@ -43,6 +43,10 @@ public final class MosaicRenderer: NSObject {
     /// 環境（未更新の `.metallib` 等）では nil のままフェイルソフトし、
     /// `renderText` は入力をそのままコピーして返す。
     private let textRenderer: TextOverlayRenderer?
+    /// 色調補正カーネルのラッパー。`textRenderer` と同じ理由でフェイルソフトする
+    /// （ライブラリにカーネルが無い環境では nil のままとし、`renderColorGrade` は
+    /// 補正を掛けずに入力をそのままコピーする。書き出し自体は止めない）。
+    private let colorGradeRenderer: ColorGradeRenderer?
 
     /// Block size / edge softness. Mutate to retune the look at runtime.
     public var params: MosaicParams
@@ -106,6 +110,7 @@ public final class MosaicRenderer: NSObject {
         self.meshRenderer = try? FaceMeshMosaicRenderer(
             device: device, library: library, commandQueue: queue)
         self.textRenderer = try? TextOverlayRenderer(device: device, library: library, commandQueue: queue)
+        self.colorGradeRenderer = try? ColorGradeRenderer(device: device, library: library, commandQueue: queue)
         super.init()
     }
 
@@ -353,6 +358,29 @@ public final class MosaicRenderer: NSObject {
         return textRenderer.render(
             input: input, output: output, textTexture: textTexture,
             layout: layout, waitForCompletion: waitForCompletion
+        )
+    }
+
+    /// `input` へ色調補正 `grade` を適用し、`output` へ書く。
+    ///
+    /// **呼び出し側が `grade.isIdentity` を見て呼ぶかどうかを決めること**
+    /// （`ColorGradeCompositor` の doc 参照）。ここでは判定しない＝呼ばれたら必ず
+    /// 1 パス発行する。ライブラリにカーネルが無い環境（未更新の `.metallib` 等）では
+    /// `colorGradeRenderer` が nil のままフェイルソフトし、`input` をそのまま
+    /// `output` へコピーする（補正が効かないだけで書き出し自体は止めない）。
+    @discardableResult
+    public func renderColorGrade(
+        input: MTLTexture,
+        into output: MTLTexture,
+        grade: ColorGrade,
+        waitForCompletion: Bool = false
+    ) -> Bool {
+        guard let colorGradeRenderer else {
+            copy(from: input, to: output, waitForCompletion: waitForCompletion)
+            return false
+        }
+        return colorGradeRenderer.render(
+            input: input, output: output, grade: grade, waitForCompletion: waitForCompletion
         )
     }
 

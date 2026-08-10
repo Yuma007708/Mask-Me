@@ -313,6 +313,6 @@ final class TimelineAspectRatioTests: XCTestCase {
             try JSONSerialization.jsonObject(with: data) as? [String: Any])
         XCTAssertEqual(object["aspectRatio"] as? String, "9x16")
         XCTAssertEqual(object["schemaVersion"] as? Int, TimelineState.currentSchemaVersion)
-        XCTAssertEqual(TimelineState.currentSchemaVersion, 5)
+        XCTAssertEqual(TimelineState.currentSchemaVersion, 7)
     }
 }

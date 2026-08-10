@@ -10,7 +10,9 @@
 		01AAF598041D781C20371F07 /* UITestBootstrap.swift in Sources */ = {isa = PBXBuildFile; fileRef = 189A962C0D03C6FD44F1F887 /* UITestBootstrap.swift */; };
 		028D9E89F59C53F76F921E9C /* RegionFaceSeeder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9AFF00CA82A2A65B56134B7C /* RegionFaceSeeder.swift */; };
 		03972089E13AEE17181CC3B8 /* CameraFlowAdvancer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1297E8123F81D8CD9942E4E5 /* CameraFlowAdvancer.swift */; };
+		0419B878398AAFA250C9F88A /* ClipAudioMuteAudioMixTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0C1427D6F48F5F4162101C2A /* ClipAudioMuteAudioMixTests.swift */; };
 		046572F33E3561309C1EE1F0 /* MosaicEditorModel+RegionSeeding.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3EB05C8B28948DA63FB66D34 /* MosaicEditorModel+RegionSeeding.swift */; };
+		05D3EE69C308D70F8BCF4C5A /* MosaicEditorModel+ClipAudioMute.swift in Sources */ = {isa = PBXBuildFile; fileRef = EAD1345BAFBE720F0AAB8A47 /* MosaicEditorModel+ClipAudioMute.swift */; };
 		07E64E16C7599539D6D76A01 /* TimelineClipBandView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 713A10ED234A6887ACDC4FEA /* TimelineClipBandView.swift */; };
 		09609FD0FC159C201AE54F0A /* DValidVideoTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 175DBDC9458C367C15885EC0 /* DValidVideoTests.swift */; };
 		0B4F35B8E7AFD4A3322A74FA /* VideoTimelineThumbnailRequests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 304843EADC745CF064D30B4C /* VideoTimelineThumbnailRequests.swift */; };
@@ -19,6 +21,7 @@
 		1724D2F4EAB1D7E9B1156BC8 /* VideoTimelineLayerViewport.swift in Sources */ = {isa = PBXBuildFile; fileRef = D698D2420160A2ECB1329EF9 /* VideoTimelineLayerViewport.swift */; };
 		190AEF92D21FA987BAE1B17E /* yunet.mlmodel in Sources */ = {isa = PBXBuildFile; fileRef = 6028712BFA47CD449623F4C7 /* yunet.mlmodel */; };
 		198578EA1BA6CA72CF5DD871 /* TimelineApplyTrackView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C6FD72807500EF5C482925E3 /* TimelineApplyTrackView.swift */; };
+		1A10EF1E49AB758A93E2A4F8 /* TimelineColorGradeSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6618CD35CC840172BFF307A6 /* TimelineColorGradeSheet.swift */; };
 		1D42EA6B91537AE70670F206 /* TimelineGestureUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 86800B41DB113FF582614DDC /* TimelineGestureUITests.swift */; };
 		1F8177075CABE987C64B2961 /* DValidLivePathTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DB13E5AD2B40A3B6CE7F1490 /* DValidLivePathTests.swift */; };
 		203B86594059895525EEC9B3 /* MultiClipExportTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1B695A5D58A3AE9DFCA3B411 /* MultiClipExportTests.swift */; };
@@ -32,6 +35,7 @@
 		2AAF486A88C5A4F08EDAB972 /* VideoDetectionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2705FC8003E270D78CE2F0D3 /* VideoDetectionTests.swift */; };
 		2AE3A157B34C428AD694E888 /* TimelineScrollContainer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5A8D1580077E4D9CEE354AA0 /* TimelineScrollContainer.swift */; };
 		2B13F58E6DDDD4665028DA2A /* FacePickingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DB5FE02D713A8238A54E4BFD /* FacePickingTests.swift */; };
+		2C36BE88A008AF0F509B4316 /* FreezeFrameTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = FEF9838022B6E69556333581 /* FreezeFrameTests.swift */; };
 		2CE012B9FE0CD114DE53D428 /* OpticalFlowKit.h in Headers */ = {isa = PBXBuildFile; fileRef = 337C789EC2783DCCEBF90F34 /* OpticalFlowKit.h */; settings = {ATTRIBUTES = (Public, ); }; };
 		2E8651274EB7E20FE80E51AB /* TimelineEditingModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C09856EE020143AC53058518 /* TimelineEditingModelTests.swift */; };
 		2F0761436A2E96035FC44471 /* TimelineClipSelectionUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5443156EBCB5E17A83AAA2E3 /* TimelineClipSelectionUITests.swift */; };
@@ -54,10 +58,12 @@
 		46E2EAEBAB65AD7966B576E8 /* CameraCaptureController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2E3C2E5CBD55999A599B313A /* CameraCaptureController.swift */; };
 		4857CFA59DEEAA1ED36776F0 /* TimelineClipBandBadges.swift in Sources */ = {isa = PBXBuildFile; fileRef = 050ED30FEC608A4D57A5F576 /* TimelineClipBandBadges.swift */; };
 		48DEC186E65C45B067C44295 /* OpenCV in Frameworks */ = {isa = PBXBuildFile; productRef = A232AC32B818FD1653763225 /* OpenCV */; };
-		4CAE18C66B8C55B89B6A1907 /* Pods_MaskMe.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 617BCB255504A69CF9B51D90 /* Pods_MaskMe.framework */; };
+		49F409A0D3151D2BFEED75CC /* TimelineFreezeFrameSection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 22A92945B3A002B8B1618B8C /* TimelineFreezeFrameSection.swift */; };
 		4D2D37594F2802CB2721D307 /* FixtureLoader.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0F28C0FADE0ECE3AA9FD774 /* FixtureLoader.swift */; };
 		4E7D3799CBA89C8A7314AA59 /* MosaicCore in Frameworks */ = {isa = PBXBuildFile; productRef = 5BD60B740C3CCEEF972B2C0F /* MosaicCore */; };
+		500C705A26723A4E5D2E2EF6 /* Pods_MaskMeTests.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 47CC59E0E0DA916714550473 /* Pods_MaskMeTests.framework */; };
 		50B94D9DB300FBAC29B814D2 /* MediaPicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = ED984D365679EB211C42DF83 /* MediaPicker.swift */; };
+		52EC73395DFDEF782A8EE003 /* AudioWaveformAnalyzer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1D70E737DE968B7EA85A2CE6 /* AudioWaveformAnalyzer.swift */; };
 		57FEBB62F172D1DF496AEE85 /* CameraView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3CC6EF6114FC9E0583DB9F91 /* CameraView.swift */; };
 		59E35752BDE57290539BBBF4 /* UIKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 87D80D430B4D880D39B97E37 /* UIKit.framework */; };
 		5B0CB2FB0494EB51373B75D1 /* RealFaceMosaicTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 47249F3C755F3DFE86658ACA /* RealFaceMosaicTests.swift */; };
@@ -67,6 +73,7 @@
 		5D3F7058A80612CE957EBE9F /* DetectionAccuracyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4DF197A83404DFD65DA43D74 /* DetectionAccuracyTests.swift */; };
 		5EF4714E8D81E3BB812F9DDA /* TextRasterizer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 27F07F861DDC1C5FE41EF3AD /* TextRasterizer.swift */; };
 		5F74F166328F53D59399F60D /* CoreGraphics.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 47073A6BF7AD84ED0E816036 /* CoreGraphics.framework */; };
+		5FD47E82AAEDBE4C380B7578 /* Pods_MaskMe.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 330DE7DBE58A711F7EA700E5 /* Pods_MaskMe.framework */; };
 		607E03AA420DEC1B9B0CA2E5 /* sface.onnx in Resources */ = {isa = PBXBuildFile; fileRef = C038D2155E5E1E29F3B7962B /* sface.onnx */; };
 		608FEFD40322B7EF938F5CEB /* EditorDockView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D40DE75558D46D87042E3F42 /* EditorDockView.swift */; };
 		6135347A10E813D1B964148E /* MosaicEditorModel+Text.swift in Sources */ = {isa = PBXBuildFile; fileRef = 90B3B2ECC84E1BB4A5A6F8DE /* MosaicEditorModel+Text.swift */; };
@@ -74,6 +81,7 @@
 		62A3BABB9FD1AC155E1F44B7 /* PhotosSaver.swift in Sources */ = {isa = PBXBuildFile; fileRef = EF480BD6B0C9D1C2915DFC05 /* PhotosSaver.swift */; };
 		62CF36C9EBB6E3D69C53CBC8 /* MosaicEditorModel+ObjectMask.swift in Sources */ = {isa = PBXBuildFile; fileRef = E619F4C878C9A8039CD1A4DC /* MosaicEditorModel+ObjectMask.swift */; };
 		63259900DF4D65D9AC2B4909 /* RecentItemsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A3CBAFDCF02DD154B8654BE2 /* RecentItemsView.swift */; };
+		63A85122D80898ADF3C04478 /* ColorGradeCompositor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 79DFB4AB9388455846D17295 /* ColorGradeCompositor.swift */; };
 		63F968D47AAD4C68254A57F6 /* VideoMosaicExporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 396A7118D697980C95FC5490 /* VideoMosaicExporter.swift */; };
 		6439F4C54E39EF2DD4C767E2 /* RegionPlaceholderFinalizeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 087A6B23A7FA2416377C3E6B /* RegionPlaceholderFinalizeTests.swift */; };
 		64B4E511CB8D366E084D00D9 /* CaptureSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = BD91A10BAC83BCE693FC3572 /* CaptureSettings.swift */; };
@@ -82,6 +90,7 @@
 		6898F17FCEF7015E22D8A89C /* CameraRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6ACE69AFB8A4F6950DB0D6AD /* CameraRecorder.swift */; };
 		6E4F294D6689745490E0ED63 /* SampleFalsePositiveTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9BDD40C0451B8C03CEE14DD2 /* SampleFalsePositiveTests.swift */; };
 		72579D3076BBD431D14AA431 /* ObjectMaskTrackingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 143C4354E99ABF7C63C1821A /* ObjectMaskTrackingTests.swift */; };
+		73A967753B7C775A4F21D244 /* FreezeFrameFactory.swift in Sources */ = {isa = PBXBuildFile; fileRef = 076AD4367E5CA4783FD0D995 /* FreezeFrameFactory.swift */; };
 		757FD0CE4C18DB85EED2250D /* MosaicEditorModel+TimelineMedia.swift in Sources */ = {isa = PBXBuildFile; fileRef = 634FF1AF44AF6D1A9443D57C /* MosaicEditorModel+TimelineMedia.swift */; };
 		77AE0487762AA1DF51E6E517 /* FacePickOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1616680BC75798548E54193A /* FacePickOverlay.swift */; };
 		78592D023E80B7C69BF42DBD /* MosaicEditorModel+RegionPlaceholder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 92120D51081C03EB79B58967 /* MosaicEditorModel+RegionPlaceholder.swift */; };
@@ -92,7 +101,6 @@
 		7DD55EC8DE9EF3D07194F846 /* TimelineSpanDragUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB4C740FBFD5F63A63EAB504 /* TimelineSpanDragUITests.swift */; };
 		815D30BA651AFB295D521CBE /* HomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9E938390C6E17D90ECD41E0C /* HomeView.swift */; };
 		829552FCD3985DA1F2B33843 /* MosaicEditorModel+FacePicking.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7015953D64F22BC7AF36931A /* MosaicEditorModel+FacePicking.swift */; };
-		84DD63ADE829187BAD598B33 /* Pods_MaskMeTests.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = CEB2D3A46FF67C80225F1A7B /* Pods_MaskMeTests.framework */; };
 		84FBD83043B27272581E733D /* MosaicEditorModel+Dock.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0A030B659BE50FF53C7264C2 /* MosaicEditorModel+Dock.swift */; };
 		865FE1DA048ACC753420A815 /* MainTabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1330D1A42F387D42973A36A /* MainTabView.swift */; };
 		87BB95A65F4A8B5163EC863C /* MosaicEditorModel+DetectionCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = 268697BD22FB44BD972D9564 /* MosaicEditorModel+DetectionCache.swift */; };
@@ -126,10 +134,13 @@
 		B3D3907259436E7EB5D283A7 /* TrackingBadge.swift in Sources */ = {isa = PBXBuildFile; fileRef = 90AD88D1CBAD893204CAE6E7 /* TrackingBadge.swift */; };
 		B44D5F4C7E4838F2F86F1BE1 /* TextOverlayEditView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2833C7469F279F71A6010FB5 /* TextOverlayEditView.swift */; };
 		B5C7164914F0363FDF49A471 /* LiveScenarioTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A06D46541B2FF1B97AB78F61 /* LiveScenarioTests.swift */; };
+		B668655CD41DF3B46F5174E1 /* ColorGradeAppLayerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = EAF60F64816FF569D675FAE5 /* ColorGradeAppLayerTests.swift */; };
 		B6FDE665E02B600C5C1A9179 /* DiagFaceCoverageTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5AB251AD6D24EAB153954E91 /* DiagFaceCoverageTests.swift */; };
 		BFC25AE61EE0831B0B86EA9E /* VideoTimelineView+Toolbar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 009E22B95B6799689C77F590 /* VideoTimelineView+Toolbar.swift */; };
 		C4DE82FC6980A9F645632546 /* DetectionSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = 377BAF09266E1E16A9D1ED8B /* DetectionSettings.swift */; };
+		C5BEA320F55FDCD9DA7A85A0 /* StickerLayerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 29AA08ADCA31EFAE523304B2 /* StickerLayerTests.swift */; };
 		C654F1CB29857CC3FFD8C7E1 /* MosaicEditorModel+PreScan.swift in Sources */ = {isa = PBXBuildFile; fileRef = 90CD936B90AFD768143A8735 /* MosaicEditorModel+PreScan.swift */; };
+		C6E8371CA3C2CC6F950EF688 /* MosaicEditorModel+Ducking.swift in Sources */ = {isa = PBXBuildFile; fileRef = 095A6A87A2DD379482C091F9 /* MosaicEditorModel+Ducking.swift */; };
 		C78543C54316B2102CAEBB1A /* EntitlementProviderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0BECBAB37688AC002AD53786 /* EntitlementProviderTests.swift */; };
 		C821765F73053F32E6B71A05 /* EffectTabBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 06CA141A2D39864EA5068C94 /* EffectTabBar.swift */; };
 		C92DDE52E5FB70D6CED62F48 /* TimelineLayerStackView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0C090C95D9A2288B54E2A7D2 /* TimelineLayerStackView.swift */; };
@@ -137,7 +148,9 @@
 		D4E9B8DFBFB624E541B05377 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 1392C6B2BAD6A4310E8B6594 /* Assets.xcassets */; };
 		D5C4D80A9B128E6161455E3C /* FaceTarget.swift in Sources */ = {isa = PBXBuildFile; fileRef = 79FDF98A1E725EF44A98617A /* FaceTarget.swift */; };
 		DA0A877CF43FE6D6614C8C64 /* FaceEmbedder.h in Headers */ = {isa = PBXBuildFile; fileRef = 8127CCB04E8045A0B5D2DB72 /* FaceEmbedder.h */; settings = {ATTRIBUTES = (Public, ); }; };
+		DA476277A48CD08760C38E32 /* AudioDuckingMixTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 48553ACAC5B6C30C432783B8 /* AudioDuckingMixTests.swift */; };
 		DC0A66DE67265BD76BE2A5B6 /* MosaicEditorModel+LiveDetection.swift in Sources */ = {isa = PBXBuildFile; fileRef = A22582E6D937EE387DE0DD2C /* MosaicEditorModel+LiveDetection.swift */; };
+		DCA4338F7125A40F3143EB51 /* MosaicEditorModel+Freeze.swift in Sources */ = {isa = PBXBuildFile; fileRef = 397851F641F27CCE496F864E /* MosaicEditorModel+Freeze.swift */; };
 		DD5A85B00BBBA66D62880FEB /* FaceIdentityAccuracyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 645F16BA8465BDB6D37566CA /* FaceIdentityAccuracyTests.swift */; };
 		DF1F879441C7220D6C6FD846 /* PhotoClipEncoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = E263D1DF17A84925C58B07AE /* PhotoClipEncoder.swift */; };
 		E04BA938BF2BFBAF9203D337 /* ExportSpeedMeasurementTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 412C22874E62A7B9C6E6CDD7 /* ExportSpeedMeasurementTests.swift */; };
@@ -206,12 +219,16 @@
 		009E22B95B6799689C77F590 /* VideoTimelineView+Toolbar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "VideoTimelineView+Toolbar.swift"; sourceTree = "<group>"; };
 		050ED30FEC608A4D57A5F576 /* TimelineClipBandBadges.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimelineClipBandBadges.swift; sourceTree = "<group>"; };
 		05715BA9704363570431ED84 /* FaceLandmarking.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FaceLandmarking.swift; sourceTree = "<group>"; };
+		057C2868626B2EBDCAE9C8E2 /* Pods-MaskMe.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-MaskMe.release.xcconfig"; path = "Target Support Files/Pods-MaskMe/Pods-MaskMe.release.xcconfig"; sourceTree = "<group>"; };
 		06CA141A2D39864EA5068C94 /* EffectTabBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EffectTabBar.swift; sourceTree = "<group>"; };
+		076AD4367E5CA4783FD0D995 /* FreezeFrameFactory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FreezeFrameFactory.swift; sourceTree = "<group>"; };
 		087A6B23A7FA2416377C3E6B /* RegionPlaceholderFinalizeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RegionPlaceholderFinalizeTests.swift; sourceTree = "<group>"; };
 		0948A868B80B53779502CA08 /* OpticalFlowTracker.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = OpticalFlowTracker.h; sourceTree = "<group>"; };
+		095A6A87A2DD379482C091F9 /* MosaicEditorModel+Ducking.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "MosaicEditorModel+Ducking.swift"; sourceTree = "<group>"; };
 		0A030B659BE50FF53C7264C2 /* MosaicEditorModel+Dock.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "MosaicEditorModel+Dock.swift"; sourceTree = "<group>"; };
 		0BECBAB37688AC002AD53786 /* EntitlementProviderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EntitlementProviderTests.swift; sourceTree = "<group>"; };
 		0C090C95D9A2288B54E2A7D2 /* TimelineLayerStackView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimelineLayerStackView.swift; sourceTree = "<group>"; };
+		0C1427D6F48F5F4162101C2A /* ClipAudioMuteAudioMixTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClipAudioMuteAudioMixTests.swift; sourceTree = "<group>"; };
 		1297E8123F81D8CD9942E4E5 /* CameraFlowAdvancer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CameraFlowAdvancer.swift; sourceTree = "<group>"; };
 		12E692B726C6763FE7F91DD7 /* CompositeBBoxDetector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CompositeBBoxDetector.swift; sourceTree = "<group>"; };
 		1392C6B2BAD6A4310E8B6594 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
@@ -221,20 +238,26 @@
 		189A962C0D03C6FD44F1F887 /* UITestBootstrap.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UITestBootstrap.swift; sourceTree = "<group>"; };
 		18FD5CC1BF757A3D804342A3 /* EditingDraft.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EditingDraft.swift; sourceTree = "<group>"; };
 		1B695A5D58A3AE9DFCA3B411 /* MultiClipExportTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MultiClipExportTests.swift; sourceTree = "<group>"; };
+		1D70E737DE968B7EA85A2CE6 /* AudioWaveformAnalyzer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioWaveformAnalyzer.swift; sourceTree = "<group>"; };
 		1F196CB583D9FCC02A69EF39 /* TimelineEditSheets.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimelineEditSheets.swift; sourceTree = "<group>"; };
+		1FE62771DC87446203C00E4B /* Pods-MaskMe.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-MaskMe.debug.xcconfig"; path = "Target Support Files/Pods-MaskMe/Pods-MaskMe.debug.xcconfig"; sourceTree = "<group>"; };
 		20A12A51DBC445E000889571 /* Fixtures */ = {isa = PBXFileReference; lastKnownFileType = folder; name = Fixtures; path = MaskMeTests/Fixtures; sourceTree = SOURCE_ROOT; };
 		217D1A284F67D57B1052C9FF /* YuNetFaceDetector.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = YuNetFaceDetector.swift; sourceTree = "<group>"; };
+		22A92945B3A002B8B1618B8C /* TimelineFreezeFrameSection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimelineFreezeFrameSection.swift; sourceTree = "<group>"; };
 		268697BD22FB44BD972D9564 /* MosaicEditorModel+DetectionCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "MosaicEditorModel+DetectionCache.swift"; sourceTree = "<group>"; };
 		2705FC8003E270D78CE2F0D3 /* VideoDetectionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoDetectionTests.swift; sourceTree = "<group>"; };
 		27F07F861DDC1C5FE41EF3AD /* TextRasterizer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextRasterizer.swift; sourceTree = "<group>"; };
 		2833C7469F279F71A6010FB5 /* TextOverlayEditView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextOverlayEditView.swift; sourceTree = "<group>"; };
 		295162549BD4F4D28B826102 /* CameraFlowAdvancerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CameraFlowAdvancerTests.swift; sourceTree = "<group>"; };
+		29AA08ADCA31EFAE523304B2 /* StickerLayerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StickerLayerTests.swift; sourceTree = "<group>"; };
 		29FD9CB979D535E74AF37144 /* MosaicEditorModel+Timeline.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "MosaicEditorModel+Timeline.swift"; sourceTree = "<group>"; };
 		2AFC4B239C06EBCC3C0A291B /* ObjectMaskTracker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ObjectMaskTracker.swift; sourceTree = "<group>"; };
 		2BCB82E5F8D2B2129FD590AE /* MaskMeApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MaskMeApp.swift; sourceTree = "<group>"; };
+		2E222E9922193079B14D3B75 /* Pods-MaskMeTests.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-MaskMeTests.debug.xcconfig"; path = "Target Support Files/Pods-MaskMeTests/Pods-MaskMeTests.debug.xcconfig"; sourceTree = "<group>"; };
 		2E3C2E5CBD55999A599B313A /* CameraCaptureController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CameraCaptureController.swift; sourceTree = "<group>"; };
 		304843EADC745CF064D30B4C /* VideoTimelineThumbnailRequests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoTimelineThumbnailRequests.swift; sourceTree = "<group>"; };
 		32FA023D46D6B13517F1B684 /* MaskMeTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = MaskMeTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		330DE7DBE58A711F7EA700E5 /* Pods_MaskMe.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Pods_MaskMe.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		337C789EC2783DCCEBF90F34 /* OpticalFlowKit.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = OpticalFlowKit.h; sourceTree = "<group>"; };
 		35CE8F0B3D1E565A2BA99079 /* PlaybackStateSyncTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackStateSyncTests.swift; sourceTree = "<group>"; };
 		366CC441FCEBEA1E46BDD1FB /* CameraMosaicPipeline+Rendering.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "CameraMosaicPipeline+Rendering.swift"; sourceTree = "<group>"; };
@@ -244,6 +267,7 @@
 		377BAF09266E1E16A9D1ED8B /* DetectionSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DetectionSettings.swift; sourceTree = "<group>"; };
 		38CD694F74B0CABC06B96D44 /* CompositionFidelityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CompositionFidelityTests.swift; sourceTree = "<group>"; };
 		396A7118D697980C95FC5490 /* VideoMosaicExporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoMosaicExporter.swift; sourceTree = "<group>"; };
+		397851F641F27CCE496F864E /* MosaicEditorModel+Freeze.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "MosaicEditorModel+Freeze.swift"; sourceTree = "<group>"; };
 		3CC6EF6114FC9E0583DB9F91 /* CameraView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CameraView.swift; sourceTree = "<group>"; };
 		3EB05C8B28948DA63FB66D34 /* MosaicEditorModel+RegionSeeding.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "MosaicEditorModel+RegionSeeding.swift"; sourceTree = "<group>"; };
 		412C22874E62A7B9C6E6CDD7 /* ExportSpeedMeasurementTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ExportSpeedMeasurementTests.swift; sourceTree = "<group>"; };
@@ -252,6 +276,8 @@
 		47073A6BF7AD84ED0E816036 /* CoreGraphics.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreGraphics.framework; path = System/Library/Frameworks/CoreGraphics.framework; sourceTree = SDKROOT; };
 		47249F3C755F3DFE86658ACA /* RealFaceMosaicTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RealFaceMosaicTests.swift; sourceTree = "<group>"; };
 		475C1A5FAE24C73245657E0C /* face_landmarker.task */ = {isa = PBXFileReference; path = face_landmarker.task; sourceTree = "<group>"; };
+		47CC59E0E0DA916714550473 /* Pods_MaskMeTests.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Pods_MaskMeTests.framework; sourceTree = BUILT_PRODUCTS_DIR; };
+		48553ACAC5B6C30C432783B8 /* AudioDuckingMixTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioDuckingMixTests.swift; sourceTree = "<group>"; };
 		496FDF5115CBF6853B0B0F9F /* AudioMixFactory.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioMixFactory.swift; sourceTree = "<group>"; };
 		4A4584D05D16535B060F7973 /* DeviceDecoderContentionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceDecoderContentionTests.swift; sourceTree = "<group>"; };
 		4BA597374DEFAEA398D66C73 /* DValidLiveModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DValidLiveModelTests.swift; sourceTree = "<group>"; };
@@ -261,7 +287,6 @@
 		51961E065E3FA305005DD6FB /* FaceSignatureProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FaceSignatureProvider.swift; sourceTree = "<group>"; };
 		5443156EBCB5E17A83AAA2E3 /* TimelineClipSelectionUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimelineClipSelectionUITests.swift; sourceTree = "<group>"; };
 		55A15C30C12DC0A4A32F4166 /* MosaicEditorModel+Audio.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "MosaicEditorModel+Audio.swift"; sourceTree = "<group>"; };
-		5686CDB3522C5EB39C02B022 /* Pods-MaskMe.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-MaskMe.release.xcconfig"; path = "Target Support Files/Pods-MaskMe/Pods-MaskMe.release.xcconfig"; sourceTree = "<group>"; };
 		590DF796B41E57452C2A9246 /* Mask-Me */ = {isa = PBXFileReference; lastKnownFileType = folder; name = "Mask-Me"; path = .; sourceTree = SOURCE_ROOT; };
 		5A8D1580077E4D9CEE354AA0 /* TimelineScrollContainer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimelineScrollContainer.swift; sourceTree = "<group>"; };
 		5A95AB52EEC8A772F1B510A1 /* face_detector.tflite */ = {isa = PBXFileReference; path = face_detector.tflite; sourceTree = "<group>"; };
@@ -269,14 +294,14 @@
 		5B1D9E474178E25BBE6F015F /* PersonSelectionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PersonSelectionTests.swift; sourceTree = "<group>"; };
 		5C0C51DC1E62178B4C1EC6ED /* TimelineChromeViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimelineChromeViews.swift; sourceTree = "<group>"; };
 		5C9E39C654B2AE6C02143CC1 /* TimelineLabelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimelineLabelTests.swift; sourceTree = "<group>"; };
-		5CDDF1FFA4D39324C8DB4EAC /* Pods-MaskMeTests.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-MaskMeTests.debug.xcconfig"; path = "Target Support Files/Pods-MaskMeTests/Pods-MaskMeTests.debug.xcconfig"; sourceTree = "<group>"; };
 		5F59A16B76EE46171996BEC3 /* MediaPipeFaceLandmarkerAdapter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaPipeFaceLandmarkerAdapter.swift; sourceTree = "<group>"; };
 		6028712BFA47CD449623F4C7 /* yunet.mlmodel */ = {isa = PBXFileReference; lastKnownFileType = file.mlmodel; path = yunet.mlmodel; sourceTree = "<group>"; };
 		616CDA5436D24D581271A5A4 /* FlowBridgeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FlowBridgeTests.swift; sourceTree = "<group>"; };
-		617BCB255504A69CF9B51D90 /* Pods_MaskMe.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Pods_MaskMe.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		634FF1AF44AF6D1A9443D57C /* MosaicEditorModel+TimelineMedia.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "MosaicEditorModel+TimelineMedia.swift"; sourceTree = "<group>"; };
 		645F16BA8465BDB6D37566CA /* FaceIdentityAccuracyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FaceIdentityAccuracyTests.swift; sourceTree = "<group>"; };
+		659FE5224C4DF9D5A0710F08 /* Pods-MaskMeTests.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-MaskMeTests.release.xcconfig"; path = "Target Support Files/Pods-MaskMeTests/Pods-MaskMeTests.release.xcconfig"; sourceTree = "<group>"; };
 		65C5D476385201D2C3584FE3 /* CameraMosaicPipeline.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CameraMosaicPipeline.swift; sourceTree = "<group>"; };
+		6618CD35CC840172BFF307A6 /* TimelineColorGradeSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimelineColorGradeSheet.swift; sourceTree = "<group>"; };
 		6911767A5E3000D5900CADDF /* EditorView+Preview.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "EditorView+Preview.swift"; sourceTree = "<group>"; };
 		6ACE69AFB8A4F6950DB0D6AD /* CameraRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CameraRecorder.swift; sourceTree = "<group>"; };
 		7015953D64F22BC7AF36931A /* MosaicEditorModel+FacePicking.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "MosaicEditorModel+FacePicking.swift"; sourceTree = "<group>"; };
@@ -287,6 +312,7 @@
 		74CC555FD4D927A554E851EF /* SubscriptionStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SubscriptionStore.swift; sourceTree = "<group>"; };
 		754BB25848C1460B01727DE6 /* VideoControlsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoControlsView.swift; sourceTree = "<group>"; };
 		79ADD552122A2708CDF42AF8 /* TimelineWaveformStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimelineWaveformStore.swift; sourceTree = "<group>"; };
+		79DFB4AB9388455846D17295 /* ColorGradeCompositor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ColorGradeCompositor.swift; sourceTree = "<group>"; };
 		79FDF98A1E725EF44A98617A /* FaceTarget.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FaceTarget.swift; sourceTree = "<group>"; };
 		7CB8CBFD99703CC74911D23A /* StoreKitEntitlementProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StoreKitEntitlementProvider.swift; sourceTree = "<group>"; };
 		8127CCB04E8045A0B5D2DB72 /* FaceEmbedder.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = FaceEmbedder.h; sourceTree = "<group>"; };
@@ -303,7 +329,6 @@
 		90CD936B90AFD768143A8735 /* MosaicEditorModel+PreScan.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "MosaicEditorModel+PreScan.swift"; sourceTree = "<group>"; };
 		92120D51081C03EB79B58967 /* MosaicEditorModel+RegionPlaceholder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "MosaicEditorModel+RegionPlaceholder.swift"; sourceTree = "<group>"; };
 		92A18D5B309DBD7F95F747A9 /* MaskMe.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = MaskMe.app; sourceTree = BUILT_PRODUCTS_DIR; };
-		98A1EDB5EFB07C420D60C5C8 /* Pods-MaskMeTests.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-MaskMeTests.release.xcconfig"; path = "Target Support Files/Pods-MaskMeTests/Pods-MaskMeTests.release.xcconfig"; sourceTree = "<group>"; };
 		9AFF00CA82A2A65B56134B7C /* RegionFaceSeeder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RegionFaceSeeder.swift; sourceTree = "<group>"; };
 		9BDD40C0451B8C03CEE14DD2 /* SampleFalsePositiveTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SampleFalsePositiveTests.swift; sourceTree = "<group>"; };
 		9BFE79BCC8FC55484A5C0BAD /* MaskMe-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "MaskMe-Bridging-Header.h"; sourceTree = "<group>"; };
@@ -329,7 +354,6 @@
 		BB4C740FBFD5F63A63EAB504 /* TimelineSpanDragUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimelineSpanDragUITests.swift; sourceTree = "<group>"; };
 		BD91A10BAC83BCE693FC3572 /* CaptureSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptureSettings.swift; sourceTree = "<group>"; };
 		BE660E3BE0BAC78E6A6202D1 /* TimelineCompositionBuilderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimelineCompositionBuilderTests.swift; sourceTree = "<group>"; };
-		BF8C6DD58FB58E562A46E618 /* Pods-MaskMe.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-MaskMe.debug.xcconfig"; path = "Target Support Files/Pods-MaskMe/Pods-MaskMe.debug.xcconfig"; sourceTree = "<group>"; };
 		C038D2155E5E1E29F3B7962B /* sface.onnx */ = {isa = PBXFileReference; path = sface.onnx; sourceTree = "<group>"; };
 		C09856EE020143AC53058518 /* TimelineEditingModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimelineEditingModelTests.swift; sourceTree = "<group>"; };
 		C26E53715C24A34F482BF072 /* MosaicEditorModel+ObjectTracking.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "MosaicEditorModel+ObjectTracking.swift"; sourceTree = "<group>"; };
@@ -339,7 +363,6 @@
 		C8C56F7FD8B53D9AF782DEE5 /* RecentItemsStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecentItemsStore.swift; sourceTree = "<group>"; };
 		CB58D397DF182E5DF81A8187 /* TextOverlayCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TextOverlayCache.swift; sourceTree = "<group>"; };
 		CC71B948CE5C4D28FA032530 /* DiagLivePathDumpTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiagLivePathDumpTests.swift; sourceTree = "<group>"; };
-		CEB2D3A46FF67C80225F1A7B /* Pods_MaskMeTests.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Pods_MaskMeTests.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		CFA020EC27146795EEDCF041 /* TimelineLayerTrackView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimelineLayerTrackView.swift; sourceTree = "<group>"; };
 		D1D8910E65C8F649D96FFE67 /* MosaicEditorModel+PersonAdmission.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "MosaicEditorModel+PersonAdmission.swift"; sourceTree = "<group>"; };
 		D32A65954048BC5F892BF027 /* FaceSelectorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FaceSelectorView.swift; sourceTree = "<group>"; };
@@ -353,6 +376,8 @@
 		E0A6DA24DB19EE2448F48EB8 /* OpticalFlowKit.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = OpticalFlowKit.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		E263D1DF17A84925C58B07AE /* PhotoClipEncoder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoClipEncoder.swift; sourceTree = "<group>"; };
 		E619F4C878C9A8039CD1A4DC /* MosaicEditorModel+ObjectMask.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "MosaicEditorModel+ObjectMask.swift"; sourceTree = "<group>"; };
+		EAD1345BAFBE720F0AAB8A47 /* MosaicEditorModel+ClipAudioMute.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "MosaicEditorModel+ClipAudioMute.swift"; sourceTree = "<group>"; };
+		EAF60F64816FF569D675FAE5 /* ColorGradeAppLayerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ColorGradeAppLayerTests.swift; sourceTree = "<group>"; };
 		ED984D365679EB211C42DF83 /* MediaPicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaPicker.swift; sourceTree = "<group>"; };
 		EF480BD6B0C9D1C2915DFC05 /* PhotosSaver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotosSaver.swift; sourceTree = "<group>"; };
 		F1531575CEFEE38334AE9584 /* VideoTimelineWaveformRequests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoTimelineWaveformRequests.swift; sourceTree = "<group>"; };
@@ -361,6 +386,7 @@
 		F8B4B3F730665F0857BF75DD /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
 		FAD5057DD918DCD23C7B8011 /* VideoTimelineView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoTimelineView.swift; sourceTree = "<group>"; };
 		FEA5D7E9BBB6452AE9504142 /* CameraCaptureTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CameraCaptureTests.swift; sourceTree = "<group>"; };
+		FEF9838022B6E69556333581 /* FreezeFrameTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FreezeFrameTests.swift; sourceTree = "<group>"; };
 		FEFD3FED1EF97858D217FEE5 /* TimelineEditSheetsModifier.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TimelineEditSheetsModifier.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -371,7 +397,7 @@
 			files = (
 				4E7D3799CBA89C8A7314AA59 /* MosaicCore in Frameworks */,
 				68371F1817864DFE3F0B8CDF /* OpticalFlowKit.framework in Frameworks */,
-				4CAE18C66B8C55B89B6A1907 /* Pods_MaskMe.framework in Frameworks */,
+				5FD47E82AAEDBE4C380B7578 /* Pods_MaskMe.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -390,25 +416,13 @@
 			buildActionMask = 2147483647;
 			files = (
 				EF47FC91ED1135A8A283C7FB /* MosaicCore in Frameworks */,
-				84DD63ADE829187BAD598B33 /* Pods_MaskMeTests.framework in Frameworks */,
+				500C705A26723A4E5D2E2EF6 /* Pods_MaskMeTests.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
-		054770CCCE48D74BDFD760C7 /* Pods */ = {
-			isa = PBXGroup;
-			children = (
-				BF8C6DD58FB58E562A46E618 /* Pods-MaskMe.debug.xcconfig */,
-				5686CDB3522C5EB39C02B022 /* Pods-MaskMe.release.xcconfig */,
-				5CDDF1FFA4D39324C8DB4EAC /* Pods-MaskMeTests.debug.xcconfig */,
-				98A1EDB5EFB07C420D60C5C8 /* Pods-MaskMeTests.release.xcconfig */,
-			);
-			name = Pods;
-			path = Pods;
-			sourceTree = "<group>";
-		};
 		082A1740DDF0DB9774922359 /* Views */ = {
 			isa = PBXGroup;
 			children = (
@@ -431,8 +445,10 @@
 				5C0C51DC1E62178B4C1EC6ED /* TimelineChromeViews.swift */,
 				050ED30FEC608A4D57A5F576 /* TimelineClipBandBadges.swift */,
 				713A10ED234A6887ACDC4FEA /* TimelineClipBandView.swift */,
+				6618CD35CC840172BFF307A6 /* TimelineColorGradeSheet.swift */,
 				1F196CB583D9FCC02A69EF39 /* TimelineEditSheets.swift */,
 				FEFD3FED1EF97858D217FEE5 /* TimelineEditSheetsModifier.swift */,
+				22A92945B3A002B8B1618B8C /* TimelineFreezeFrameSection.swift */,
 				0C090C95D9A2288B54E2A7D2 /* TimelineLayerStackView.swift */,
 				CFA020EC27146795EEDCF041 /* TimelineLayerTrackView.swift */,
 				88025287B6E4EBF5C5BB9E36 /* TimelineReorderRecognizer.swift */,
@@ -458,8 +474,11 @@
 		2C370D3510344484FFD0A678 /* MaskMeTests */ = {
 			isa = PBXGroup;
 			children = (
+				48553ACAC5B6C30C432783B8 /* AudioDuckingMixTests.swift */,
 				FEA5D7E9BBB6452AE9504142 /* CameraCaptureTests.swift */,
 				295162549BD4F4D28B826102 /* CameraFlowAdvancerTests.swift */,
+				0C1427D6F48F5F4162101C2A /* ClipAudioMuteAudioMixTests.swift */,
+				EAF60F64816FF569D675FAE5 /* ColorGradeAppLayerTests.swift */,
 				38CD694F74B0CABC06B96D44 /* CompositionFidelityTests.swift */,
 				4DF197A83404DFD65DA43D74 /* DetectionAccuracyTests.swift */,
 				4244CA68645FCD7AC71E9DE3 /* DetectionCacheSyncTests.swift */,
@@ -478,6 +497,7 @@
 				B0F28C0FADE0ECE3AA9FD774 /* FixtureLoader.swift */,
 				20A12A51DBC445E000889571 /* Fixtures */,
 				616CDA5436D24D581271A5A4 /* FlowBridgeTests.swift */,
+				FEF9838022B6E69556333581 /* FreezeFrameTests.swift */,
 				376DE30F44AF6DCEB4A25A39 /* LiveDetectionCoordinateSpaceTests.swift */,
 				A06D46541B2FF1B97AB78F61 /* LiveScenarioTests.swift */,
 				A83F52A82E670F3AD9559A4F /* MosaicReapplyFlowTests.swift */,
@@ -493,6 +513,7 @@
 				47249F3C755F3DFE86658ACA /* RealFaceMosaicTests.swift */,
 				087A6B23A7FA2416377C3E6B /* RegionPlaceholderFinalizeTests.swift */,
 				9BDD40C0451B8C03CEE14DD2 /* SampleFalsePositiveTests.swift */,
+				29AA08ADCA31EFAE523304B2 /* StickerLayerTests.swift */,
 				BE660E3BE0BAC78E6A6202D1 /* TimelineCompositionBuilderTests.swift */,
 				C09856EE020143AC53058518 /* TimelineEditingModelTests.swift */,
 				5C9E39C654B2AE6C02143CC1 /* TimelineLabelTests.swift */,
@@ -527,8 +548,8 @@
 			children = (
 				47073A6BF7AD84ED0E816036 /* CoreGraphics.framework */,
 				87D80D430B4D880D39B97E37 /* UIKit.framework */,
-				617BCB255504A69CF9B51D90 /* Pods_MaskMe.framework */,
-				CEB2D3A46FF67C80225F1A7B /* Pods_MaskMeTests.framework */,
+				330DE7DBE58A711F7EA700E5 /* Pods_MaskMe.framework */,
+				47CC59E0E0DA916714550473 /* Pods_MaskMeTests.framework */,
 			);
 			name = Frameworks;
 			sourceTree = "<group>";
@@ -536,6 +557,8 @@
 		6BAB700FC48098C367DA1902 /* Model */ = {
 			isa = PBXGroup;
 			children = (
+				1D70E737DE968B7EA85A2CE6 /* AudioWaveformAnalyzer.swift */,
+				79DFB4AB9388455846D17295 /* ColorGradeCompositor.swift */,
 				12E692B726C6763FE7F91DD7 /* CompositeBBoxDetector.swift */,
 				377BAF09266E1E16A9D1ED8B /* DetectionSettings.swift */,
 				A848DFD3FA766BFCF82F84F3 /* DraftStore.swift */,
@@ -545,14 +568,18 @@
 				05715BA9704363570431ED84 /* FaceLandmarking.swift */,
 				51961E065E3FA305005DD6FB /* FaceSignatureProvider.swift */,
 				79FDF98A1E725EF44A98617A /* FaceTarget.swift */,
+				076AD4367E5CA4783FD0D995 /* FreezeFrameFactory.swift */,
 				4E4D383CC9A9F0456E0C709D /* MediaPipeFaceBBoxDetector.swift */,
 				5F59A16B76EE46171996BEC3 /* MediaPipeFaceLandmarkerAdapter.swift */,
 				A8B7848A4A856FFFBFC648F9 /* MosaicEditorModel.swift */,
 				8A75942DDE1BC870ECADB4E8 /* MosaicEditorModel+ApplyRange.swift */,
 				55A15C30C12DC0A4A32F4166 /* MosaicEditorModel+Audio.swift */,
+				EAD1345BAFBE720F0AAB8A47 /* MosaicEditorModel+ClipAudioMute.swift */,
 				268697BD22FB44BD972D9564 /* MosaicEditorModel+DetectionCache.swift */,
 				0A030B659BE50FF53C7264C2 /* MosaicEditorModel+Dock.swift */,
+				095A6A87A2DD379482C091F9 /* MosaicEditorModel+Ducking.swift */,
 				7015953D64F22BC7AF36931A /* MosaicEditorModel+FacePicking.swift */,
+				397851F641F27CCE496F864E /* MosaicEditorModel+Freeze.swift */,
 				A22582E6D937EE387DE0DD2C /* MosaicEditorModel+LiveDetection.swift */,
 				E619F4C878C9A8039CD1A4DC /* MosaicEditorModel+ObjectMask.swift */,
 				C26E53715C24A34F482BF072 /* MosaicEditorModel+ObjectTracking.swift */,
@@ -581,6 +608,18 @@
 			path = Model;
 			sourceTree = "<group>";
 		};
+		74078656775DD6BD5F35B032 /* Pods */ = {
+			isa = PBXGroup;
+			children = (
+				1FE62771DC87446203C00E4B /* Pods-MaskMe.debug.xcconfig */,
+				057C2868626B2EBDCAE9C8E2 /* Pods-MaskMe.release.xcconfig */,
+				2E222E9922193079B14D3B75 /* Pods-MaskMeTests.debug.xcconfig */,
+				659FE5224C4DF9D5A0710F08 /* Pods-MaskMeTests.release.xcconfig */,
+			);
+			name = Pods;
+			path = Pods;
+			sourceTree = "<group>";
+		};
 		88646B46646FDC34DEDDFA88 = {
 			isa = PBXGroup;
 			children = (
@@ -591,7 +630,7 @@
 				9F6587ACC374B2032EDD1404 /* Packages */,
 				62F4858FE67A0737A5DD40D3 /* Frameworks */,
 				4F44E9AF6E034565CC43F89D /* Products */,
-				054770CCCE48D74BDFD760C7 /* Pods */,
+				74078656775DD6BD5F35B032 /* Pods */,
 			);
 			sourceTree = "<group>";
 		};
@@ -700,7 +739,7 @@
 			isa = PBXNativeTarget;
 			buildConfigurationList = AC676662E048F169B82B2657 /* Build configuration list for PBXNativeTarget "MaskMe" */;
 			buildPhases = (
-				286183A56656B50E513A61FD /* [CP] Check Pods Manifest.lock */,
+				AC21FB17C5F1BFDA410F70BB /* [CP] Check Pods Manifest.lock */,
 				964EADCD1F81DB6A71090DA7 /* Sources */,
 				8318EB182177C3FA3F813612 /* Resources */,
 				5CC03D444CC23B0C46F84074 /* Frameworks */,
@@ -723,7 +762,7 @@
 			isa = PBXNativeTarget;
 			buildConfigurationList = 5A30783861B642F1AA9B7779 /* Build configuration list for PBXNativeTarget "MaskMeTests" */;
 			buildPhases = (
-				41FEF6C54AB397FC3A0ACB8D /* [CP] Check Pods Manifest.lock */,
+				CD34D60686AB370005F6D4CF /* [CP] Check Pods Manifest.lock */,
 				489A6F5A15DC38DC4BE5BE16 /* Sources */,
 				0D709FEDC10B40FA50A69C14 /* Resources */,
 				EE8F3070572B6F53D9DBC1B2 /* Frameworks */,
@@ -827,7 +866,7 @@
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXShellScriptBuildPhase section */
-		286183A56656B50E513A61FD /* [CP] Check Pods Manifest.lock */ = {
+		AC21FB17C5F1BFDA410F70BB /* [CP] Check Pods Manifest.lock */ = {
 			isa = PBXShellScriptBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -849,7 +888,7 @@
 			shellScript = "diff \"${PODS_PODFILE_DIR_PATH}/Podfile.lock\" \"${PODS_ROOT}/Manifest.lock\" > /dev/null\nif [ $? != 0 ] ; then\n    # print error to STDERR\n    echo \"error: The sandbox is not in sync with the Podfile.lock. Run 'pod install' or update your CocoaPods installation.\" >&2\n    exit 1\nfi\n# This output is used by Xcode 'outputs' to avoid re-running this script phase.\necho \"SUCCESS\" > \"${SCRIPT_OUTPUT_FILE_0}\"\n";
 			showEnvVarsInLog = 0;
 		};
-		41FEF6C54AB397FC3A0ACB8D /* [CP] Check Pods Manifest.lock */ = {
+		CD34D60686AB370005F6D4CF /* [CP] Check Pods Manifest.lock */ = {
 			isa = PBXShellScriptBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -887,8 +926,11 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				DA476277A48CD08760C38E32 /* AudioDuckingMixTests.swift in Sources */,
 				39708448B8CAD5D6FCCB15EE /* CameraCaptureTests.swift in Sources */,
 				B0A0CFE164E8DF16DDED7F31 /* CameraFlowAdvancerTests.swift in Sources */,
+				0419B878398AAFA250C9F88A /* ClipAudioMuteAudioMixTests.swift in Sources */,
+				B668655CD41DF3B46F5174E1 /* ColorGradeAppLayerTests.swift in Sources */,
 				F4F6807BCB1D373524F47B99 /* CompositionFidelityTests.swift in Sources */,
 				5D3DC647BCECB354A1825769 /* DValidLiveModelTests.swift in Sources */,
 				1F8177075CABE987C64B2961 /* DValidLivePathTests.swift in Sources */,
@@ -906,6 +948,7 @@
 				2B13F58E6DDDD4665028DA2A /* FacePickingTests.swift in Sources */,
 				4D2D37594F2802CB2721D307 /* FixtureLoader.swift in Sources */,
 				320FE53F985B730BF6010FE1 /* FlowBridgeTests.swift in Sources */,
+				2C36BE88A008AF0F509B4316 /* FreezeFrameTests.swift in Sources */,
 				2A19DBA8C21068458137831F /* LiveDetectionCoordinateSpaceTests.swift in Sources */,
 				B5C7164914F0363FDF49A471 /* LiveScenarioTests.swift in Sources */,
 				4257F8DF42DF5D53EFD88A3C /* MosaicReapplyFlowTests.swift in Sources */,
@@ -921,6 +964,7 @@
 				5B0CB2FB0494EB51373B75D1 /* RealFaceMosaicTests.swift in Sources */,
 				6439F4C54E39EF2DD4C767E2 /* RegionPlaceholderFinalizeTests.swift in Sources */,
 				6E4F294D6689745490E0ED63 /* SampleFalsePositiveTests.swift in Sources */,
+				C5BEA320F55FDCD9DA7A85A0 /* StickerLayerTests.swift in Sources */,
 				98DA9EEC537B996CD28B9700 /* TimelineCompositionBuilderTests.swift in Sources */,
 				2E8651274EB7E20FE80E51AB /* TimelineEditingModelTests.swift in Sources */,
 				F6E9EB4AAE0EDBDC50FF556A /* TimelineLabelTests.swift in Sources */,
@@ -943,6 +987,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				F1D5A269DEC1C175DBF1BAD0 /* AudioMixFactory.swift in Sources */,
+				52EC73395DFDEF782A8EE003 /* AudioWaveformAnalyzer.swift in Sources */,
 				46E2EAEBAB65AD7966B576E8 /* CameraCaptureController.swift in Sources */,
 				03972089E13AEE17181CC3B8 /* CameraFlowAdvancer.swift in Sources */,
 				23F26119C5379CC62A2DC28E /* CameraMosaicPipeline+Rendering.swift in Sources */,
@@ -951,6 +996,7 @@
 				57FEBB62F172D1DF496AEE85 /* CameraView.swift in Sources */,
 				EB98453F5F6F1BE19A323A2F /* CameraViewModel.swift in Sources */,
 				64B4E511CB8D366E084D00D9 /* CaptureSettings.swift in Sources */,
+				63A85122D80898ADF3C04478 /* ColorGradeCompositor.swift in Sources */,
 				E9A52823976D4227535C1032 /* CompositeBBoxDetector.swift in Sources */,
 				C4DE82FC6980A9F645632546 /* DetectionSettings.swift in Sources */,
 				28EDD91D2430819DA5770913 /* DraftStore.swift in Sources */,
@@ -966,6 +1012,7 @@
 				A2CD11313231124E503C007F /* FaceSelectorView.swift in Sources */,
 				E75B788EF1CDC278C1ACCF35 /* FaceSignatureProvider.swift in Sources */,
 				D5C4D80A9B128E6161455E3C /* FaceTarget.swift in Sources */,
+				73A967753B7C775A4F21D244 /* FreezeFrameFactory.swift in Sources */,
 				815D30BA651AFB295D521CBE /* HomeView.swift in Sources */,
 				865FE1DA048ACC753420A815 /* MainTabView.swift in Sources */,
 				90676F930BCEA9D2367F81FE /* MaskMeApp.swift in Sources */,
@@ -974,9 +1021,12 @@
 				89F9224262FC413292150792 /* MediaPipeFaceLandmarkerAdapter.swift in Sources */,
 				968F1F718DEADDE9F21D586A /* MosaicEditorModel+ApplyRange.swift in Sources */,
 				42665558FE19641E31136ED9 /* MosaicEditorModel+Audio.swift in Sources */,
+				05D3EE69C308D70F8BCF4C5A /* MosaicEditorModel+ClipAudioMute.swift in Sources */,
 				87BB95A65F4A8B5163EC863C /* MosaicEditorModel+DetectionCache.swift in Sources */,
 				84FBD83043B27272581E733D /* MosaicEditorModel+Dock.swift in Sources */,
+				C6E8371CA3C2CC6F950EF688 /* MosaicEditorModel+Ducking.swift in Sources */,
 				829552FCD3985DA1F2B33843 /* MosaicEditorModel+FacePicking.swift in Sources */,
+				DCA4338F7125A40F3143EB51 /* MosaicEditorModel+Freeze.swift in Sources */,
 				DC0A66DE67265BD76BE2A5B6 /* MosaicEditorModel+LiveDetection.swift in Sources */,
 				62CF36C9EBB6E3D69C53CBC8 /* MosaicEditorModel+ObjectMask.swift in Sources */,
 				3DC4925DA6BDE3F3930DD052 /* MosaicEditorModel+ObjectTracking.swift in Sources */,
@@ -1010,9 +1060,11 @@
 				9A71442D1B7B7589973F6D1F /* TimelineChromeViews.swift in Sources */,
 				4857CFA59DEEAA1ED36776F0 /* TimelineClipBandBadges.swift in Sources */,
 				07E64E16C7599539D6D76A01 /* TimelineClipBandView.swift in Sources */,
+				1A10EF1E49AB758A93E2A4F8 /* TimelineColorGradeSheet.swift in Sources */,
 				A43BB2D2AC4D681FFA8BC527 /* TimelineCompositionBuilder.swift in Sources */,
 				2103C7C0B4CBBE8F69886CE3 /* TimelineEditSheets.swift in Sources */,
 				B3491F889F1C75CD4C0C2BB4 /* TimelineEditSheetsModifier.swift in Sources */,
+				49F409A0D3151D2BFEED75CC /* TimelineFreezeFrameSection.swift in Sources */,
 				C92DDE52E5FB70D6CED62F48 /* TimelineLayerStackView.swift in Sources */,
 				792CD6911705B0F45ADEB1D2 /* TimelineLayerTrackView.swift in Sources */,
 				FF4A37748292599C7A43F08A /* TimelineReorderRecognizer.swift in Sources */,
@@ -1062,7 +1114,7 @@
 /* Begin XCBuildConfiguration section */
 		15D2E3B2F6D2FBAB4E90E367 /* Debug */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = 5CDDF1FFA4D39324C8DB4EAC /* Pods-MaskMeTests.debug.xcconfig */;
+			baseConfigurationReference = 2E222E9922193079B14D3B75 /* Pods-MaskMeTests.debug.xcconfig */;
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				"CODE_SIGN_IDENTITY[sdk=iphonesimulator*]" = "-";
@@ -1165,7 +1217,7 @@
 		};
 		55377CC81029A8319ED59BF2 /* Release */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = 98A1EDB5EFB07C420D60C5C8 /* Pods-MaskMeTests.release.xcconfig */;
+			baseConfigurationReference = 659FE5224C4DF9D5A0710F08 /* Pods-MaskMeTests.release.xcconfig */;
 			buildSettings = {
 				BUNDLE_LOADER = "$(TEST_HOST)";
 				"CODE_SIGN_IDENTITY[sdk=iphonesimulator*]" = "-";
@@ -1297,7 +1349,7 @@
 		};
 		CE87C0A204B79322E6339786 /* Release */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = 5686CDB3522C5EB39C02B022 /* Pods-MaskMe.release.xcconfig */;
+			baseConfigurationReference = 057C2868626B2EBDCAE9C8E2 /* Pods-MaskMe.release.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
@@ -1346,7 +1398,7 @@
 		};
 		EBFD87B4922D19F131B57B6C /* Debug */ = {
 			isa = XCBuildConfiguration;
-			baseConfigurationReference = BF8C6DD58FB58E562A46E618 /* Pods-MaskMe.debug.xcconfig */;
+			baseConfigurationReference = 1FE62771DC87446203C00E4B /* Pods-MaskMe.debug.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_IDENTITY = "iPhone Developer";

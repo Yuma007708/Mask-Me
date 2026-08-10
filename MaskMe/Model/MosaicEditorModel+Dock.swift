@@ -56,6 +56,10 @@ extension MosaicEditorModel {
         case .root, .mosaic:
             // モザイクの種類選びは、まだどの効果でもない。粗さの対象を持たせない。
             activeTab = nil
+        case .colorGrade, .transform:
+            // 色調補正・向きは ON/OFF フラグを持たない（`EditorDockRoute` の doc）。
+            // 粗さスライダーとも無関係なので `activeTab` は触らない対象のまま。
+            activeTab = nil
         case .face:
             activeTab = .face
             setEffectOn(.face)

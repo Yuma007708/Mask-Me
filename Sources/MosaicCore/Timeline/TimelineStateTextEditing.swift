@@ -37,11 +37,15 @@ extension TimelineState {
         return next
     }
 
-    /// 文面を書き換える（空文字にはできない）。
+    /// 文面を書き換える（空文字にはできない）。**役割違い（ステッカー）は no-op**
+    /// （中身の差し替えは `settingStickerContent(id:emoji:)` を通す。ここは書記素
+    /// クラスタ 1 個への切り詰めをしないので、素通しするとステッカーの不変条件
+    /// 〈`role == .sticker` は文字数 1〉が破れる）。
     public func settingText(id: UUID, text: String) -> TimelineState {
         let trimmed = Self.normalizedText(text)
         guard !trimmed.isEmpty,
               let index = textItems.firstIndex(where: { $0.id == id }),
+              textItems[index].role == .text,
               textItems[index].text != trimmed else { return self }
         var next = self
         next.textItems[index].text = trimmed
@@ -49,12 +53,53 @@ extension TimelineState {
     }
 
     /// 見た目を差し替える。
+    ///
+    /// **`fontSize` の上限は役割ごとに違う**（`TextItemRole.maximumFontSize`）ので、
+    /// 対象の役割を先に引いてから `TextStyle.clamped(maximumFontSize:)` へ渡す。
+    /// 既定の `TextStyle.clamped`（＝文字の上限 0.5 固定）をここで使うと、
+    /// ステッカーの拡大が 0.5 で頭打ちになってしまう。
     public func settingTextStyle(id: UUID, style: TextStyle) -> TimelineState {
-        let clamped = style.clamped
-        guard let index = textItems.firstIndex(where: { $0.id == id }),
-              textItems[index].style != clamped else { return self }
+        guard let index = textItems.firstIndex(where: { $0.id == id }) else { return self }
+        let clamped = style.clamped(maximumFontSize: textItems[index].role.maximumFontSize)
+        guard textItems[index].style != clamped else { return self }
         var next = self
         next.textItems[index].style = clamped
+        return next
+    }
+
+    /// ステッカー（絵文字 1 個）を 1 本追加する。
+    ///
+    /// **新しい配列・レイヤー段は作らない**（`TextItem.role` で相乗り）。中身は
+    /// `normalizedTextItems` が書記素クラスタ 1 個へ切るので、ここでは空文字だけを弾く。
+    public func addingStickerItem(_ emoji: String,
+                                  atCompositionTime start: Double,
+                                  duration: Double,
+                                  center: NormalizedPoint = .center,
+                                  animation: TextAnimation = .none) -> TimelineState {
+        let trimmed = Self.normalizedText(emoji)
+        guard !trimmed.isEmpty, start.isFinite, start >= 0,
+              duration.isFinite, duration >= TextItem.minimumDuration else { return self }
+        var next = self
+        next.textItems = Self.normalizedTextItems(textItems + [
+            TextItem(text: trimmed, compositionStart: start, duration: duration,
+                     center: center.clamped, style: .stickerDefault, animation: animation,
+                     role: .sticker)
+        ])
+        return next
+    }
+
+    /// ステッカーの中身（絵文字）を差し替える。**役割違い（普通のテキスト）は no-op**
+    /// （`settingText(id:text:)` と役割を対称に分けておくことで、UI がステッカー
+    /// ピッカーとテキスト入力を取り違えて書き込むのを防ぐ）。
+    public func settingStickerContent(id: UUID, emoji: String) -> TimelineState {
+        let trimmed = Self.normalizedText(emoji)
+        guard !trimmed.isEmpty,
+              let index = textItems.firstIndex(where: { $0.id == id }),
+              textItems[index].role == .sticker,
+              textItems[index].text != trimmed else { return self }
+        var next = self
+        next.textItems[index].text = trimmed
+        next.textItems = Self.normalizedTextItems(next.textItems)
         return next
     }
 
@@ -152,8 +197,8 @@ extension TimelineState {
     ///
     /// 1. `compositionStart` 昇順に並べ替える（描画の重ね順でもある）
     /// 2. 非有限・負の開始位置・最小長未満・空文字を落とす
-    /// 3. 文字数の上限で切る
-    /// 4. 位置とスタイルを有効域へ収める
+    /// 3. 文字数の上限で切る（`role == .sticker` は書記素クラスタ 1 個へ切る）
+    /// 4. 位置とスタイルを有効域へ収める（`fontSize` の上限は役割ごと）
     ///
     /// **重なりは解消しない**（テキストは重なってよい。BGM との違い）。
     static func normalizedTextItems(_ items: [TextItem]) -> [TextItem] {
@@ -161,12 +206,18 @@ extension TimelineState {
             guard item.compositionStart.isFinite, item.duration.isFinite,
                   item.compositionStart >= 0,
                   item.duration >= TextItem.minimumDuration else { return nil }
-            let trimmed = normalizedText(item.text)
+            var trimmed = normalizedText(item.text)
+            if item.role == .sticker {
+                // 結合絵文字（家族・肌色修飾つき等）は Swift の `Character` が
+                // 拡張書記素クラスタ単位でまとまっているので、`.first` を取るだけで
+                // 壊さずに 1 個へ切れる（自前の Unicode 分割ロジックを書かない）。
+                trimmed = trimmed.first.map(String.init) ?? ""
+            }
             guard !trimmed.isEmpty else { return nil }
             var next = item
             next.text = trimmed
             next.center = item.center.clamped
-            next.style = item.style.clamped
+            next.style = item.style.clamped(maximumFontSize: item.role.maximumFontSize)
             return next
         }
         .sorted { $0.compositionStart < $1.compositionStart }

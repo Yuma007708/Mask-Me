@@ -224,3 +224,73 @@ kernel void textOverlayKernel(texture2d<float, access::read>   inTexture   [[tex
     result.a = base.a;
     outTexture.write(result, gid);
 }
+
+// ===========================================================================
+// Color grade (E4)
+//
+// Full-screen color correction (brightness/contrast/saturation/warmth), one
+// texture read and one write, no branching on the pixel path (only the
+// bounds guard, same shape as every other kernel in this file). This is a
+// straight transcription of `ColorGrade.apply(r:g:b:)`
+// (Sources/MosaicCore/Timeline/ColorGrade.swift) — the Swift function is the
+// reference implementation for the formula, this kernel is only a copy of
+// it (same split of responsibility as `TextQuadLayout` computing layout in
+// Swift and `textOverlayKernel` only sampling/blending it). If the formula
+// in `ColorGrade.apply` changes, mirror the change here too.
+//
+// Applied in display-referred (gamma) space, not linear light — matching
+// `blockAverage` above, which also averages in that space (see
+// `ColorGrade.apply`'s doc for why: mixing color spaces between the mosaic
+// and the grade would make colors disagree at block edges).
+//
+// Field order/types below must match the Swift-side parameter struct
+// exactly (same convention as `TextOverlayParams` / `TextOverlayRenderer`).
+// ===========================================================================
+
+struct ColorGradeParams {
+    float brightness; // -1...1
+    float contrast;   // 0...2
+    float saturation; // 0...2
+    float warmth;     // -1...1
+    uint  width;
+    uint  height;
+};
+
+kernel void colorGradeKernel(texture2d<float, access::read>  inTexture  [[texture(0)]],
+                             texture2d<float, access::write> outTexture [[texture(1)]],
+                             constant ColorGradeParams        &params     [[buffer(0)]],
+                             uint2                             gid        [[thread_position_in_grid]]) {
+    if (gid.x >= params.width || gid.y >= params.height) {
+        return;
+    }
+
+    float4 c = inTexture.read(gid);
+
+    // 1) warmth. `k` mirrors `ColorGrade.warmthStrength` in the Swift reference
+    //    implementation — keep the two literals in sync.
+    const float k = 0.3;
+    float r = c.r * (1.0 + k * params.warmth);
+    float g = c.g;
+    float b = c.b * (1.0 - k * params.warmth);
+
+    // 2) brightness.
+    r += params.brightness * 0.5;
+    g += params.brightness * 0.5;
+    b += params.brightness * 0.5;
+
+    // 3) contrast.
+    r = (r - 0.5) * params.contrast + 0.5;
+    g = (g - 0.5) * params.contrast + 0.5;
+    b = (b - 0.5) * params.contrast + 0.5;
+
+    // 4) saturation, mixed against Rec.709 luma.
+    float luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    r = luma + (r - luma) * params.saturation;
+    g = luma + (g - luma) * params.saturation;
+    b = luma + (b - luma) * params.saturation;
+
+    // 5) clamp. Alpha passes through unchanged (same convention as every
+    //    other kernel in this file).
+    float4 result = float4(clamp(r, 0.0, 1.0), clamp(g, 0.0, 1.0), clamp(b, 0.0, 1.0), c.a);
+    outTexture.write(result, gid);
+}

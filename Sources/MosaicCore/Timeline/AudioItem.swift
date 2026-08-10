@@ -50,11 +50,20 @@ public struct AudioItem: Equatable, Sendable, Identifiable {
     public var fadeInDuration: Double
     /// フェードアウト時間（秒。0 = フェードなし。E2-2）。`fadeInDuration` と同じ規則。
     public var fadeOutDuration: Double
+    /// BGM ダッキング（声区間で BGM を下げる）時に掛ける音量（0...1）。既定は 1（下げない）。
+    ///
+    /// **`AudioDuckingCurve` が素の音量より上げない方向のクランプの根拠にする値**なので、
+    /// `1` を上回ってはならない。NaN は 1（機能追加前の意味＝下げない）へ倒す
+    /// （`TimelineClip.clampedVolume` と同じ倒し方）。
+    public var duckingGain: Float {
+        didSet { duckingGain = Self.clampedDuckingGain(duckingGain) }
+    }
 
     public init(id: UUID = UUID(), sourceID: UUID,
                 sourceStart: Double, sourceEnd: Double,
                 compositionStart: Double, volume: Float = 1,
-                fadeInDuration: Double = 0, fadeOutDuration: Double = 0) {
+                fadeInDuration: Double = 0, fadeOutDuration: Double = 0,
+                duckingGain: Float = 1) {
         self.id = id
         self.sourceID = sourceID
         self.sourceStart = sourceStart
@@ -63,7 +72,14 @@ public struct AudioItem: Equatable, Sendable, Identifiable {
         self.volume = volume
         self.fadeInDuration = fadeInDuration
         self.fadeOutDuration = fadeOutDuration
+        // init 中は didSet が走らないため、TimelineClip の volume/rate と同様に明示的にクランプする。
+        self.duckingGain = Self.clampedDuckingGain(duckingGain)
         clampFades()
+    }
+
+    /// `duckingGain` を許容範囲（0...1）にクランプする。NaN は 1（下げない）に落とす。
+    public static func clampedDuckingGain(_ gain: Float) -> Float {
+        gain.isNaN ? 1 : min(max(gain, 0), 1)
     }
 
     /// 鳴っている長さ（秒）。**BGM に倍速は無い**ので素材尺と合成尺は常に一致する
@@ -125,7 +141,7 @@ public struct AudioItem: Equatable, Sendable, Identifiable {
 extension AudioItem: Codable {
     private enum CodingKeys: String, CodingKey {
         case id, sourceID, sourceStart, sourceEnd, compositionStart, volume
-        case fadeInDuration, fadeOutDuration
+        case fadeInDuration, fadeOutDuration, duckingGain
     }
 
     /// フェード（E2-2 で追加）の無い旧下書きは「フェードなし（0 秒）」として復元する。
@@ -142,6 +158,10 @@ extension AudioItem: Codable {
         volume = try container.decode(Float.self, forKey: .volume)
         fadeInDuration = try container.decodeIfPresent(Double.self, forKey: .fadeInDuration) ?? 0
         fadeOutDuration = try container.decodeIfPresent(Double.self, forKey: .fadeOutDuration) ?? 0
+        // ダッキングゲイン（機能追加前の意味＝下げない）。`Self.init` を経由しないため
+        // `didSet` は走らない。明示的にクランプする（`clampFades` と同じ理由）。
+        duckingGain = Self.clampedDuckingGain(
+            try container.decodeIfPresent(Float.self, forKey: .duckingGain) ?? 1)
         clampFades()
     }
 
@@ -155,5 +175,6 @@ extension AudioItem: Codable {
         try container.encode(volume, forKey: .volume)
         try container.encode(fadeInDuration, forKey: .fadeInDuration)
         try container.encode(fadeOutDuration, forKey: .fadeOutDuration)
+        try container.encode(duckingGain, forKey: .duckingGain)
     }
 }

@@ -178,7 +178,8 @@ struct VideoTimelineView: View {
         // 寄せてある（このファイルが file_length の閾値に張り付いているため）。
         .modifier(TimelineEditSheetsModifier(
             model: model, speedClipID: $speedSheetClipID, volumeTarget: $volumeSheetTarget,
-            transitionClipID: $transitionSheetClipID, showMediaPicker: $showMediaPicker,
+            transitionClipID: $transitionSheetClipID, freezeTargetTime: playheadTime,
+            showMediaPicker: $showMediaPicker,
             showAudioPicker: $showAudioPicker, audioInsertTime: playheadTime,
             showTextInputSheet: $showTextInputSheet, textInsertTime: playheadTime))
         .sheet(isPresented: $showAspectRatioSheet) {

@@ -57,7 +57,19 @@ enum TextRasterizer {
         // 縁取り・背景帯がはみ出さないよう周囲に余白を取る。
         let padding = max(strokeWidthPx, 2) * 2 + (hasBackground ? referenceFontPoints * 0.25 : 0)
 
-        let color = clamped.color.uiColor
+        // **不透明度は文字色のアルファに載せず、描画コンテキスト側で掛ける。**
+        //
+        // カラー絵文字（ステッカー）のグリフは前景色で塗られないため、
+        // `foregroundColor` のアルファが**一切効かない**（実測: alpha 0.4 でも
+        // 画素のアルファは 255 のまま。`test_rasterizeSticker_不透明度が実際の画素に効く`）。
+        // 文字色に載せたままだと「不透明度スライダーを動かしても何も起きない」UI になる。
+        //
+        // コンテキストへ掛ければ、通常の文字もカラー絵文字も同じ 1 つの仕組みで薄くなる。
+        // 文字は従来アルファ付きの前景色で薄くしていたので、**二重掛けを避けるため
+        // 属性側は不透明にする**。縁取りも一緒に薄くなるが、こちらが正しい
+        // （文字だけ薄くなって輪郭が不透明のまま残るのは見た目の破綻）。
+        let drawingAlpha = CGFloat(clamped.color.alpha)
+        let color = clamped.color.uiColor.withAlphaComponent(1)
         let attributed = NSAttributedString(string: text, attributes: [.font: font, .foregroundColor: color])
         let textSize = attributed.size()
         guard textSize.width.isFinite, textSize.height.isFinite else { return nil }
@@ -100,6 +112,11 @@ enum TextRasterizer {
             width: textSize.width,
             height: textSize.height
         )
+
+        // 背景帯は自分のアルファを既に持っているので、ここから先だけへ掛ける。
+        context.saveGState()
+        context.setAlpha(drawingAlpha)
+        defer { context.restoreGState() }
 
         if clamped.strokeWidth > 0 {
             // NSAttributedString の strokeWidth は「フォントサイズに対する百分率」で、

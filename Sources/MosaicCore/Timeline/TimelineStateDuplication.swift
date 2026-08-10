@@ -61,7 +61,31 @@ extension TimelineState {
         }
         let newRanges = applyRanges + copiedRanges
 
-        let state = replacing(clips: newClips, transitions: newTransitions, applyRanges: newRanges)
+        // 消音区間も適用区間と同じ理由で `clipID` スコープなので、複製先の `clipID` で複製する
+        // （`ClipAudioMuteRange` 型 doc 参照。複製したのに消音設定が引き継がれない事故を防ぐ）。
+        let copiedMuteRanges = clipAudioMuteRanges.filter { $0.clipID == clipID }.map {
+            ClipAudioMuteRange(clipID: copy.id, sourceID: $0.sourceID,
+                               sourceStart: $0.sourceStart, sourceEnd: $0.sourceEnd)
+        }
+        let newMuteRanges = clipAudioMuteRanges + copiedMuteRanges
+
+        // 声区間（ダッキングの根拠）も同じ `clipID` スコープなので、まったく同じ規則で複製する。
+        //
+        // **ここを忘れると `validate()` が落ちる**（複製先のクリップには区間が無いのに、
+        // 元クリップの区間だけが残る形自体は不正ではないが、`fuzz` が示したとおり
+        // 後続の分割・削除と組み合わさると実在しないクリップを指す孤児が生まれる）。
+        // `orientation` を複製が引き継がずマージで欠落した前科、`clipAudioMuteRanges` を
+        // 追加したときにここへ足した経緯と同じ。**クリップに `clipID` スコープの
+        // 付随データを足したら、必ずこの関数へ足すこと。**
+        let copiedDuckRanges = clipDuckRanges.filter { $0.clipID == clipID }.map {
+            ClipDuckRange(clipID: copy.id, sourceID: $0.sourceID,
+                          sourceStart: $0.sourceStart, sourceEnd: $0.sourceEnd)
+        }
+        let newDuckRanges = clipDuckRanges + copiedDuckRanges
+
+        let state = replacing(clips: newClips, transitions: newTransitions, applyRanges: newRanges,
+                              clipAudioMuteRanges: newMuteRanges,
+                              clipDuckRanges: newDuckRanges)
             .normalizingTransitions()
         return TimelineEdit(state, lineage: [.duplicate(original: clipID, copy: copy.id)])
     }

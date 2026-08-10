@@ -151,11 +151,15 @@ public struct ObjectMask: Identifiable, Equatable, Sendable {
     }
 
     /// キーフレーム 1 個のマスク（旧 `ManualRegion` 相当）。矩形が非有限なら nil。
+    /// - Parameter angle: 矩形の傾き（ラジアン）。**既定 0 に頼って省略しないこと。**
+    ///   傾きを持つマスクを作り直す経路（分割・フリーズ）でここを省くと、
+    ///   矩形が無回転へ戻って斜めの顔から外れる＝素通しになる。
+    ///   既定値は「傾きの概念が無かった頃の呼び出しの挙動を変えない」ためだけにある。
     public static func single(id: UUID = UUID(), anchor: Anchor,
-                              sourceTime: Double = 0, rect: CGRect,
+                              sourceTime: Double = 0, rect: CGRect, angle: Double = 0,
                               isRegionPlaceholder: Bool = false) -> ObjectMask? {
         ObjectMask(id: id, anchor: anchor,
-                   keyframes: [Keyframe(sourceTime: sourceTime, rect: rect)],
+                   keyframes: [Keyframe(sourceTime: sourceTime, rect: rect, angle: angle)],
                    isRegionPlaceholder: isRegionPlaceholder)
     }
 

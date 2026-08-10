@@ -103,6 +103,10 @@ public struct TextStyle: Codable, Equatable, Sendable {
     /// 既定の文字サイズ（1080p で約 54px）。
     public static let defaultFontSize: Double = 0.05
 
+    /// ステッカー（絵文字 1 個）に許す上限（出力枠高さ比）。文字と違い 1 個しか
+    /// 置かないので、画面いっぱいまで拡大してよい。
+    public static let maximumStickerSize: Double = 1.0
+
     public var fontSize: Double
     public var fontFamily: TextFontFamily
     public var color: RGBAColor
@@ -132,16 +136,30 @@ public struct TextStyle: Codable, Equatable, Sendable {
         self.backgroundColor = backgroundColor
     }
 
-    /// 全項目を有効域へ収める。**描画へ渡す前に必ず通すこと**
-    /// （非有限が 1 つ混じるだけでレイアウト全体が NaN 汚染される）。
-    public var clamped: TextStyle {
+    /// ステッカーの既定見た目。絵文字自体が装飾を持つので、縁取り・背景は載せない。
+    public static let stickerDefault = TextStyle(fontSize: 0.18, strokeWidth: 0, backgroundOpacity: 0)
+
+    /// 全項目を有効域へ収める（`fontSize` の上限は `TextStyle.maximumFontSize`）。
+    /// **描画へ渡す前に必ず通すこと**（非有限が 1 つ混じるだけでレイアウト全体が
+    /// NaN 汚染される）。
+    ///
+    /// ステッカーは上限が異なる（`TextItemRole.maximumFontSize` 参照）ので、
+    /// その経路は `clamped(maximumFontSize:)` を直接呼ぶこと。数式はそちら 1 本に
+    /// まとめてあり、ここはその既定引数版でしかない。
+    public var clamped: TextStyle { clamped(maximumFontSize: Self.maximumFontSize) }
+
+    /// 全項目を有効域へ収める（`fontSize` の上限を呼び出し側から指定する版）。
+    ///
+    /// **数式は 1 本。** 役割ごとの上限違いは呼び出し側（`TextItemRole.maximumFontSize`）
+    /// が渡す引数の違いだけで表現し、ここに役割の分岐を書かない。
+    public func clamped(maximumFontSize: Double) -> TextStyle {
         func unit(_ value: Double, fallback: Double) -> Double {
             guard value.isFinite else { return fallback }
             return min(max(value, 0), 1)
         }
         var result = self
         result.fontSize = fontSize.isFinite
-            ? min(max(fontSize, Self.minimumFontSize), Self.maximumFontSize)
+            ? min(max(fontSize, Self.minimumFontSize), maximumFontSize)
             : Self.defaultFontSize
         result.strokeWidth = unit(strokeWidth, fallback: 0)
         result.backgroundOpacity = unit(backgroundOpacity, fallback: 0)
@@ -149,6 +167,30 @@ public struct TextStyle: Codable, Equatable, Sendable {
         result.strokeColor = strokeColor.clamped
         result.backgroundColor = backgroundColor.clamped
         return result
+    }
+}
+
+/// `TextItem` が画面上で担う役割。
+///
+/// **新しい型・新しいレイヤー段は作らない。** 絵文字ステッカーは `TextItem` に
+/// この役割を 1 つ足すだけで相乗りさせる（CoreText がそのまま絵文字を描けるので、
+/// 描画経路は無変更で済む）。
+public enum TextItemRole: String, Codable, Equatable, Sendable {
+    /// 通常の文字。
+    case text
+    /// 絵文字ステッカー（書記素クラスタ 1 個）。
+    case sticker
+
+    /// この役割に許す `TextStyle.fontSize` の上限（出力枠高さ比）。
+    ///
+    /// **`normalizedTextItems` と `validateTextItems` の両方がこの 1 本だけを見る。**
+    /// 二重に書くと「正規化は通すが validate は落ちる」状態を作れてしまう
+    /// （`TimelineStateTextEditing.swift` の doc 参照）。
+    public var maximumFontSize: Double {
+        switch self {
+        case .text: return TextStyle.maximumFontSize
+        case .sticker: return TextStyle.maximumStickerSize
+        }
     }
 }
 
@@ -183,12 +225,16 @@ public struct TextItem: Codable, Equatable, Sendable, Identifiable {
     public var center: NormalizedPoint
     public var style: TextStyle
     public var animation: TextAnimation
+    /// この項目が「文字」か「絵文字ステッカー」か（S12 で追加）。既定は `.text`
+    /// （v5 以前の下書きは全部これだった）。
+    public var role: TextItemRole
 
     public init(id: UUID = UUID(), text: String,
                 compositionStart: Double, duration: Double,
                 center: NormalizedPoint = .center,
                 style: TextStyle = TextStyle(),
-                animation: TextAnimation = .none) {
+                animation: TextAnimation = .none,
+                role: TextItemRole = .text) {
         self.id = id
         self.text = text
         self.compositionStart = compositionStart
@@ -196,6 +242,34 @@ public struct TextItem: Codable, Equatable, Sendable, Identifiable {
         self.center = center
         self.style = style
         self.animation = animation
+        self.role = role
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, text, compositionStart, duration, center, style, animation, role
+    }
+
+    /// `role`（v6 で追加）を持たない旧下書き、および未知の役割文字列を `.text` へ倒す。
+    ///
+    /// **ここで throw すると `role` の無い旧下書きが丸ごと開けなくなる。**
+    /// `TimelineAspectRatio` の decode（`TimelineStateCodable.swift`）と同じ流儀:
+    /// 二重オプショナルでコンテナ自体の欠如（キー無し）と型不一致（未知の値）の
+    /// 両方を吸収し、どちらも `.text` に倒す。
+    ///
+    /// **`encode(to:)` は書かない。** `CodingKeys` に格納プロパティ以外の case が
+    /// 無いので、Encodable の自動合成がそのまま成立し `role` も書かれる
+    /// （`TimelineStateCodable.swift` の `schemaVersion` のような手書きが必要なケースとは違う）。
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        text = try container.decode(String.self, forKey: .text)
+        compositionStart = try container.decode(Double.self, forKey: .compositionStart)
+        duration = try container.decode(Double.self, forKey: .duration)
+        center = try container.decode(NormalizedPoint.self, forKey: .center)
+        style = try container.decode(TextStyle.self, forKey: .style)
+        animation = try container.decode(TextAnimation.self, forKey: .animation)
+        let decodedRole: TextItemRole?? = try? container.decodeIfPresent(TextItemRole.self, forKey: .role)
+        role = (decodedRole ?? .text) ?? .text
     }
 
     /// 合成タイムライン上の終端（秒・半開区間の右端）。

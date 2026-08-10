@@ -120,8 +120,15 @@ extension MosaicPreviewController {
                                     atComposition: timeSec)
             : []
 
+        // 色調補正（P4）は「モザイクの前」（`ColorGradeCompositor` の doc・規則 1）。
+        // 検出（`shouldDetectPreviewFrame` / `submitPreviewFrameForDetection`、上の呼び出し）
+        // は `pixelBuffer` 由来の `detectionCGImage` を使っており、ここより前・かつこの
+        // 合成を経由しない生バッファなので影響を受けない（規則 3）。
+        let grade = model.timeline.colorGrade(atComposition: timeSec)
+        let gradedTex = ColorGradeCompositor.apply(grade: grade, renderer: renderer, input: tex)
+
         guard let result = renderer.renderToNewTexture(
-            input: tex,
+            input: gradedTex,
             landmarkSets: landmarks,
             additionalPaths: additionalPaths
         ) else { return false }

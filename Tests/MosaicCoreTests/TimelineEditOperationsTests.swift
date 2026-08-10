@@ -16,8 +16,9 @@ final class TimelineEditOperationsTests: XCTestCase {
     /// 分割後の 2 クリップは sourceID・rate・音量を引き継ぎ、
     /// 前半が元の id を維持、後半が新しい id を持つこと。
     func test_splitInheritsAttributesAndKeepsFrontID() {
+        let grade = ColorGrade(brightness: 0.2, contrast: 1.3, saturation: 0.6, warmth: -0.4)
         let original = TimelineClip(sourceID: sourceA, sourceStart: 1, sourceEnd: 5,
-                                    originalAudioVolume: 0.5, rate: 2.0) // 合成 2 秒
+                                    originalAudioVolume: 0.5, rate: 2.0, colorGrade: grade) // 合成 2 秒
         let result = TimelineEditOperations.split(clips: [original], at: 1.0)
 
         XCTAssertEqual(result.count, 2)
@@ -31,11 +32,12 @@ final class TimelineEditOperationsTests: XCTestCase {
         XCTAssertNotEqual(back.id, original.id)
         XCTAssertEqual(back.sourceStart, 3.0, accuracy: 1e-9)
         XCTAssertEqual(back.sourceEnd, 5.0, accuracy: 1e-9)
-        // 両者とも sourceID・rate・音量を引き継ぐ。
+        // 両者とも sourceID・rate・音量・色調補正を引き継ぐ。
         for clip in result {
             XCTAssertEqual(clip.sourceID, sourceA)
             XCTAssertEqual(clip.rate, 2.0, accuracy: 1e-9)
             XCTAssertEqual(clip.originalAudioVolume, 0.5)
+            XCTAssertEqual(clip.colorGrade, grade, "分割で色調補正が引き継がれない")
         }
     }
 
@@ -330,11 +332,15 @@ final class TimelineEditOperationsTests: XCTestCase {
     // MARK: - duplicate
 
     /// 複製先は新規 id を持ち、元クリップの直後に挿入され、
-    /// sourceID・sourceStart/sourceEnd・rate・音量を引き継ぐこと。
+    /// sourceID・sourceStart/sourceEnd・rate・音量・色調補正を引き継ぐこと。
+    ///
+    /// **色調補正の引き継ぎには前科がある**（`orientation` が同種の複製実装で漏れた。
+    /// `TimelineEditOperations.duplicate` の doc 参照）ので、必ず固定する。
     func test_duplicateInsertsCopyRightAfterOriginalWithSameAttributes() {
         let clips = makeClips()
+        let grade = ColorGrade(brightness: -0.3, contrast: 0.7, saturation: 1.5, warmth: 0.5)
         let original = TimelineClip(sourceID: sourceA, sourceStart: 1, sourceEnd: 5,
-                                    originalAudioVolume: 0.5, rate: 2.0)
+                                    originalAudioVolume: 0.5, rate: 2.0, colorGrade: grade)
         let result = TimelineEditOperations.duplicate(clips: [original, clips[1]], clipID: original.id)
 
         XCTAssertEqual(result.count, 3)
@@ -346,6 +352,7 @@ final class TimelineEditOperationsTests: XCTestCase {
         XCTAssertEqual(copy.sourceEnd, original.sourceEnd, accuracy: 1e-9)
         XCTAssertEqual(copy.rate, original.rate, accuracy: 1e-9)
         XCTAssertEqual(copy.originalAudioVolume, original.originalAudioVolume)
+        XCTAssertEqual(copy.colorGrade, grade, "複製で色調補正が引き継がれない")
         // 元のクリップ B はそのまま残る。
         XCTAssertEqual(result[2], clips[1])
     }

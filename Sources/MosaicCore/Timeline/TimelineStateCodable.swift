@@ -8,7 +8,8 @@ extension TimelineState {
     // MARK: - Codable（後方互換）
 
     private enum CodingKeys: String, CodingKey {
-        case clips, transitions, applyRanges, audioItems, textItems, sources, aspectRatio, schemaVersion
+        case clips, transitions, applyRanges, clipAudioMuteRanges, clipDuckRanges, audioItems, textItems,
+             sources, aspectRatio, schemaVersion
     }
 
     /// `clipID` を持たない v1 の適用区間（デコード専用）。
@@ -59,6 +60,15 @@ extension TimelineState {
             self.applyRanges = Self.migratedApplyRanges(
                 legacy: legacy, clips: clips, photoSourceIDs: Self.photoSourceIDs(in: sources))
         }
+        // クリップ内消音区間（v6 で追加）。空 = 消音なしがそのまま既定の意味なので、
+        // BGM/テキストと同じく「キーが無ければ空」で復元するだけで移行処理は要らない
+        // （`applyRanges` と違い、旧仕様で意味が逆転していた過去が無いため）。
+        self.clipAudioMuteRanges = try container.decodeIfPresent(
+            [ClipAudioMuteRange].self, forKey: .clipAudioMuteRanges) ?? []
+        // 声区間（v7 で追加）。BGM/テキストと同じく「キーが無ければ空」で復元するだけで
+        // 移行処理は要らない（意味が逆転していた過去も無い）。
+        self.clipDuckRanges = try container.decodeIfPresent(
+            [ClipDuckRange].self, forKey: .clipDuckRanges) ?? []
     }
 
     /// **`CodingKeys` に格納プロパティの無い case（`schemaVersion`）を足したので、
@@ -70,6 +80,8 @@ extension TimelineState {
         try container.encode(clips, forKey: .clips)
         try container.encode(transitions, forKey: .transitions)
         try container.encode(applyRanges, forKey: .applyRanges)
+        try container.encode(clipAudioMuteRanges, forKey: .clipAudioMuteRanges)
+        try container.encode(clipDuckRanges, forKey: .clipDuckRanges)
         try container.encode(audioItems, forKey: .audioItems)
         try container.encode(textItems, forKey: .textItems)
         try container.encode(sources, forKey: .sources)
