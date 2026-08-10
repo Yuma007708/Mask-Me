@@ -1168,20 +1168,9 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
         let rawBoxes = bboxDetector.detectFaceBoundingBoxes(in: image)
         if rawBoxes.isEmpty { return mpResults }
         // 補助検出器の生 bbox を「明らかに顔ではない形状」で前段ガードする。
-        // torso / 首・胸元・肩・髪など顔でない領域の bbox を弾き、ROI 再検出のコストも節約する。
-        // - 6% 未満は多くの誤検知（腕・首・耳など）を含むので棄却
-        // - 縦横比は**ピクセル換算**で判定する。正規化比で判定していた頃は素材の
-        //   アスペクト比がそのまま比に乗るため、実顔の bbox が素材の向きだけで落ちていた
-        //   （実測: 720x1280 縦動画では正方形 bbox が正規化 w/h=1.78、1280x674 横動画では
-        //   同じ bbox が 0.53 になり、旧ガード 0.6...1.4 の外側へ出る）。
-        //   実測 180 個の生 bbox のピクセル w/h は 0.53〜1.06（YuNet は 0.77 前後、
-        //   MediaPipe FaceDetector は正方形の 1.00）に収まったので、余裕を見て 0.5...1.6。
-        let imageAspect = image.size.height > 0 ? image.size.width / image.size.height : 1
-        let candidateBoxes = rawBoxes.filter { box in
-            guard box.width >= 0.06, box.height >= 0.06, box.height > 0 else { return false }
-            let pixelRatio = (box.width / box.height) * imageAspect
-            return pixelRatio >= 0.5 && pixelRatio <= 1.6
-        }
+        // 大きさ・縦横比とも**ピクセル換算**で判定する（正規化のまま持つと素材の向きだけで
+        // 実顔が落ちる）。判定の実体と実測の根拠は `RawFaceBoxGate` を参照。
+        let candidateBoxes = rawBoxes.filter { RawFaceBoxGate.accepts($0, imageSize: image.size) }
         if candidateBoxes.isEmpty { return mpResults }
         let mpBoxes = mpResults.map { $0.boundingBox }
         let novelBoxes = candidateBoxes.filter { vb in

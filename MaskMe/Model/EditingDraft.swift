@@ -24,16 +24,24 @@ struct DraftSource: Codable, Equatable, Hashable {
 ///   ずれる。`displayFaces(at:matching:)` の doc 参照）。
 /// （`public`: `MosaicEditorModel.applyRestoredParameters` の引数に現れるため。
 /// アプリターゲット内でのみ使う型で、外部へ公開する意図は無い。）
+///
+/// - `personID` は保存時に同定できていた人物（`EditingDraft.personProfiles` の要素の ID）。
+///   重心と違って**保存した時刻に縛られない**ため、再開時に顔が別の場所・別の時刻に
+///   居ても結び直せる（`DraftSelectionResolver`）。署名が取れていなかった顔と、
+///   人物 ID を保存する前の下書きでは nil で、従来どおり重心だけで照合される。
 public struct DraftFaceSelection: Codable, Equatable, Hashable {
     /// 顔が属する素材ID（`FaceTarget.sourceID`）。写真下書き・素材ID導入前の顔は
     /// nil で、復元時は素材不問で照合される。
     public let sourceID: UUID?
     /// 選択されていた顔の正規化重心（素材フレーム基準）。
     public let centroid: CGPoint
+    /// 選択されていた顔の人物 ID（同定できていた場合）。
+    public let personID: UUID?
 
-    public init(sourceID: UUID?, centroid: CGPoint) {
+    public init(sourceID: UUID?, centroid: CGPoint, personID: UUID? = nil) {
         self.sourceID = sourceID
         self.centroid = centroid
+        self.personID = personID
     }
 }
 
@@ -66,6 +74,16 @@ struct EditingDraft: Codable, Identifiable, Equatable {
     ///   下書き）。復元時は従来どおり初期スキャンの自動選択規則に落ちる。
     /// - `[]` = 保存時点でどの顔も選択されていなかった（情報としては有効）。
     let faceSelections: [DraftFaceSelection]?
+    /// 保存時に選択されていた顔の人物（`faceSelections[].personID` の参照先）。
+    ///
+    /// **選択されていた人物だけを保存する。** 顔の埋め込みは生体特徴そのものなので、
+    /// 復元に要らない人物（隠す対象に選ばれていない人）のぶんまでディスクに残さない。
+    /// 台帳全体を保存しないことで、再開時に「非選択だった人」を人物 ID で識別することは
+    /// できなくなるが、その場合の判定は従来どおり位置照合→安全側（全選択）へ落ちるだけで、
+    /// 顔が露出する方向には倒れない。
+    ///
+    /// nil は「情報なし」（この機能より前の下書き）。
+    let personProfiles: [PersonProfile]?
     let thumbnailFileName: String?
     let updatedAt: Date
 
@@ -81,6 +99,7 @@ struct EditingDraft: Codable, Identifiable, Equatable {
         backgroundBlockSize: Float,
         manualRects: [CGRect],
         faceSelections: [DraftFaceSelection]? = nil,
+        personProfiles: [PersonProfile]? = nil,
         thumbnailFileName: String?,
         updatedAt: Date = Date()
     ) {
@@ -95,6 +114,7 @@ struct EditingDraft: Codable, Identifiable, Equatable {
         self.backgroundBlockSize = backgroundBlockSize
         self.manualRects = manualRects
         self.faceSelections = faceSelections
+        self.personProfiles = personProfiles
         self.thumbnailFileName = thumbnailFileName
         self.updatedAt = updatedAt
     }
@@ -108,7 +128,7 @@ struct EditingDraft: Codable, Identifiable, Equatable {
     private enum CodingKeys: String, CodingKey {
         case id, kind, sourceFileName, manualRects, thumbnailFileName, updatedAt
         case faceMosaicOn, backgroundMosaicOn, faceBlockSize, backgroundBlockSize
-        case sources, timeline, faceSelections
+        case sources, timeline, faceSelections, personProfiles
     }
 
     // 旧スキーマ（後方互換デコード専用）。
@@ -141,6 +161,10 @@ struct EditingDraft: Codable, Identifiable, Equatable {
         // `?? []` にしてはならない: 「情報なし」と「0 個選択」が区別できなくなり、
         // 旧下書きの単独の顔まで選択が外れる。
         faceSelections = try c.decodeIfPresent([DraftFaceSelection].self, forKey: .faceSelections)
+
+        // 人物（新フィールド）。キー無しの下書きは nil＝「情報なし」で、目印の personID も
+        // 揃って nil になるため、復元は従来どおり重心照合だけで進む。
+        personProfiles = try c.decodeIfPresent([PersonProfile].self, forKey: .personProfiles)
 
         // 旧フィールド（存在すれば）。
         let legacy = try? decoder.container(keyedBy: LegacyKeys.self)

@@ -184,7 +184,8 @@ extension MosaicEditorModel {
             guard isMosaicActive(clipID: resolved.clipID, sourceID: resolved.sourceID,
                                  sourceTime: resolved.time) else { return [] }
             let faces = selecting(lookupFaces(sourceID: resolved.sourceID, sourceTime: resolved.time),
-                                  sourceID: resolved.sourceID, targets: targets)
+                                  sourceID: resolved.sourceID, sourceTime: resolved.time,
+                                  targets: targets)
             return renderLayout.remap(faces, clipID: resolved.clipID)
         }
         return locations.flatMap { entry -> [FaceLandmarkSet] in
@@ -195,7 +196,8 @@ extension MosaicEditorModel {
                                  sourceID: entry.location.sourceID,
                                  sourceTime: sourceTime) else { return [] }
             let faces = selecting(lookupFaces(sourceID: entry.location.sourceID, sourceTime: sourceTime),
-                                  sourceID: entry.location.sourceID, targets: targets)
+                                  sourceID: entry.location.sourceID, sourceTime: sourceTime,
+                                  targets: targets)
             let placed = renderLayout.remap(faces, clipID: entry.location.clipID)
             return overlap.kind.visibleLandmarks(placed, progress: progress, side: side)
         }
@@ -203,13 +205,26 @@ extension MosaicEditorModel {
 
     /// **素材フレーム基準**のキャッシュ顔を、選択顔（`FaceTarget`）に対応するものだけへ絞る。
     ///
-    /// 重心の近さで照合する（閾値 0.5: 広め。素材座標で調整された値）。
+    /// 判定は 2 段。**署名は確信があるときだけ位置判断を覆す**
+    /// （規則の表は `FaceIdentityPolicy.hidden` の doc）。位置だけで見ていた頃は
+    ///
+    /// - 選んだ人がフレームアウトして別位置から戻ると、重心が 0.5 以上離れて外れる
+    /// - 選んでいない人が選んだ人の隣（0.5 以内）に来ると巻き添えで隠れる
+    ///
+    /// の両方が起きていた。署名が「別人と言い切れる」ときにだけ素のまま残し、
+    /// 迷ったら隠す（プライバシーアプリなので露出の方が取り返しがつかない）。
+    ///
+    /// 位置の当たり判定は従来どおり**素材座標での重心 0.5**（この閾値は素材座標で
+    /// 調整されてきた値なので、写像より前に評価する。呼び出し側の doc 参照）。
     /// 照合対象はこの素材に属する選択顔だけ（別素材の「似た位置の顔」との誤マッチ防止）。
     /// `sourceID` が nil の顔（写真モード・素材ID導入前の経路・テスト直注入）は
     /// 従来どおり素材不問で照合する。この素材の選択顔が 1 つも無ければ空
     /// （＝その素材の顔にはモザイクを掛けない）。
+    ///
+    /// `sourceTime` は署名を引くために要る。**`faces` を引いたのと同じ素材時刻**を渡すこと
+    /// （別の時刻で引くと、顔と署名が別フレームのものになり添字がずれる）。
     private func selecting(_ faces: [FaceLandmarkSet],
-                           sourceID: UUID?,
+                           sourceID: UUID?, sourceTime: Double,
                            targets: [FaceTarget]?) -> [FaceLandmarkSet] {
         guard let targets else { return faces }
         let scoped = targets.filter { target in
@@ -218,10 +233,18 @@ extension MosaicEditorModel {
         }
         guard !scoped.isEmpty else { return [] }
         let centroids = scoped.map { normalizedCentroid(of: $0.landmarks) }
-        return faces.filter { face in
+        let spatiallyMatched = faces.map { face in
             let center = normalizedCentroid(of: face)
             return centroids.contains { hypot(center.x - $0.x, center.y - $0.y) < 0.5 }
         }
+        let signatures = sourceID.map {
+            signatureCache.signatures(for: faces, sourceID: $0, time: sourceTime)
+        } ?? [FaceSignature?](repeating: nil, count: faces.count)
+        return FaceIdentityPolicy.hidden(
+            faces: faces,
+            signatures: signatures,
+            spatiallyMatched: spatiallyMatched,
+            selectedPersons: selectedPersonProfiles(of: scoped))
     }
 
     /// `detectionCache` のうち素材時刻 `sourceTime` から `window` 秒以内で最も近い

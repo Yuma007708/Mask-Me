@@ -104,7 +104,14 @@ extension MosaicEditorModel {
     /// `timeSec` は合成時刻。素材キーへの写像は書き込み側（`storeLiveDetection`）が
     /// 行うため、ここでは丸めも写像もせず生の合成時刻を持ち回る
     /// （合成時刻で先に丸めると rate≠1 でキーが分裂する。`resolveSourceTime` の doc 参照）。
-    func submitPreviewFrameForDetection(_ cgImage: CGImage, at timeSec: Double) {
+    ///
+    /// - Parameter signatureSource: 原寸フレームの取り出し口。**署名を測るフレームだけ**
+    ///   評価され、評価は `liveSignatureQueue`（検出とは別のキュー）で行う。
+    ///   なぜ原寸が要るかは
+    ///   `FaceSignatureProvider.signatures(for:detection:native:)` の doc、
+    ///   なぜ検出キューから外すかは `liveSignatureQueue` の doc 参照。
+    func submitPreviewFrameForDetection(_ cgImage: CGImage, at timeSec: Double,
+                                        signatureSource: (() -> CGImage?)? = nil) {
         guard !liveDetectionInFlight else { return }
         liveDetectionInFlight = true
         // submit 時点の世代トークンを閉じ込める。検出中にタイムライン編集が入ると、
@@ -113,14 +120,32 @@ extension MosaicEditorModel {
         // （S3 レビューの観測事項）。書き込み側（世代チェック付き storeLiveDetection）
         // が照合して不一致なら破棄する。
         let generation = timelineGeneration
+        // 署名を計算するかは**この時点**で決める（推論はバックグラウンドで走るので、
+        // 判断を後ろへ回すと間引きが効かない）。フロー橋渡し由来の顔は実検出ではないため、
+        // 計算するかどうかは検出結果を見てから最終判断する（下の `wantsSignatures &&`）。
+        let wantsSignatures = beginSignatureIntervalIfDue(atComposition: timeSec)
         liveDetectionQueue.async { [weak self, liveScanner] in
             let img = UIImage(cgImage: cgImage)
             // liveLandmarks は IMAGE 検出に加えてテンポラル ROI 再検出・フロー橋渡しで
             // 横顔・急な頭部回転を追跡する（再生ストリームの時系列＝合成時刻の生値を渡す:
             // 丸めると adapter 側のシーク不連続検知が鈍る）。
             let detection = liveScanner.liveLandmarks(in: img, atMediaSeconds: timeSec)
+            // 検出結果は**署名を待たずに**記録する。in-flight ガードもここで下りるので、
+            // 次のフレームの検出は署名の完了に引っ張られない（`liveSignatureQueue` の doc）。
             Task { @MainActor in
-                self?.storeLiveDetection(detection, at: timeSec, source: img, generation: generation)
+                self?.storeLiveDetection(detection, at: timeSec, source: img,
+                                         generation: generation)
+            }
+            // 署名（原寸の取り出し + SFace 推論）は別キューで後から追いつく。
+            guard wantsSignatures, !detection.bridgedByFlow, !detection.faces.isEmpty
+            else { return }
+            self?.liveSignatureQueue.async { [weak self] in
+                let signatures = FaceSignatureProvider.shared.signatures(
+                    for: detection.faces, detection: img, native: { signatureSource?() })
+                Task { @MainActor in
+                    self?.storeLiveSignatures(signatures, for: detection.faces,
+                                              at: timeSec, generation: generation)
+                }
             }
         }
     }
@@ -131,12 +156,13 @@ extension MosaicEditorModel {
     /// 次のフレームの検出を止めない。
     @MainActor
     func storeLiveDetection(_ detection: LiveDetectionResult, at t: Double,
-                            source: UIImage, generation: Int) {
+                            source: UIImage, signatures: [FaceSignature?]? = nil,
+                            generation: Int) {
         guard generation == timelineGeneration else {
             liveDetectionInFlight = false
             return
         }
-        storeLiveDetection(detection, at: t, source: source)
+        storeLiveDetection(detection, at: t, source: source, signatures: signatures)
     }
 
     /// シーク時にライブ追跡状態（ROI track / フロー）を破棄する。adapter 側の
@@ -156,9 +182,10 @@ extension MosaicEditorModel {
     /// 両キャッシュとも**同じ写像済み素材キー**を使う（片方だけ合成時刻キーだと、
     /// lookupFaces の素材時刻検索から取り残される）。
     @MainActor
-    func storeLiveDetection(_ detection: LiveDetectionResult, at t: Double, source: UIImage) {
+    func storeLiveDetection(_ detection: LiveDetectionResult, at t: Double, source: UIImage,
+                            signatures: [FaceSignature?]? = nil) {
         guard detection.bridgedByFlow else {
-            storeLiveDetection(detection.faces, at: t, source: source)
+            storeLiveDetection(detection.faces, at: t, source: source, signatures: signatures)
             return
         }
         liveDetectionInFlight = false
@@ -199,7 +226,8 @@ extension MosaicEditorModel {
     /// `t` は**合成時刻**（クリップ未構築のテスト注入では恒等フォールバックにより
     /// 従来どおり素材時刻と同値）。
     @MainActor
-    func storeLiveDetection(_ faces: [FaceLandmarkSet], at t: Double, source: UIImage) {
+    func storeLiveDetection(_ faces: [FaceLandmarkSet], at t: Double, source: UIImage,
+                            signatures: [FaceSignature?]? = nil) {
         liveDetectionInFlight = false
         let (sourceID, sourceTime) = resolveSourceTime(atComposition: t)
         #if DEBUG
@@ -216,6 +244,11 @@ extension MosaicEditorModel {
         // ことで shouldDetectPreviewFrame が同じ顔なしフレームを再スキャンし続ける
         // 無駄も止まる（DetectionBridge / nearestCachedFaces は空エントリを無視する）。
         cacheStore.store(faces, sourceID: sourceID, time: sourceTime)
+        // 署名は顔と**同じ瞬間・同じキー**でしか書かない（添字がずれると別人の署名で
+        // 判定してしまう）。件数が合わない呼び出しは `FaceSignatureCache` 側が弾く。
+        if let signatures {
+            signatureCache.store(signatures, for: faces, sourceID: sourceID, time: sourceTime)
+        }
         // ポーズ中のシーク先で検出が終わったとき、次の displayLink を待たずに
         // モザイクを反映する（再生中は毎フレーム描画されるので実質無害）。
         previewController?.invalidate()
@@ -239,10 +272,11 @@ extension MosaicEditorModel {
         while liveMatchCounts.count < detectedFaces.count { liveMatchCounts.append(0) }
         for (i, target) in detectedFaces.enumerated() {
             let tc = normalizedCentroid(of: target.landmarks)
-            if let matched = faces.min(by: { a, b in
-                let ac = normalizedCentroid(of: a), bc = normalizedCentroid(of: b)
+            if let matchedIndex = faces.indices.min(by: { a, b in
+                let ac = normalizedCentroid(of: faces[a]), bc = normalizedCentroid(of: faces[b])
                 return hypot(ac.x - tc.x, ac.y - tc.y) < hypot(bc.x - tc.x, bc.y - tc.y)
             }) {
+                let matched = faces[matchedIndex]
                 let mc = normalizedCentroid(of: matched)
                 // 単一ターゲット × 単一検出のときは距離条件を課さない（同一人物とみなす）。
                 // フレームアウト→反対側から再インすると距離 0.5 を超え、位置追従だけでは
@@ -254,11 +288,38 @@ extension MosaicEditorModel {
                     // まま固定すると、selectedLandmarks の重心マッチングが「移動した顔・
                     // フレームアウト→別位置で再インした顔」と永久にマッチしなくなる。
                     detectedFaces[i].landmarks = matched
+                    // マッチした顔の署名だけを人物 ID へ育てる。マッチしなかった
+                    // （距離 0.5 以上離れた）顔の署名をここで混ぜると、隣の人の
+                    // 手本がこの人物に混入する。
+                    if let signature = signatures?[matchedIndex] {
+                        assignPerson(signature, toTargetAt: i)
+                    }
                 }
             }
             detectedFaces[i].detectionRate =
                 Double(liveMatchCounts[i]) / Double(liveSampleCount) * 100
         }
+    }
+
+    /// 署名を台帳へ入れ、ターゲットに人物 ID を結び付ける。
+    ///
+    /// - 既に人物 ID が付いているターゲットは、その人物へ手本を足すだけにする
+    ///   （`register` に任せると、向きが変わって類似度が落ちた瞬間に**別人として
+    ///   新規登録**され、同じ人が一覧で 2 人に割れる）。
+    /// - まだ付いていないターゲットだけ `register` に判断させる。判断保留の帯
+    ///   （`distinct` 〜 `match`）では nil が返り、人物 ID は付かないまま
+    ///   ＝位置追跡と安全側（隠す）に委ねられる。
+    ///
+    /// 初期スキャンのシードは対応する `seedPersonIDs`
+    /// （`MosaicEditorModel+TimelineMedia.swift`）を使う。あちらは `detectedFaces` へ
+    /// 載せる前に人物 ID を決める必要があり、ターゲットの添字を取れない。
+    @MainActor
+    private func assignPerson(_ signature: FaceSignature, toTargetAt index: Int) {
+        if let existing = detectedFaces[index].personID {
+            personRegistry.addExemplar(signature, toPersonWith: existing)
+            return
+        }
+        detectedFaces[index].personID = personRegistry.register(signature)
     }
 
     /// `nearestFlowFaces(sourceID:sourceTime:)` の合成時刻版。入口で素材ID・素材時刻へ

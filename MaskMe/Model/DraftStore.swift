@@ -50,6 +50,14 @@ final class DraftStore: ObservableObject {
         return nil
     }
 
+    /// 下書きID に保存されている人物（`faceSelections` の `personID` の参照先）。
+    /// nil は「情報なし」で、復元は重心照合だけになる。
+    func personProfiles(forDraftID id: UUID) -> [PersonProfile]? {
+        if let draft = videoDrafts.first(where: { $0.id == id }) { return draft.personProfiles }
+        if let photo = photoDraft, photo.id == id { return photo.personProfiles }
+        return nil
+    }
+
     func thumbnail(for draft: EditingDraft) -> UIImage? {
         guard let name = draft.thumbnailFileName else { return nil }
         let url = directory.appendingPathComponent(name)
@@ -85,6 +93,7 @@ final class DraftStore: ObservableObject {
         backgroundBlockSize: Float,
         manualRects: [CGRect],
         faceSelections: [DraftFaceSelection]? = nil,
+        personProfiles: [PersonProfile]? = nil,
         thumbnail: UIImage?
     ) -> EditingDraft? {
         var draftSources: [DraftSource] = []
@@ -106,6 +115,7 @@ final class DraftStore: ObservableObject {
             backgroundBlockSize: backgroundBlockSize,
             manualRects: manualRects,
             faceSelections: faceSelections,
+            personProfiles: personProfiles,
             thumbnailFileName: thumbName
         )
         if let index = videoDrafts.firstIndex(where: { $0.id == draft.id }) {
@@ -129,7 +139,8 @@ final class DraftStore: ObservableObject {
         faceBlockSize: Float,
         backgroundBlockSize: Float,
         manualRects: [CGRect],
-        faceSelections: [DraftFaceSelection]? = nil
+        faceSelections: [DraftFaceSelection]? = nil,
+        personProfiles: [PersonProfile]? = nil
     ) {
         let id = existing ?? photoDraft?.id ?? UUID()
         let fileName = "photo-\(id.uuidString).jpg"
@@ -146,6 +157,7 @@ final class DraftStore: ObservableObject {
             backgroundBlockSize: backgroundBlockSize,
             manualRects: manualRects,
             faceSelections: faceSelections,
+            personProfiles: personProfiles,
             thumbnailFileName: nil
         )
         savePhotoIndex()

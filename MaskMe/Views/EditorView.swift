@@ -340,7 +340,11 @@ struct EditorView: View {
                 // 顔選択の目印は `ResumeContext` を経由せず下書き本体から引く
                 // （復元専用の内部情報で、下書き ID から一意に取れる）。
                 // nil＝新フィールド導入前の下書き → 顔の選択状態には触れない。
-                faceSelections: draftStore.faceSelections(forDraftID: resume.draftID)
+                faceSelections: draftStore.faceSelections(forDraftID: resume.draftID),
+                // 目印が指す人物。**目印と必ず同じ下書きから引く**（別の下書きの
+                // 人物を渡すと、目印の personID がどの人物とも結び付かないまま
+                // 位置照合へ落ちる）。
+                personProfiles: draftStore.personProfiles(forDraftID: resume.draftID)
             )
         }
     }
@@ -395,7 +399,8 @@ extension EditorView {
                 faceBlockSize: model.faceBlockSize,
                 backgroundBlockSize: model.backgroundBlockSize,
                 manualRects: model.manualRects,
-                faceSelections: model.selectedFaceAnchors
+                faceSelections: model.selectedFaceAnchors,
+                personProfiles: model.selectedPersonProfilesForDraft
             )
             photoEditingActive = true
         case .video:
@@ -414,6 +419,7 @@ extension EditorView {
                 backgroundBlockSize: model.backgroundBlockSize,
                 manualRects: model.manualRects,
                 faceSelections: model.selectedFaceAnchors,
+                personProfiles: model.selectedPersonProfilesForDraft,
                 thumbnail: model.previewImage
             )
             videoDraftID = draft?.id

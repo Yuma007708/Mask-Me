@@ -92,7 +92,13 @@ extension MosaicPreviewController {
         // 縮小 CGImage を作ってモデルへ渡す（モデル側でバックグラウンド検出）。
         if model.shouldDetectPreviewFrame(at: timeSec),
            let detImage = detectionCGImage(from: pixelBuffer) {
-            model.submitPreviewFrameForDetection(detImage, at: timeSec)
+            // 署名（人物同定）だけは原寸から測る。縮小画像から測ると
+            // `FaceSignatureQuality.minimumFacePixelWidth` で実素材が軒並み落ちる
+            // （submitPreviewFrameForDetection の doc に実測値）。
+            // クロージャなので**署名を測るフレームだけ**原寸変換が走る。
+            model.submitPreviewFrameForDetection(detImage, at: timeSec) { [weak self] in
+                self?.signatureCGImage(from: pixelBuffer)
+            }
         }
         // モザイク適用区間ゲート（S10）。素材アンカーを持たない効果——手動矩形と
         // 背景モザイク——は「この合成時刻に映っている素材のどれかが区間内か」で決める
@@ -233,5 +239,20 @@ extension MosaicPreviewController {
         return ciContext.createCGImage(ci, from: ci.extent)
     }
 
+    /// 人物署名の切り出し元となる**原寸**フレーム。
+    ///
+    /// 検出用（`detectionCGImage`）と分けてあるのは、検出は速さのために縮小したいが
+    /// 署名は解像度が要るため。`signatureIntervalSec`(0.5) で間引かれたフレームでしか
+    /// 呼ばれないので、原寸変換のコストは 0.5 秒に 1 回に収まる。
+    /// 呼び出しは `MosaicEditorModel.liveSignatureQueue` 上（描画スレッドでも検出キューでも
+    /// ない。検出キューに乗せると検出スループットが落ちる）。`CIContext` はスレッド安全。
+    ///
+    /// buffer を非同期の先まで握れるのは、これが `copyPixelBuffer(forItemTime:)` の
+    /// **所有権ごと渡された** buffer だから。キャプチャセッションのフレーム
+    /// （`CameraMosaicPipeline`）はプールへ返す必要があるので同じことはしない。
+    func signatureCGImage(from pixelBuffer: CVPixelBuffer) -> CGImage? {
+        let ci = CIImage(cvPixelBuffer: pixelBuffer)
+        return ciContext.createCGImage(ci, from: ci.extent)
+    }
 }
 #endif

@@ -423,6 +423,8 @@ public final class VideoMosaicExporter: @unchecked Sendable {
     public func export(
         asset: AVAsset,
         selectedFaceTargets: [FaceTarget] = [],
+        selectedPersons: [PersonProfile] = [],
+        faceSignatures: FaceSignatureLookup = FaceSignatureLookup(samples: [:]),
         manualRegions: [ManualRegion] = [],
         detectionCaches: [UUID: [Double: [FaceLandmarkSet]]] = [:],
         mapping: TimelineMapping = TimelineMapping(clips: []),
@@ -461,6 +463,12 @@ public final class VideoMosaicExporter: @unchecked Sendable {
         // 今回の書き出しが即座に打ち切られる。冒頭で必ず捨てる。
         resetCancelState()
         self.photoSourceIDs = photoSourceIDs
+        // 人物同定の材料。プレビューと同じ判定関数へ渡すために保持する
+        // （引数を 5 層のプライベート関数に通さないための保持であって、状態ではない）。
+        self.identityPersons = selectedPersons
+        self.identitySignatures = faceSignatures
+        self.identityKeptFaceCount = 0
+        self.identityFilteredFrameCount = 0
         // 孤児区間（どのクリップの使用範囲とも交差しない適用区間）をここで 1 回だけ落とす。
         // O(クリップ数 × 区間数) を全フレームで回さないためのキャッシュであり、
         // プレビュー側（`MosaicEditorModel.effectiveApplyRanges`）と**同じ純関数**を通す
@@ -1092,6 +1100,9 @@ public final class VideoMosaicExporter: @unchecked Sendable {
             // 素材スコープのキャッシュから近傍フレームを探す（なければ新規検出）。
             // 参照キーは写像済みの素材内時刻（丸め・近傍補間は写像の後）。
             let fromCache: [FaceLandmarkSet]
+            // `fromCache` に対応する署名。用意できない経路では空のまま
+            // （＝位置追跡だけの従来判定へ落ちる）。
+            var cacheSignatures: [FaceSignature?] = []
             // 写真素材で t=0 の seed が「検出済みで顔なし」（空エントリ）のとき true。
             // 写真は全フレーム同一なので、seed が空でも実検出には落とさない
             // （毎フレーム同じ静止画を再検出する無駄と、seed と食い違う結果の混入を防ぐ）。
@@ -1103,8 +1114,13 @@ public final class VideoMosaicExporter: @unchecked Sendable {
                 fromCache = overlapFaces
             } else if let location = frame.location,
                       let sourceCache = frame.detectionCaches[location.sourceID] {
-                fromCache = renderLayout.remap(lookupCache(sourceCache, at: location.time),
-                                               clipID: location.clipID)
+                // 署名は**素材座標**で引く（サンプルの重心が素材座標なので、
+                // レターボックス写像の後で引くと位置が合わず対応が付かなくなる）。
+                // `renderLayout.remap` は順序も件数も変えないため、写した後も添字は一致する。
+                let inSource = lookupCache(sourceCache, at: location.time)
+                cacheSignatures = identitySignatures.signatures(
+                    for: inSource, sourceID: location.sourceID, time: location.time)
+                fromCache = renderLayout.remap(inSource, clipID: location.clipID)
                 photoSeededEmpty = fromCache.isEmpty
                     && photoSourceIDs.contains(location.sourceID)
                     && sourceCache[0] != nil
@@ -1112,7 +1128,8 @@ public final class VideoMosaicExporter: @unchecked Sendable {
                 fromCache = []
             }
             if !fromCache.isEmpty {
-                cachedLandmarkSets = filterToSelected(fromCache, targets: frame.selectedFaceTargets)
+                cachedLandmarkSets = filterToSelected(fromCache, targets: frame.selectedFaceTargets,
+                                                      signatures: cacheSignatures)
             } else if photoSeededEmpty {
                 cachedLandmarkSets = []
             } else {
@@ -1122,7 +1139,10 @@ public final class VideoMosaicExporter: @unchecked Sendable {
                 let detected = detectAll(in: frame.sourceBuffer, timestampMs: frame.timestampMs)
                 perfDetectSec += CFAbsoluteTimeGetCurrent() - t0
                 perfDetectCalls += 1
-                cachedLandmarkSets = filterToSelected(detected, targets: frame.selectedFaceTargets)
+                // その場検出には署名が無い（作るには合成済みフレームから埋め込みを
+                // 計算する必要があり、書き出し速度に直に効く）。位置追跡だけで判定する。
+                cachedLandmarkSets = filterToSelected(detected, targets: frame.selectedFaceTargets,
+                                                      signatures: [])
             }
             // 描画直前の EMA。検出更新のタイミング（= 位置が変わりうる瞬間）にだけかける。
             cachedLandmarkSets = landmarkSmoother.smooth(cachedLandmarkSets)
@@ -1332,15 +1352,42 @@ public final class VideoMosaicExporter: @unchecked Sendable {
     /// エクスポート側の原因）。SelectedFaceTracker がマッチのたびに位置を追従させる。
     private var selectedTracker: SelectedFaceTracker?
 
-    private func filterToSelected(_ faces: [FaceLandmarkSet], targets: [FaceTarget]) -> [FaceLandmarkSet] {
+    /// 選択顔だけを残す。**判定はプレビューと同じ純関数**（`FaceIdentityPolicy.hidden`）を
+    /// 通す。ここを別々に書くと、画面では隠れているのに保存した動画では素で映る、という
+    /// 最悪の食い違いが起きる。位置追跡（`SelectedFaceTracker`）は書き出し側の
+    /// 時系列追跡のまま使い、その結果を「位置はどう言っているか」として渡す。
+    ///
+    /// - Parameter signatures: `faces` と同じ順・同じ件数の署名。用意できない経路
+    ///   （その場検出・トランジションの重なり）は空を渡す＝従来どおり位置追跡だけになる。
+    private func filterToSelected(_ faces: [FaceLandmarkSet], targets: [FaceTarget],
+                                  signatures: [FaceSignature?]) -> [FaceLandmarkSet] {
         if targets.isEmpty { return faces }
         if selectedTracker == nil {
             selectedTracker = SelectedFaceTracker(
                 initialCentroids: targets.map { SelectedFaceTracker.centroid(of: $0.landmarks) }
             )
         }
-        return selectedTracker?.filter(faces) ?? faces
+        guard var tracker = selectedTracker else { return faces }
+        let spatiallyMatched = tracker.matches(faces)
+        selectedTracker = tracker
+        let kept = FaceIdentityPolicy.hidden(faces: faces, signatures: signatures,
+                                             spatiallyMatched: spatiallyMatched,
+                                             selectedPersons: identityPersons)
+        identityFilteredFrameCount += 1
+        identityKeptFaceCount += kept.count
+        return kept
     }
+
+    /// 絞り込みを通過した顔の延べ件数と、絞り込みを行ったフレーム数。
+    /// **検証用**（書き出した動画の画素を調べずに「誰を隠したか」を確かめる口）。
+    /// 出力には一切影響しない。
+    private(set) var identityKeptFaceCount = 0
+    private(set) var identityFilteredFrameCount = 0
+
+    /// モザイク対象として選ばれた人物。空なら同定を使わず位置追跡だけで判定する。
+    private var identityPersons: [PersonProfile] = []
+    /// 署名の引き当て（値型スナップショット）。書き出し中に再生側が書き込んでも影響しない。
+    private var identitySignatures = FaceSignatureLookup(samples: [:])
 
     // MARK: - Setup helpers
 

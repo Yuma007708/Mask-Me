@@ -415,5 +415,50 @@ final class RealFaceMosaicTests: XCTestCase {
             if !sets.isEmpty { dumpAnnotated(image, sets: sets, name: "still-\(name)") }
         }
     }
+
+    // MARK: - 背景マスク（Vision 人物切り抜き）
+
+    private func segmentationFixture() throws -> CGImage {
+        let fixtures = FixtureLoader.namedImages(in: "faces")
+        try XCTSkipIf(fixtures.isEmpty, "Fixtures/faces に画像がありません")
+        guard let cgImage = fixtures.first?.1.cgImage else {
+            throw XCTSkip("fixture を CGImage にできません")
+        }
+        return cgImage
+    }
+
+    /// **`isAvailable` が実際の挙動と一致すること。** これが本体の契約。
+    ///
+    /// `backgroundMask` は失敗を `nil` で返すので、判定が実態とずれると
+    /// 「Vision が動いていないのにテストは緑」という、今まさに Simulator で
+    /// 起きていた状態に戻る。**この 1 本だけは環境を問わず skip しない。**
+    func test_segmenterAvailabilityMatchesActualBehaviour() throws {
+        let cgImage = try segmentationFixture()
+        let mask = PersonSegmenter(quality: .balanced).backgroundMask(cgImage: cgImage)
+        XCTAssertEqual(PersonSegmenter.isAvailable, mask != nil,
+                       "isAvailable=\(PersonSegmenter.isAvailable) なのに "
+                       + "マスクは \(mask == nil ? "取れなかった" : "取れた")")
+    }
+
+    /// 使える環境では、マスクが**前景と背景を実際に分けている**こと。
+    /// 全面 0（全部人物）や全面 255（全部背景）はマスクとして機能していない。
+    func test_backgroundMaskSeparatesForegroundFromBackground() throws {
+        try XCTSkipUnless(PersonSegmenter.isAvailable,
+                          "この環境では Vision の人物切り抜きが動きません（Simulator では既知）")
+        let cgImage = try segmentationFixture()
+        guard let mask = PersonSegmenter(quality: .balanced).backgroundMask(cgImage: cgImage) else {
+            return XCTFail("isAvailable なのにマスクが取れない")
+        }
+        XCTAssertGreaterThan(mask.width, 0)
+        XCTAssertGreaterThan(mask.height, 0)
+        XCTAssertEqual(mask.bytes.count, mask.width * mask.height)
+
+        let background = mask.bytes.filter { $0 > 127 }.count
+        let ratio = Double(background) / Double(mask.bytes.count)
+        print(String(format: "[MMSEG] 背景の割合 %.1f%% (%dx%d)",
+                     ratio * 100, mask.width, mask.height))
+        XCTAssertGreaterThan(ratio, 0.0, "全面が人物扱い＝分離できていない")
+        XCTAssertLessThan(ratio, 1.0, "全面が背景扱い＝人物を見つけられていない")
+    }
 }
 #endif

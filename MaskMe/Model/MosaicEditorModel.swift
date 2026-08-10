@@ -229,6 +229,21 @@ public final class MosaicEditorModel: ObservableObject {
     private(set) var currentSourceID = UUID()
     /// 素材基準の検出キャッシュ。クラス全体が @MainActor なので同期機構は不要。
     let cacheStore = DetectionCacheStore(bucketFPS: 15.0)
+    /// 検出顔に対応する人物署名の置き場。`cacheStore` と**同じバケット**で丸めること
+    /// （食い違うと顔は引けるのに署名だけ引けない）。取り違え対策は
+    /// `FaceSignatureCache` の doc コメント参照。
+    let signatureCache = FaceSignatureCache(bucketFPS: 15.0)
+    /// 署名を人物へまとめる台帳。顔一覧を「検出顔の数」ではなく「人の数」で見せる土台。
+    var personRegistry = PersonRegistry()
+    /// 素材ごとに「最後に署名を計算した素材時刻」。署名 1 本あたり実測 4.8ms かかるので、
+    /// 全フレーム × 全顔で回さずこの間隔まで間引く（`signatureIntervalSec`）。
+    /// 人物の同定は数フレームに 1 回取れれば足り、判断は署名が無い間も
+    /// 位置追跡→安全側（隠す）で成立する。
+    /// （`MosaicEditorModel+LiveDetection.swift` から触るため internal。格納プロパティは
+    /// extension に置けない Swift の制約でここに残っている。）
+    var lastSignatureSourceTime: [UUID: Double] = [:]
+    /// 署名を計算する最小間隔（素材時刻・秒）。
+    let signatureIntervalSec = 0.5
     /// タイムライン編集の単一情報源（クリップ列＋トランジション＋モザイク適用範囲）。
     ///
     /// 編集はすべて `MosaicEditorModel+Timeline.swift` の公開 API（`TimelineState` の
@@ -466,12 +481,14 @@ public final class MosaicEditorModel: ObservableObject {
         let normalized = image.normalizedUp()
         sourceImage = normalized
         let faces = landmarker.allLandmarks(in: normalized)
+        // 写真モードは素材ID・検出キャッシュを使わないので、人物 ID を決めるだけ。
+        let personIDs = seedPersonIDs(for: faces, in: normalized, sourceID: nil, time: 0)
         detectedFaces = faces.enumerated().map { idx, lm in
             // 顔が1つならタップ不要で即モザイクする（動画側と挙動を揃える）。
             let autoSelect = faces.count == 1 && idx == 0
             return FaceTarget(id: UUID(), landmarks: lm,
                        thumbnail: generateThumbnail(for: lm, from: normalized),
-                       isSelected: autoSelect)
+                       isSelected: autoSelect, personID: personIDs[idx])
         }
         manualRegions = []
         sourceTexture = makeTexture(from: normalized)
@@ -640,6 +657,11 @@ public final class MosaicEditorModel: ObservableObject {
         if !faces.isEmpty {
             cacheStore.store(faces, sourceID: currentSourceID, time: seedTime)
         }
+        // 人物 ID は `detectedFaces` へ載せる**前に**決める。下書き復元の顔選択は
+        // これを使って結び直すため（`seedPersonIDs` の doc）。
+        // `cacheStore.store` と同じ `seedTime` で入れること。
+        let personIDs = seedPersonIDs(for: faces, in: seedFrame,
+                                      sourceID: currentSourceID, time: seedTime)
         detectedFaces += faces.enumerated().map { idx, lm in
             // 顔が1つだけならユーザーの意図として自動選択する（サムネを
             // タップさせないと何も起きない不親切な挙動を避ける）。複数顔なら
@@ -648,7 +670,8 @@ public final class MosaicEditorModel: ObservableObject {
             return FaceTarget(id: UUID(), landmarks: lm,
                               thumbnail: generateThumbnail(for: lm, from: seedFrame),
                               isSelected: autoSelect,
-                              sourceID: currentSourceID)
+                              sourceID: currentSourceID,
+                              personID: personIDs[idx])
         }
         // 素材の生フレームでの暫定表示（この後 composition が揃った時点で
         // `renderInitialFrame` が合成・適用区間まで反映した絵へ差し替える）。
@@ -763,6 +786,43 @@ public final class MosaicEditorModel: ObservableObject {
     public func toggleFace(_ id: UUID) {
         guard let idx = detectedFaces.firstIndex(where: { $0.id == id }) else { return }
         detectedFaces[idx].isSelected.toggle()
+        renderPreview()
+        previewController?.invalidate()
+        commitEdit()
+    }
+
+    /// 指定したターゲットが指している人物（同定できているものだけ・重複なし）。
+    /// 1 人も同定できていなければ空を返し、判定は従来どおり位置追跡だけになる。
+    func selectedPersonProfiles(of targets: [FaceTarget]) -> [PersonProfile] {
+        var seen = Set<UUID>()
+        return targets.compactMap(\.personID)
+            .filter { seen.insert($0).inserted }
+            .compactMap { personRegistry.person(id: $0) }
+    }
+
+    /// 顔一覧を「人物」単位でまとめた並び。同じ人物 ID の顔は 1 つのまとまりになり、
+    /// 人物 ID が付いていない顔（署名が取れていない）はそれぞれ単独のまとまりになる。
+    /// 並び順は `detectedFaces` の出現順を保つ（一覧が毎フレーム入れ替わらないため）。
+    public var personGroups: [PersonGroup] {
+        PersonGrouping.groupIndices(personIDs: detectedFaces.map(\.personID))
+            .compactMap { indices in
+                let members = indices.map { detectedFaces[$0] }
+                guard let representative = members.first else { return nil }
+                return PersonGroup(representative: representative, members: members)
+            }
+    }
+
+    /// 人物単位で選択を切り替える。**まとまり内の全員を同じ状態に揃える**
+    /// （途中でフレームアウト→再入して増えたターゲットの片方だけ選択が外れると、
+    /// 同じ人が区間によって隠れたり隠れなかったりする）。
+    /// 新しい状態は「まとまりの誰か 1 人でも選択されていれば解除、誰も選択されていなければ選択」。
+    public func togglePerson(_ ids: [UUID]) {
+        guard !ids.isEmpty else { return }
+        let idSet = Set(ids)
+        let anySelected = detectedFaces.contains { idSet.contains($0.id) && $0.isSelected }
+        for (i, face) in detectedFaces.enumerated() where idSet.contains(face.id) {
+            detectedFaces[i].isSelected = !anySelected
+        }
         renderPreview()
         previewController?.invalidate()
         commitEdit()
@@ -1241,6 +1301,19 @@ public final class MosaicEditorModel: ObservableObject {
         makeFaceLandmarker(forVideo: false, settings: detectionSettings)
     let liveDetectionQueue =
         DispatchQueue(label: "com.maskme.livedetection", qos: .userInitiated)
+    /// 人物署名（原寸フレームの取り出し + SFace 推論）専用の直列キュー。
+    ///
+    /// **検出キューと分ける。** 署名の仕事を検出と同じキューに乗せると、検出の
+    /// スループットがそのぶん落ちる（実測: 原寸変換を検出キューでやると s1.mov 後半の
+    /// 検出バケットが 13/10/10 → 9/10/7。ホールド窓 0.75s を超える穴が空き、
+    /// 再生中にモザイクが消えるフレームが出る）。**検出の退行は誤モザイクより重い**ので、
+    /// 署名は検出の後ろで非同期に追いつく形にする。
+    ///
+    /// 遅れて書いても壊れないのは、`FaceSignatureCache` が（素材ID, 素材時刻）キーと
+    /// **重心の位置照合**で顔と署名を結ぶため——検出と同じ呼び出しの中で書く必要がない。
+    /// qos は検出より低い（署名は無くても位置追跡へ落ちて動き続ける補助情報）。
+    let liveSignatureQueue =
+        DispatchQueue(label: "com.maskme.livesignature", qos: .utility)
     /// 検出は同時に1枚だけ。表示スレッドを塞がないための in-flight ガード。
     var liveDetectionInFlight = false
     /// detectionCache のバケット解像度（fps）。同一バケットは再検出しない（ループ再生で無駄検出しない）。
@@ -1333,8 +1406,17 @@ public final class MosaicEditorModel: ObservableObject {
     var selectedFaceAnchors: [DraftFaceSelection] {
         detectedFaces.filter(\.isSelected).map {
             DraftFaceSelection(sourceID: $0.sourceID,
-                               centroid: normalizedCentroid(of: $0.landmarks))
+                               centroid: normalizedCentroid(of: $0.landmarks),
+                               personID: $0.personID)
         }
+    }
+
+    /// `selectedFaceAnchors` の `personID` が指す人物（下書きへ保存する分）。
+    ///
+    /// **選択されている顔の人物だけ**を返す。台帳全体ではない理由は
+    /// `EditingDraft.personProfiles` の doc 参照（生体特徴を必要以上にディスクへ残さない）。
+    var selectedPersonProfilesForDraft: [PersonProfile] {
+        selectedPersonProfiles(of: detectedFaces.filter(\.isSelected))
     }
 
     /// 下書きから復元したパラメータを適用してプレビューを更新する。
@@ -1348,8 +1430,16 @@ public final class MosaicEditorModel: ObservableObject {
         faceBlockSize: Float,
         backgroundBlockSize: Float,
         manualRects: [CGRect],
-        faceSelections: [DraftFaceSelection]? = nil
+        faceSelections: [DraftFaceSelection]? = nil,
+        personProfiles: [PersonProfile]? = nil
     ) {
+        // 人物は**目印より先に**台帳へ戻す。目印は人物 ID で顔を指しており、
+        // 台帳に居ない人物 ID はどの顔とも結び付かない（＝位置照合へ落ちる）。
+        // ここで戻しておけば、この後の初期スキャン・ライブ検出が署名から
+        // 同じ人物 ID を復元し、保留していた目印もそのまま結び直せる。
+        if let personProfiles {
+            personRegistry.merge(personProfiles)
+        }
         self.faceMosaicOn = faceMosaicOn
         self.backgroundMosaicOn = backgroundMosaicOn
         self.faceBlockSize = faceBlockSize
@@ -1371,8 +1461,10 @@ public final class MosaicEditorModel: ObservableObject {
 
     /// 保存されていた顔選択の目印を、いま検出されている顔へ再照合して適用する。
     ///
-    /// 照合は `selecting(_:sourceID:targets:)`（プレビュー描画の顔絞り込み）と
-    /// **同じ作法**——素材スコープ＋素材フレーム基準の重心距離 < 0.5——で行う。
+    /// 照合は素材スコープで区切ったうえで `DraftSelectionResolver` に委ねる。
+    /// **人物（署名から復元した人物 ID）で先に照合し、決まらないものだけ位置へ落とす**。
+    /// 位置照合の作法は `selecting(_:sourceID:targets:)`（プレビュー描画の顔絞り込み）と
+    /// 同じ——素材フレーム基準の重心距離 < 0.5——で変えていない。
     ///
     /// **照合に失敗したときは安全側（過剰適用）へ倒す**。素材ごとに、その素材へ
     /// 向けられた目印が**全部**顔にマッチしたときだけ「マッチした顔だけを選択」し、
@@ -1418,23 +1510,20 @@ public final class MosaicEditorModel: ObservableObject {
                 for index in indices { detectedFaces[index].isSelected = false }
                 continue
             }
-            var matchedIndices = Set<Int>()
-            var matchedAnchors = 0
-            for anchor in scoped {
-                let hits = indices.filter { index in
-                    let center = normalizedCentroid(of: detectedFaces[index].landmarks)
-                    return hypot(center.x - anchor.centroid.x,
-                                 center.y - anchor.centroid.y) < faceMatchThreshold
-                }
-                if !hits.isEmpty {
-                    matchedAnchors += 1
-                    matchedIndices.formUnion(hits)
-                }
-            }
-            let allAnchorsAccountedFor = matchedAnchors == scoped.count
-            for index in indices {
-                detectedFaces[index].isSelected =
-                    allAnchorsAccountedFor ? matchedIndices.contains(index) : true
+            // 判定は純ロジック（`DraftSelectionResolver`）へ委ねる。
+            // 添字は `indices` の並び（＝この素材の顔）に対する相対添字で返る。
+            let resolution = DraftSelectionResolver.resolve(
+                anchors: scoped.map {
+                    DraftSelectionResolver.Anchor(personID: $0.personID, centroid: $0.centroid)
+                },
+                faces: indices.map {
+                    DraftSelectionResolver.Face(
+                        personID: detectedFaces[$0].personID,
+                        centroid: normalizedCentroid(of: detectedFaces[$0].landmarks))
+                },
+                centroidThreshold: faceMatchThreshold)
+            for (offset, index) in indices.enumerated() {
+                detectedFaces[index].isSelected = resolution.selected.contains(offset)
             }
         }
     }
@@ -1680,6 +1769,11 @@ public final class MosaicEditorModel: ObservableObject {
             let url = try await exporter.export(
                 asset: composition,
                 selectedFaceTargets: targetsForExport,
+                // 人物同定の材料。プレビューと同じ判定関数（`FaceIdentityPolicy.hidden`）を
+                // 通すために渡す。署名は値型スナップショットにして渡す（書き出し中も
+                // 再生側が署名を書き込み続けるため、参照のまま渡すと競合する）。
+                selectedPersons: selectedPersonProfiles(of: targetsForExport),
+                faceSignatures: signatureCache.lookup(),
                 manualRegions: manualRegions,
                 detectionCaches: detectionCaches,
                 mapping: mapping,

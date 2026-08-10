@@ -12,3 +12,4 @@
 #import <UIKit/UIKit.h>
 
 #import <OpticalFlowKit/OpticalFlowTracker.h>
+#import <OpticalFlowKit/FaceEmbedder.h>

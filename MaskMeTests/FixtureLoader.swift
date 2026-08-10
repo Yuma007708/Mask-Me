@@ -21,6 +21,12 @@ enum FixtureLoader {
 
     /// Images under `Fixtures/<subdirectory>` (e.g. "faces", "nonfaces").
     static func images(in subdirectory: String) -> [UIImage] {
+        namedImages(in: subdirectory).map(\.image)
+    }
+
+    /// ファイル名つきの画像。人物同定の計測はどのファイルが誰かを知る必要があるため、
+    /// 名前を落とさない版が要る（`images(in:)` はこれの射影）。
+    static func namedImages(in subdirectory: String) -> [(name: String, image: UIImage)] {
         let bundle = Bundle(for: BundleToken.self)
         var urls: [URL] = []
         for ext in ["jpg", "jpeg", "png", "heic"] {
@@ -30,8 +36,11 @@ enum FixtureLoader {
             ) ?? []
         }
         return urls.sorted { $0.lastPathComponent < $1.lastPathComponent }
-            .compactMap { try? Data(contentsOf: $0) }
-            .compactMap { UIImage(data: $0) }
+            .compactMap { url -> (name: String, image: UIImage)? in
+                guard let data = try? Data(contentsOf: url),
+                      let image = UIImage(data: data) else { return nil }
+                return (url.lastPathComponent, image)
+            }
     }
 
     /// URL of a bundled fixture video, or `nil` if absent.

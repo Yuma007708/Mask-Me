@@ -60,4 +60,28 @@ final class SelectedFaceTrackerTests: XCTestCase {
         // どの追跡位置からも 0.5 以上離れた顔のみのフレーム
         XCTAssertTrue(tracker.filter([face(cx: 0.95, cy: 0.95)]).isEmpty)
     }
+
+    /// `matches` は `filter` と**同じ判定・同じ追従**であること。
+    /// 人物同定はこの真偽を受け取って判断するので、ここがずれると
+    /// 「位置は当たっているのに絞り込みからは落ちている」顔が出る。
+    func test_matchesAgreesWithFilter() {
+        let faces = [face(cx: 0.2, cy: 0.5), face(cx: 0.8, cy: 0.5), face(cx: 0.5, cy: 0.9)]
+        var byFilter = SelectedFaceTracker(initialCentroids: [CGPoint(x: 0.22, y: 0.52)])
+        var byMatches = SelectedFaceTracker(initialCentroids: [CGPoint(x: 0.22, y: 0.52)])
+
+        for _ in 0..<3 {
+            let kept = byFilter.filter(faces)
+            let flags = byMatches.matches(faces)
+            XCTAssertEqual(flags.count, faces.count)
+            XCTAssertEqual(kept, zip(faces, flags).filter { $0.1 }.map { $0.0 },
+                           "matches と filter の判定が食い違っている")
+        }
+    }
+
+    /// 追跡位置が空（＝全顔選択）のときは全て true。
+    func test_matchesPassesEverythingWhenNothingTracked() {
+        var tracker = SelectedFaceTracker(initialCentroids: [])
+        let faces = [face(cx: 0.2, cy: 0.5), face(cx: 0.8, cy: 0.5)]
+        XCTAssertEqual(tracker.matches(faces), [true, true])
+    }
 }

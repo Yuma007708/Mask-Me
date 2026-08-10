@@ -224,6 +224,29 @@ final class LiveFacePropagatorTests: XCTestCase {
         XCTAssertEqual(centroid(propagator.faces[1]).x, 0.8, accuracy: 0.001)
     }
 
+    // MARK: - 検出との添字対応（カメラの署名配線が依存する不変条件）
+
+    /// **`completeDetection` 後の `faces` は、渡した検出顔と同じ順・同じ件数であること。**
+    ///
+    /// `CameraMosaicPipeline` は検出顔から測った署名の配列を、そのまま
+    /// `propagator.faces` の添字で `CameraFaceSelection` へ渡す。ここが崩れると
+    /// **別人の署名で OFF の可否を判断する**（乗り移り拒否が逆に働き、露出しうる）。
+    func test_completeDetection_keepsDetectionOrderAndCount() {
+        let propagator = LiveFacePropagator()
+        // 既存トラックがある状態で、順序の違う検出が届く場面を作る
+        seed(propagator, faces: [face(cx: 0.2, cy: 0.5), face(cx: 0.8, cy: 0.5)])
+
+        let detected = [face(cx: 0.8, cy: 0.5), face(cx: 0.5, cy: 0.9), face(cx: 0.2, cy: 0.5)]
+        seed(propagator, faces: detected)
+
+        XCTAssertEqual(propagator.faces.count, detected.count, "件数が検出と食い違っている")
+        for (i, expected) in detected.enumerated() {
+            XCTAssertEqual(centroid(propagator.faces[i]).x, centroid(expected).x, accuracy: 0.01,
+                           "\(i) 番目が検出と別の顔になっている（署名が別人に配られる）")
+            XCTAssertEqual(centroid(propagator.faces[i]).y, centroid(expected).y, accuracy: 0.01)
+        }
+    }
+
     // MARK: - リセット
 
     func test_reset_dropsAllTracks() {

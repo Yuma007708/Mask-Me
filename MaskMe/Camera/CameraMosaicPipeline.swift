@@ -45,6 +45,8 @@ final class CameraMosaicPipeline {
     private var pendingReseed = false
     private var detectionInFlight = false
     private var lastDetectionSeconds = -Double.greatestFiniteMagnitude
+    /// 人物署名を測った最後の時刻（`signatureInterval` の間引き用）。
+    private var lastSignatureSeconds = -Double.greatestFiniteMagnitude
     private var lastNonEmptySeconds = -Double.greatestFiniteMagnitude
     private var recorder: CameraRecorder?
     private var pendingRecordingIncludesAudio: Bool?
@@ -74,6 +76,11 @@ final class CameraMosaicPipeline {
     /// 非録画時、検出全滅がこの秒数続いたらモザイクを消す。録画中は消さない
     /// （焼き込みは不可逆のため、最後の位置に置きつづける安全側挙動）。
     private static let lostGraceSeconds = 0.5
+    /// 人物署名を測る間隔（秒）。SFace の推論は検出より重く、毎回の検出（10Hz）で
+    /// 回すと発熱と検出遅延に効いてくる。署名の役目は OFF トラックの乗り移り拒否で、
+    /// 数フレーム遅れても取り返しがつく（拒否できなかったフレームは従来どおり
+    /// 位置だけの判定＝現行の挙動）ため間引く。
+    private static let signatureInterval = 0.5
 
     init?(settings: DetectionSettings) {
         guard let renderer = try? MosaicRenderer() else { return nil }
@@ -141,6 +148,8 @@ final class CameraMosaicPipeline {
             maskedIdx = []
             pendingReseed = true
             lastNonEmptySeconds = -Double.greatestFiniteMagnitude
+            // 次の検出で必ず署名を測り直す（カメラ切替で写る人が変わりうる）
+            lastSignatureSeconds = -Double.greatestFiniteMagnitude
         }
     }
 
@@ -183,7 +192,8 @@ final class CameraMosaicPipeline {
         }
         if shouldDetect {
             if let cg = scaledCG {
-                dispatchDetection(cg: cg, at: t)
+                // 原寸バッファも渡す（署名を測るフレームだけ検出キュー上で変換される）。
+                dispatchDetection(cg: cg, fullResolution: pixelBuffer, at: t)
             } else {
                 withLock { detectionInFlight = false }
             }
@@ -316,20 +326,60 @@ final class CameraMosaicPipeline {
         }
     }
 
-    private func dispatchDetection(cg: CGImage, at t: Double) {
+    /// このフレームで人物署名を測るか（間引き判定）。測ると決めた時点で時刻を進める。
+    private func claimSignatureSlot(at t: Double) -> Bool {
+        guard FaceSignatureProvider.shared.isAvailable else { return false }
+        return withLock {
+            guard t - lastSignatureSeconds >= Self.signatureInterval else { return false }
+            lastSignatureSeconds = t
+            return true
+        }
+    }
+
+    /// - Parameter fullResolution: 署名の切り出し元。**署名は原寸から測る**（理由は
+    ///   `FaceSignatureProvider.signatures(for:detection:native:)` の doc）。
+    ///
+    ///   **変換は映像キューではなく検出キューで、署名を測るフレームだけ行う**
+    ///   （`signatureInterval` ＝ 0.5 秒に 1 回）。映像キューでやると、描画・録画の
+    ///   フレーム処理が 0.5 秒ごとに原寸変換ぶん待たされてコマ落ちになる。
+    ///
+    ///   ここでは署名を検出と同じキューで直列に測る（プレビュー側は
+    ///   `liveSignatureQueue` へ外している）。カメラは
+    ///   `selection.maskedIndices(from:signatures:)` が**この検出サイクルの中で**
+    ///   署名を必要とするため——遅らせると、その 1 サイクルは位置追跡だけで
+    ///   「誰を隠すか」を決めることになり、乗り移り防止の保証が変わる。
+    ///
+    ///   バッファは検出ブロックの**先頭で**写し取り、すぐ手放す
+    ///   （キャプチャセッションのフレームを長く握るとプールが枯渇する）。
+    private func dispatchDetection(cg: CGImage, fullResolution: CVPixelBuffer, at t: Double) {
         // 以降のフレーム間変換が累積され、完了時に「古い検出結果」を現フレームへ補正する
         let token = withLock { propagator.beginDetection() }
+        let wantsSignatures = claimSignatureSlot(at: t)
         detectionQueue.async { [weak self] in
             guard let self else { return }
-            let result = self.scanner.liveLandmarks(in: UIImage(cgImage: cg), atMediaSeconds: t)
+            let nativeCG = wantsSignatures
+                ? self.downscaledCGImage(from: fullResolution, maxWidth: .infinity) : nil
+            let image = UIImage(cgImage: cg)
+            let result = self.scanner.liveLandmarks(in: image, atMediaSeconds: t)
             let detectionSize = CGSize(width: cg.width, height: cg.height)
+            // 署名は**実検出のフレームでだけ**測る。フロー橋渡し由来の顔は位置が
+            // 近似なので、切り出しがずれた顔から作った署名で人物を判断してしまう。
+            // ロック外で測る（推論が重く、フレーム処理を待たせられない）。
+            let signatures: [FaceSignature?] =
+                (wantsSignatures && !result.bridgedByFlow && !result.faces.isEmpty)
+                ? FaceSignatureProvider.shared.signatures(
+                    for: result.faces, detection: image, native: { nativeCG })
+                : []
             var counts: (detected: Int, unmasked: Int) = (0, 0)
             self.withLock {
                 if !result.faces.isEmpty {
                     self.propagator.completeDetection(
                         token: token, faces: result.faces, imageSize: detectionSize)
                     self.lastNonEmptySeconds = t
-                    self.maskedIdx = self.selection.maskedIndices(from: self.propagator.faces)
+                    // `completeDetection` は検出顔と同じ順・同じ件数でトラックを組み直す
+                    // ので、`signatures` の添字がそのまま `propagator.faces` に対応する。
+                    self.maskedIdx = self.selection.maskedIndices(
+                        from: self.propagator.faces, signatures: signatures)
                     self.pendingReseed = true
                 } else {
                     // 検出全滅（フロー橋渡しの上限切れ含む）。録画中は最後の位置を

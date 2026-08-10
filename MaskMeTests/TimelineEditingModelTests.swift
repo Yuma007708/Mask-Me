@@ -1854,6 +1854,92 @@ final class TimelineEditingModelTests: XCTestCase {
                        "照合に失敗したのに選択が空のまま（顔が露出する）")
     }
 
+    /// 単位ベクトルの署名（軸が違えば類似度 0＝別人、同じ軸なら 1＝同一人物）。
+    private func unitSignature(axis: Int) throws -> FaceSignature {
+        var values = [Float](repeating: 0, count: FaceSignature.dimension)
+        values[axis] = 1
+        return try XCTUnwrap(FaceSignature(rawValues: values))
+    }
+
+    /// **S5**: 保存したときと違う場所に居ても、人物が同定できていれば選択が付いてくること。
+    ///
+    /// 重心だけで照合していた頃、この状況（選んだ人が動き、選んでいない人が
+    /// 選んだ人の元の位置に居る）は**選んでいない人だけを選択し、選んだ人を素で残す**
+    /// という最悪の取り違えになっていた。順序も実際の再開と同じにする——
+    /// `load` → `applyRestoredParameters`（この時点で顔はまだ空＝目印は保留）→
+    /// 初期スキャンが人物 ID 付きの顔を載せる——ので、保留経路も一緒に固定する。
+    func test_draftRestore_followsThePersonAcrossTheFrame() async throws {
+        let draftsDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("FaceSelPerson-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: draftsDir) }
+        let store = DraftStore(directory: draftsDir)
+        let url = try await makeTestVideo(seconds: 1.0)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let aliceSignature = try unitSignature(axis: 0)
+        let bobSignature = try unitSignature(axis: 1)
+
+        // 保存: alice（左上）だけを選択。bob は選択しない。
+        let model = makeModel()
+        model.load(videoURL: url)
+        try await waitUntilLoaded(model)
+        let source = model.currentSourceID
+        let alice = try XCTUnwrap(model.personRegistry.register(aliceSignature))
+        let bob = try XCTUnwrap(model.personRegistry.register(bobSignature))
+        model.detectedFaces = [
+            FaceTarget(id: UUID(), landmarks: fakeFace(cx: 0.2, cy: 0.3), thumbnail: UIImage(),
+                       isSelected: true, sourceID: source, personID: alice),
+            FaceTarget(id: UUID(), landmarks: fakeFace(cx: 0.8, cy: 0.3), thumbnail: UIImage(),
+                       isSelected: false, sourceID: source, personID: bob)
+        ]
+        let draft = try XCTUnwrap(store.saveVideoDraft(
+            existing: nil, sources: model.draftSources,
+            sessionSourceIDs: model.sessionReferencedSourceIDs,
+            timeline: model.timeline,
+            faceMosaicOn: true, backgroundMosaicOn: false,
+            faceBlockSize: 28, backgroundBlockSize: 28, manualRects: [],
+            faceSelections: model.selectedFaceAnchors,
+            personProfiles: model.selectedPersonProfilesForDraft, thumbnail: nil))
+        XCTAssertEqual(draft.personProfiles?.map(\.id), [alice],
+                       "選択された人物だけが保存されていない（選んでいない人の顔特徴が残る）")
+        XCTAssertEqual(draft.faceSelections?.first?.personID, alice,
+                       "目印に人物 ID が乗っていない")
+
+        // 再開: alice は右下へ移動し、bob が alice の元いた場所に居る。
+        // ディスクから読み直す（人物が JSON を往復して戻ることまで含めて確かめる）。
+        let reloaded = try XCTUnwrap(
+            DraftStore(directory: draftsDir).videoDrafts.first { $0.id == draft.id })
+        let restored = makeModel()
+        restored.queueTimelineRestore(timeline: reloaded.timeline,
+                                      sourceURLs: store.sourceURLs(for: reloaded),
+                                      primarySourceID: source)
+        restored.load(videoURL: try XCTUnwrap(store.sourceURLs(for: reloaded)[source]))
+        restored.applyRestoredParameters(
+            faceMosaicOn: reloaded.faceMosaicOn, backgroundMosaicOn: reloaded.backgroundMosaicOn,
+            faceBlockSize: reloaded.faceBlockSize,
+            backgroundBlockSize: reloaded.backgroundBlockSize,
+            manualRects: reloaded.manualRects, faceSelections: reloaded.faceSelections,
+            personProfiles: reloaded.personProfiles)
+        try await waitUntilLoaded(restored)
+
+        // 初期スキャンが顔を載せる瞬間を再現する。人物 ID は `seedPersonIDs` と同じく
+        // 復元した台帳から引く（bob は保存されていないので nil のまま＝同定できない顔）。
+        restored.detectedFaces = [
+            FaceTarget(id: UUID(), landmarks: fakeFace(cx: 0.85, cy: 0.8), thumbnail: UIImage(),
+                       isSelected: false, sourceID: restored.currentSourceID,
+                       personID: restored.personRegistry.person(matching: aliceSignature)?.id),
+            FaceTarget(id: UUID(), landmarks: fakeFace(cx: 0.2, cy: 0.3), thumbnail: UIImage(),
+                       isSelected: false, sourceID: restored.currentSourceID,
+                       personID: restored.personRegistry.person(matching: bobSignature)?.id)
+        ]
+
+        let selected = restored.detectedFaces.filter(\.isSelected)
+        XCTAssertEqual(selected.count, 1, "選択が 1 人に収束していない")
+        XCTAssertEqual(restored.normalizedCentroid(of: try XCTUnwrap(selected.first).landmarks).x,
+                       0.85, accuracy: 0.01,
+                       "移動した本人ではなく、本人の元いた場所に居る別人を選んでいる")
+    }
+
     /// 顔選択フィールドを持たない**旧下書き**は壊れずにデコードでき、復元時は
     /// 顔の選択状態に一切触れない（初期スキャンの自動選択規則がそのまま残る）こと。
     func test_draftRestore_legacyDraftWithoutFaceSelectionsKeepsAutoRule() async throws {
@@ -2341,6 +2427,52 @@ final class DraftStoreV2Tests: XCTestCase {
         let reloadedEmpty = try XCTUnwrap(makeStore().videoDrafts.first { $0.id == empty.id })
         XCTAssertEqual(reloadedEmpty.faceSelections, [],
                        "『0 個選択』が『情報なし』に化けている")
+    }
+
+    /// 人物（`personProfiles`）を持たない下書き JSON がデコードで壊れず、nil になること。
+    /// この機能より前に保存された下書きは目印の `personID` も nil なので、
+    /// 復元は従来どおり重心照合だけで進む。
+    func test_draftWithoutPersonProfilesKey_decodesAsNil() throws {
+        let json = """
+        {"id":"11111111-2222-3333-4444-555566667777",
+         "kind":"video",
+         "sourceFileName":"source-V2.mov",
+         "faceMosaicOn":true,
+         "backgroundMosaicOn":false,
+         "faceBlockSize":28,
+         "backgroundBlockSize":28,
+         "manualRects":[],
+         "faceSelections":[{"centroid":[0.2,0.3]}]}
+        """
+        let draft = try JSONDecoder().decode(EditingDraft.self, from: Data(json.utf8))
+        XCTAssertNil(draft.personProfiles)
+        XCTAssertEqual(draft.faceSelections?.count, 1)
+        XCTAssertNil(draft.faceSelections?.first?.personID, "旧目印に人物 ID が生えている")
+    }
+
+    /// 人物と、それを指す目印の `personID` が保存 → 再読込で往復すること。
+    func test_personProfiles_roundTrip() throws {
+        let store = makeStore()
+        let url = try makeSourceFile("person.mov")
+        let source = UUID()
+        var values = [Float](repeating: 0, count: FaceSignature.dimension)
+        values[0] = 1
+        let profile = PersonProfile(exemplars: [try XCTUnwrap(FaceSignature(rawValues: values))])
+        let anchors = [DraftFaceSelection(sourceID: source, centroid: CGPoint(x: 0.25, y: 0.4),
+                                          personID: profile.id)]
+        let saved = try XCTUnwrap(store.saveVideoDraft(
+            existing: nil, sources: [(source, url)],
+            timeline: TimelineState(clips: [TimelineClip(sourceID: source,
+                                                         sourceStart: 0, sourceEnd: 1)]),
+            faceMosaicOn: true, backgroundMosaicOn: false,
+            faceBlockSize: 28, backgroundBlockSize: 28,
+            manualRects: [], faceSelections: anchors, personProfiles: [profile], thumbnail: nil))
+
+        let reloaded = try XCTUnwrap(makeStore().videoDrafts.first { $0.id == saved.id })
+        XCTAssertEqual(reloaded.faceSelections, anchors, "目印の人物 ID が往復していない")
+        XCTAssertEqual(reloaded.personProfiles, [profile], "人物（手本）が往復していない")
+        XCTAssertEqual(makeStore().personProfiles(forDraftID: saved.id), [profile],
+                       "下書きID から人物を引けない")
     }
 
     // MARK: - v2 round-trip

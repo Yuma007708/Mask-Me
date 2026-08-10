@@ -18,8 +18,11 @@ struct FaceSelectorView: View {
                 // 「検出できませんでした」の場合も必ず並べる（旧実装はこの分岐で
                 // 行ごと差し替えていたため、検出ゼロだと手動指定へ辿り着けなかった）。
                 rectangleToolChip
-                ForEach(model.detectedFaces) { face in
-                    faceChip(face)
+                // 顔ではなく**人物**単位で並べる。同じ人がフレームアウト→再入して
+                // ターゲットが増えても、一覧では 1 つのチップにまとまる。
+                // 署名が取れていない顔は従来どおり 1 顔 = 1 チップ。
+                ForEach(model.personGroups) { group in
+                    personChip(group)
                 }
                 // 手動矩形は顔ではなく「領域」として別表示
                 ForEach(model.manualRegions) { region in
@@ -65,24 +68,24 @@ struct FaceSelectorView: View {
 
     // MARK: - Face chip
 
-    private func faceChip(_ face: FaceTarget) -> some View {
+    private func personChip(_ group: PersonGroup) -> some View {
         Button {
-            model.toggleFace(face.id)
+            model.togglePerson(group.memberIDs)
         } label: {
             ZStack(alignment: .bottomTrailing) {
-                Image(uiImage: face.thumbnail)
+                Image(uiImage: group.representative.thumbnail)
                     .resizable()
                     .scaledToFill()
                     .frame(width: chipSize, height: chipSize)
                     .clipShape(RoundedRectangle(cornerRadius: 10))
                     .overlay(
                         RoundedRectangle(cornerRadius: 10)
-                            .stroke(face.isSelected ? Color.blue : Color.clear, lineWidth: 2.5)
+                            .stroke(group.isSelected ? Color.blue : Color.clear, lineWidth: 2.5)
                     )
-                    .opacity(face.isSelected ? 1.0 : 0.45)
+                    .opacity(group.isSelected ? 1.0 : 0.45)
 
                 if model.mode == .video {
-                    detectionBadge(rate: face.detectionRate, isScanning: model.isScanning)
+                    detectionBadge(rate: group.detectionRate, isScanning: model.isScanning)
                 }
             }
         }

@@ -33,6 +33,22 @@ final class DValidLiveModelTests: XCTestCase {
         ProcessInfo.processInfo.environment["DVAL_GATE"].flatMap(Double.init) ?? 0.90
     }
 
+    /// `load(videoURL:)` の**非同期**部（初期スキャン → タイムライン →
+    /// composition → previewController → 初期フレーム）の完了待ち。
+    /// `isLoading` はその Task の末尾で必ず下りる（成功・失敗どちらの経路でも）。
+    @MainActor
+    private func waitUntilLoaded(_ model: MosaicEditorModel,
+                                 timeout: TimeInterval = 30) async throws {
+        let deadline = Date().addingTimeInterval(timeout)
+        while model.isLoading {
+            if Date() > deadline {
+                XCTFail("動画の読み込みが \(timeout)s 以内に完了しない")
+                return
+            }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+    }
+
     @MainActor
     func test_LiveModelPath_AllSamples() async throws {
         guard let dir = sampleDir else {
@@ -72,6 +88,9 @@ final class DValidLiveModelTests: XCTestCase {
         let model = MosaicEditorModel(mode: .video, recents: RecentItemsStore())
         // 実機と同じ初期状態: 冒頭の初期スキャンで detectedFaces をシード（自動選択）
         model.load(videoURL: url)
+        // **初期スキャンは非同期**（`load(videoURL:)` の Task。同期部は
+        // `detectedFaces = []` までしかやらない）。待たずに assert すると常に空を見る。
+        try await waitUntilLoaded(model)
         XCTAssertFalse(model.detectedFaces.isEmpty, "初期スキャンで顔がシードされるはず")
         XCTAssertTrue(model.detectedFaces.contains(where: \.isSelected), "単一顔は自動選択されるはず")
 
@@ -118,8 +137,15 @@ final class DValidLiveModelTests: XCTestCase {
 
         let model = MosaicEditorModel(mode: .video, recents: RecentItemsStore())
         model.load(videoURL: url)
-        let controller = try XCTUnwrap(model.previewController,
-                                       "renderer 生成失敗（Simulator の Metal が必要）")
+        // previewController も composition も `load(videoURL:)` の Task の中で作られる。
+        // 直後に読むと必ず nil で、原因が「Metal が無い」ことと見分けられない。
+        try await waitUntilLoaded(model)
+        // 待った上でまだ無いなら Metal renderer が用意できない環境（Simulator）。
+        // 製品の退行ではないので skip する（XCTUnwrap の失敗として残すと、
+        // 実機で見るべき欠陥が Simulator の常時赤に埋もれる）。
+        guard let controller = model.previewController else {
+            throw XCTSkip("previewController を作れない環境（Metal renderer が必要）")
+        }
         // duration の非同期ロード完了を待つ（seek(to:) のガードに必要）
         var waited = 0.0
         while controller.duration <= 0, waited < 5.0 {
@@ -150,10 +176,32 @@ final class DValidLiveModelTests: XCTestCase {
               "selected=\(model.detectedFaces.filter(\.isSelected).count)\n", stderr)
         XCTAssertGreaterThan(scannedMid, 0, "途中スタート後にライブ検出が1件も走っていない")
         XCTAssertGreaterThan(facesMid, 0, "途中スタート後の検出が全て空（顔を拾えていない）")
-        // ユーザーが目にする層: 現在再生位置でモザイクが引けること
-        let tNow = model.playbackPosition * duration
-        XCTAssertFalse(model.selectedLandmarks(at: tNow).isEmpty,
-                       "途中スタート再生中の現在位置でモザイクが掛かっていない")
+
+        // ユーザーが目にする層（選択層 = detectedFaces / isSelected / 重心マッチング）が
+        // 通っていること。**検出が乗ったバケットすべてで**引けることを見る。
+        //
+        // かつては `playbackPosition` の一点だけを見ていたが、それはこのテストが
+        // 再現したい欠陥（途中スタートで**一切**モザイクが掛からない）より狭くも広くもある:
+        // 検出は再生に対して非同期・間引きされるので最新バケットは常に再生位置より後ろにあり、
+        // ホスト負荷で検出スループットが落ちるとバケット間隔がホールド窓 0.75s を超え、
+        // 製品が正常でも落ちる（実測: アイドルで scannedMid=12 通過、load 542 で 5・
+        // load 100+ で 4 で失敗）。**負荷で結果が変わる assert は信号にならない。**
+        //
+        // 「検出が乗った時刻では必ず引ける」は、その時刻については一点チェックより厳しく、
+        // かつ何バケット埋まったかに依存しない。元の欠陥（被覆率 0）は上の 2 つと
+        // このループで捕まる。単一クリップ・rate=1 なので素材時刻＝合成時刻
+        // （`scannedMid` の算出が既にそれを前提にしている）。
+        let detectedBuckets = model.cacheStore.allEntries
+            .filter { $0.key.bucket >= midStart && !$0.value.isEmpty }
+            .map(\.key.bucket)
+            .sorted()
+        let drawable = detectedBuckets.filter { !model.selectedLandmarks(at: $0).isEmpty }
+        fputs("[MIDSTART] detectedBuckets=\(detectedBuckets.count) drawable=\(drawable.count) " +
+              "atPlaybackPosition=\(!model.selectedLandmarks(at: model.playbackPosition * duration).isEmpty)\n",
+              stderr)
+        XCTAssertEqual(drawable.count, detectedBuckets.count,
+                       "顔を検出したバケットなのに選択層を通すとモザイクが引けない"
+                       + "（検出は乗っているのに描画されない = 選択層の取りこぼし）")
     }
 
     /// 実機のライブ再生と同じ流れ: 各バケットのフレームを 640px に縮小 → IMAGE モード

@@ -23,9 +23,20 @@ public struct SelectedFaceTracker {
 
     /// このフレームの検出顔から選択顔だけを残す。マッチした追跡位置は更新される。
     public mutating func filter(_ faces: [FaceLandmarkSet]) -> [FaceLandmarkSet] {
-        guard !tracked.isEmpty else { return faces }
-        var kept: [FaceLandmarkSet] = []
-        for face in faces {
+        zip(faces, matches(faces)).filter { $0.1 }.map { $0.0 }
+    }
+
+    /// `filter` と同じ判定を、**捨てずに顔ごとの真偽で**返す。追跡位置の更新も同じに行う。
+    ///
+    /// 人物同定（`FaceIdentityPolicy`）に「位置追跡はどう言っているか」を渡すための口。
+    /// 絞り込みを先に済ませてしまうと、署名が「選んだ人だ」と言っている顔が
+    /// 位置の都合で先に落とされ、同定が効かなくなる。
+    ///
+    /// - Returns: `faces` と同じ順・同じ件数の真偽。追跡位置が空（＝全顔選択）なら全て true。
+    public mutating func matches(_ faces: [FaceLandmarkSet]) -> [Bool] {
+        guard !tracked.isEmpty else { return [Bool](repeating: true, count: faces.count) }
+        var result = [Bool](repeating: false, count: faces.count)
+        for (i, face) in faces.enumerated() {
             let fc = Self.centroid(of: face)
             guard let (idx, dist) = tracked.enumerated()
                 .map({ ($0.offset, hypot(fc.x - $0.element.x, fc.y - $0.element.y)) })
@@ -35,11 +46,11 @@ public struct SelectedFaceTracker {
             // 永久に再マッチできないため。
             let solePair = tracked.count == 1 && faces.count == 1
             if solePair || dist < Self.matchDistance {
-                kept.append(face)
+                result[i] = true
                 tracked[idx] = fc
             }
         }
-        return kept
+        return result
     }
 
     /// 正規化座標での全ランドマーク重心。

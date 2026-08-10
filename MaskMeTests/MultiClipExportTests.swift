@@ -376,6 +376,83 @@ final class MultiClipExportTests: XCTestCase {
     /// 分割して並べ替えた 2 クリップ（素材の後半 → 前半）のエクスポートが完走し、
     /// 出力尺が合成尺（2 クリップの合計）になること。素材スコープの検出キャッシュと
     /// 写像を渡し、キャッシュ参照経路込みで完走することを確認する。
+    // MARK: - 人物同定つきの絞り込み（S3）
+
+    /// 書き出しでも**プレビューと同じ判定**が効くこと。
+    ///
+    /// 選んだ人が選択時の位置から大きく離れた（フレームアウト→別位置で再入した）状況を作る。
+    /// 位置追跡だけの頃はここで絞り込みから落ち、**保存した動画だけ素で映っていた**。
+    /// 署名を渡したときだけ顔が残ることを、書き出し中の実測値で確かめる。
+    func test_export_identityKeepsSelectedPersonAfterMovingFarAway() async throws {
+        guard MTLCreateSystemDefaultDevice() != nil else {
+            throw XCTSkip("Metal デバイスが無い環境ではスキップ")
+        }
+        let url = try await makeTestVideo(seconds: 2.0, withAudio: false)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let sourceID = UUID()
+        let clips = [TimelineClip(sourceID: sourceID, sourceStart: 0, sourceEnd: 2)]
+        let composition = try await TimelineCompositionBuilder()
+            .build(clips: clips, sources: [sourceID: AVURLAsset(url: url)]).composition
+
+        // 顔は画面右端（0.9）だけ。選択したターゲットは左端（0.2）に居る＝重心距離 0.7。
+        let faceCentroid = CGPoint(x: 0.9, y: 0.5)
+        let face = fakeFace(cx: 0.9, cy: 0.5)
+        var cache: [Double: [FaceLandmarkSet]] = [:]
+        var samples: [DetectionCacheKey: [FaceSignatureSample]] = [:]
+        var signatureValues = [Float](repeating: 0, count: FaceSignature.dimension)
+        signatureValues[0] = 1
+        let signature = try XCTUnwrap(FaceSignature(rawValues: signatureValues))
+        for step in 0..<30 {
+            let t = Double(step) / 15.0
+            cache[t] = [face]
+            samples[DetectionCacheKey(sourceID: sourceID, time: t, bucketFPS: 15)] =
+                [FaceSignatureSample(centroid: faceCentroid, signature: signature)]
+        }
+        // 選択顔は 2 つにする。1 つだと `SelectedFaceTracker` の「単一選択 × 単一検出は
+        // 無条件で再捕捉」規則が働き、位置追跡だけでも当たってしまって同定の効果が見えない。
+        // どちらの重心も顔（0.9, 0.5）から 0.5 以上離してある。
+        let selected = [
+            FaceTarget(id: UUID(), landmarks: fakeFace(cx: 0.2, cy: 0.5),
+                       thumbnail: UIImage(), isSelected: true, sourceID: sourceID),
+            FaceTarget(id: UUID(), landmarks: fakeFace(cx: 0.5, cy: 0.9),
+                       thumbnail: UIImage(), isSelected: true, sourceID: sourceID)
+        ]
+        let person = PersonProfile(exemplars: [signature])
+        // 適用区間は 0 本だとゲートが閉じる（＝モザイクを一切掛けない）ので全編を指定する。
+        let applyRanges = [MosaicApplyRange(clipID: clips[0].id, sourceID: sourceID,
+                                            sourceStart: 0, sourceEnd: 2)]
+
+        // 署名あり: 位置が離れていても隠す。
+        let withIdentity = try makeExporter()
+        let outA = try await withIdentity.export(
+            asset: composition,
+            selectedFaceTargets: selected,
+            selectedPersons: [person],
+            faceSignatures: FaceSignatureLookup(samples: samples, bucketFPS: 15),
+            detectionCaches: [sourceID: cache],
+            mapping: TimelineMapping(clips: clips),
+            applyRanges: applyRanges) { _ in }
+        defer { try? FileManager.default.removeItem(at: outA) }
+        XCTAssertGreaterThan(withIdentity.identityFilteredFrameCount, 0,
+                             "前提: 絞り込み自体が走っていない（キャッシュに当たっていない）")
+        XCTAssertGreaterThan(withIdentity.identityKeptFaceCount, 0,
+                             "選んだ人が書き出しで素のまま映っている（同定が効いていない）")
+
+        // 署名なし: 従来どおり位置追跡だけ＝距離 0.7 で落ちる。
+        let withoutIdentity = try makeExporter()
+        let outB = try await withoutIdentity.export(
+            asset: composition,
+            selectedFaceTargets: selected,
+            detectionCaches: [sourceID: cache],
+            mapping: TimelineMapping(clips: clips),
+            applyRanges: applyRanges) { _ in }
+        defer { try? FileManager.default.removeItem(at: outB) }
+        XCTAssertGreaterThan(withoutIdentity.identityFilteredFrameCount, 0)
+        XCTAssertEqual(withoutIdentity.identityKeptFaceCount, 0,
+                       "前提: 署名なしでは位置追跡が外れる状況を作れていない")
+    }
+
     func test_splitReorderedTwoClips_exportCompletesWithCompositionDuration() async throws {
         guard MTLCreateSystemDefaultDevice() != nil else {
             throw XCTSkip("Metal デバイスが無い環境ではスキップ")

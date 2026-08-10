@@ -70,6 +70,84 @@ extension MosaicEditorModel {
         }
     }
 
+    // MARK: - シードした顔の人物同定
+
+    /// 初期スキャンでシードした顔の人物 ID を決める（`faces` と同じ順・同じ件数）。
+    ///
+    /// **なぜシードの時点で測るのか**: ライブ検出は 0.5 秒間隔でしか署名を測らないので、
+    /// 素材を開いた直後は人物 ID が 1 つも付いていない。下書きの顔選択は人物 ID で
+    /// 結び直す（`DraftSelectionResolver`）ため、開いた瞬間に人物が分かっていないと
+    /// 復元が位置照合まで落ち、外れれば安全側の全選択——つまり
+    /// **「この人だけ隠す」という選択が再開のたびに失われる**。
+    ///
+    /// **`detectedFaces` へ載せる「前」に呼ぶこと。** 載せてから付け直す形にすると、
+    /// `detectedFaces` の didSet が走る時点では人物 ID がまだ nil で、保留していた
+    /// 下書きの目印（`applyPendingFaceSelectionAnchorsIfNeeded`）が人物照合を使えずに
+    /// 位置照合だけで確定してしまう。その後に人物 ID を付けても、判定をやり直す機会は
+    /// 二度と来ない。
+    ///
+    /// - Parameters:
+    ///   - faces: シードした顔。
+    ///   - image: `faces` の正規化座標が乗っているフレーム。
+    ///   - sourceID: 素材ID。nil（写真モード）では署名を置き場へ入れず、人物 ID だけ決める。
+    ///   - time: `cacheStore.store` に使ったのと**同じ素材時刻**。食い違うと顔は引けるのに
+    ///     署名だけ引けない（`FaceSignatureCache` の doc）。
+    @MainActor
+    func seedPersonIDs(for faces: [FaceLandmarkSet], in image: UIImage,
+                       sourceID: UUID?, time: Double) -> [UUID?] {
+        guard !faces.isEmpty, FaceSignatureProvider.shared.isAvailable else {
+            return [UUID?](repeating: nil, count: faces.count)
+        }
+        let signatures = FaceSignatureProvider.shared.signatures(for: faces, in: image)
+        if let sourceID {
+            signatureCache.store(signatures, for: faces, sourceID: sourceID, time: time)
+            // 直後のライブ検出が同じ顔をもう一度測らないよう、間引きの時計も進めておく。
+            lastSignatureSourceTime[sourceID] = time
+        }
+        // 新しいターゲットなので `register` に判断させる（既存人物と `match` 以上で
+        // 似ていればその ID＝下書きから復元した人物 ID が返る）。判断保留の帯では
+        // nil のままで、判定は位置追跡と安全側へ委ねられる。
+        return signatures.map { $0.flatMap { personRegistry.register($0) } }
+    }
+
+    // MARK: - 人物署名（ライブ検出から遅れて届く分）
+
+    /// 「この合成時刻のフレームで署名を計算してよいか」を判定し、可ならスロットを消費する。
+    ///
+    /// 間引きは**素材時刻**で見る（合成時刻で見ると rate≠1 のとき素材上の間隔が変わり、
+    /// 0.1x では同じ顔の署名ばかり、10x では滅多に取れないという偏りが出る）。
+    /// 消費は判定と同時に行う（判定だけして後で消費すると、in-flight の間に
+    /// 次のフレームも通ってしまう）。
+    func beginSignatureIntervalIfDue(atComposition timeSec: Double) -> Bool {
+        guard FaceSignatureProvider.shared.isAvailable else { return false }
+        let (sourceID, sourceTime) = resolveSourceTime(atComposition: timeSec)
+        if let last = lastSignatureSourceTime[sourceID],
+           abs(sourceTime - last) < signatureIntervalSec {
+            return false
+        }
+        lastSignatureSourceTime[sourceID] = sourceTime
+        return true
+    }
+
+    /// 検出より**遅れて届いた**署名を、その検出と同じ素材キーへ書く（`liveSignatureQueue`）。
+    ///
+    /// 検出本体と別の呼び出しになっても取り違えが起きないのは、`FaceSignatureCache` が
+    /// 顔と署名を**重心の位置**で結ぶため（添字ではない）。`faces` は署名を計算したときの
+    /// 検出結果そのものを渡すこと——別のフレームの顔列を渡すと、位置照合が近い顔に
+    /// 引っかかって**別人の署名で判定する**。
+    ///
+    /// 世代が変わっていたら捨てる（旧タイムラインの合成時刻を新しい写像で解釈すると
+    /// 誤った素材キーに落ちる。`storeLiveDetection(_:at:source:signatures:generation:)` と同じ理由）。
+    /// **`liveDetectionInFlight` は触らない**——検出側が既に下ろしており、ここで
+    /// もう一度触ると進行中の別フレームの検出ガードを誤って解除する。
+    @MainActor
+    func storeLiveSignatures(_ signatures: [FaceSignature?], for faces: [FaceLandmarkSet],
+                             at t: Double, generation: Int) {
+        guard generation == timelineGeneration else { return }
+        let (sourceID, sourceTime) = resolveSourceTime(atComposition: t)
+        signatureCache.store(signatures, for: faces, sourceID: sourceID, time: sourceTime)
+    }
+
     /// 写真クリップの検出 seed（素材時刻 t=0 の 1 回だけ）。
     ///
     /// ライブ検出・初期スキャンと同じ縮小幅（`downscaleForDetection`）で検出する。
@@ -83,10 +161,11 @@ extension MosaicEditorModel {
         guard !faces.isEmpty else { return }
         // 写真を追加する意図は「この顔にモザイクを掛けたい」なので即選択する
         // （detectInRegion と同じ理由。未選択のままだと写真区間だけモザイクが乗らない）。
-        detectedFaces += faces.map { lm in
+        let personIDs = seedPersonIDs(for: faces, in: normalizedImage, sourceID: sourceID, time: 0)
+        detectedFaces += faces.enumerated().map { idx, lm in
             FaceTarget(id: UUID(), landmarks: lm,
                        thumbnail: generateThumbnail(for: lm, from: normalizedImage),
-                       isSelected: true, sourceID: sourceID)
+                       isSelected: true, sourceID: sourceID, personID: personIDs[idx])
         }
     }
 
@@ -153,10 +232,12 @@ extension MosaicEditorModel {
         // モザイクが乗る）。空結果を記録しないのも load と同じ
         // （t=0 に顔が無い事実はライブ検出が空エントリとして記録する）。
         cacheStore.store(scan.faces, sourceID: sourceID, time: scan.time)
-        detectedFaces += scan.faces.map { lm in
+        let personIDs = seedPersonIDs(for: scan.faces, in: scan.frame,
+                                      sourceID: sourceID, time: scan.time)
+        detectedFaces += scan.faces.enumerated().map { idx, lm in
             FaceTarget(id: UUID(), landmarks: lm,
                        thumbnail: generateThumbnail(for: lm, from: scan.frame),
-                       isSelected: true, sourceID: sourceID)
+                       isSelected: true, sourceID: sourceID, personID: personIDs[idx])
         }
     }
 }
