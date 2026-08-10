@@ -106,7 +106,13 @@ struct TimelineEditSheetsModifier: ViewModifier {
             }
         case let .audio(id):
             if let item = model.timeline.audioItems.first(where: { $0.id == id }) {
-                TimelineVolumeSheet(initialVolume: item.volume) { volume in
+                let fadeConfig = TimelineVolumeSheet.FadeConfig(
+                    initialFadeIn: item.fadeInDuration,
+                    initialFadeOut: item.fadeOutDuration,
+                    maximumFade: item.duration / 2) { fadeIn, fadeOut in
+                        model.setAudioFade(id: id, fadeIn: fadeIn, fadeOut: fadeOut)
+                    }
+                TimelineVolumeSheet(initialVolume: item.volume, fadeConfig: fadeConfig) { volume in
                     model.setAudioVolume(id: id, volume: volume)
                 }
             }

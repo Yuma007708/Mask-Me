@@ -6,10 +6,110 @@ import Foundation
 /// `MosaicApplyGate.ranges(splittingClip:...)` と同じ役割・同じ引数の並びにしてある
 /// （追従の規則が 2 系統に割れると、片方だけ直して片方が腐る）。
 ///
-/// **追従が要るのは分割と削除だけ。** 並べ替え・トリム・速度変更・音量変更・追加は
+/// **追従が要るのは分割・複製・削除だけ。** 並べ替え・トリム・速度変更・音量変更・追加は
 /// `clipID` も素材時刻も変えないので、素材時刻アンカーがそのまま自動追従する
 /// （`TimelineState.moving` の doc と同じ理屈）。
 public enum ObjectMaskEditOperations {
+    // MARK: - クリップ編集への追従（唯一の入口）
+
+    /// クリップ編集の前後でマスクを付け替える**唯一の入口**（アプリ層の
+    /// `MosaicEditorModel.followClipEdit(from:to:lineage:)` が呼ぶ）。
+    ///
+    /// ## 見分け方は「推測」ではなく「血統」
+    ///
+    /// 消えたクリップは差分で分かる（id が消えたという事実そのもの）が、**新しく生まれた
+    /// クリップが分割の後半なのか複製先なのかは差分からは決められない**。複製は
+    /// 「元の直後・同じ `sourceID`・元は編集前から存在」という分割の後半とまったく同じ
+    /// 見た目になるためで、実際にこの推測で複製が分割として処理され、元クリップのマスクが
+    /// キーフレーム 1 個へ潰れる（＝追っていた矩形が止まり顔が露出する）バグが出た。
+    /// そこで編集操作の側が `ClipLineage` で種類を伝える（`ClipLineage` の doc）。
+    ///
+    /// ## 血統に載っていない新規クリップ
+    ///
+    /// 素材追加（`appending(clip:source:...)`）は**必ず新しい `sourceID`** を連れてくるので、
+    /// 既存クリップのマスクとは無関係であり何もしなくてよい。逆に、既存の `sourceID` を持つ
+    /// 新規クリップが血統無しで現れたら、それは**クリップを生む編集操作を足したのに血統を
+    /// 返し忘れた**ということなので、DEBUG では `assertionFailure` で落とす
+    /// （黙って推測に落とすと、今回のバグと同じものを別の操作で再生産する）。
+    public static func masks(following lineage: [ClipLineage],
+                             from before: TimelineState,
+                             to after: TimelineState,
+                             existing: [ObjectMask]) -> [ObjectMask] {
+        assertLineageCoversNewClips(lineage, from: before, to: after)
+        var result = existing
+        // 消えたクリップのマスクを落とす（分割・複製では消えない＝元が id を保つ）。
+        let afterIDs = Set(after.clips.map(\.id))
+        for removed in before.clips.map(\.id) where !afterIDs.contains(removed) {
+            result = masks(removingClipID: removed, from: result)
+        }
+        for entry in lineage {
+            switch entry {
+            case let .split(frontID, backID):
+                guard let front = after.clips.first(where: { $0.id == frontID }),
+                      let back = after.clips.first(where: { $0.id == backID }) else { continue }
+                result = masks(splittingClip: front, into: back,
+                               atSourceTime: back.sourceStart,
+                               isPhoto: after.sourceKind(of: back.sourceID) == .photo,
+                               existing: result)
+            case let .duplicate(originalID, copyID):
+                guard let copy = after.clips.first(where: { $0.id == copyID }) else { continue }
+                result = masks(duplicatingClipID: originalID, into: copy, existing: result)
+            }
+        }
+        return result
+    }
+
+    /// 血統が新規クリップを覆っているかの検査（DEBUG のみ。本文は上の doc 参照）。
+    private static func assertLineageCoversNewClips(_ lineage: [ClipLineage],
+                                                    from before: TimelineState,
+                                                    to after: TimelineState) {
+        #if DEBUG
+        let beforeIDs = Set(before.clips.map(\.id))
+        let beforeSourceIDs = Set(before.clips.map(\.sourceID))
+        let described = Set(lineage.map(\.createdClipID))
+        for clip in after.clips
+        where !beforeIDs.contains(clip.id) && !described.contains(clip.id)
+            && beforeSourceIDs.contains(clip.sourceID) {
+            assertionFailure("""
+                既存の素材を使う新規クリップ \(clip.id) が ClipLineage に載っていない。\
+                クリップを生む編集操作を足したなら TimelineEdit へ血統を返すこと\
+                （推測で分割として扱うと元クリップのマスクが潰れる）。
+                """)
+        }
+        #endif
+    }
+
+    // MARK: - 複製
+
+    /// クリップ複製にマスクを追従させる（**元クリップのマスクは一切変更しない**）。
+    ///
+    /// 複製先へは元のマスクを**丸ごとコピー**する。`MosaicApplyRange` を
+    /// `TimelineState.duplicatingEdit(clipID:)` が clipID だけ差し替えて複製しているのと
+    /// 同じ扱いで、複製したのにモザイクの設定だけ引き継がれない状態を作らない。
+    ///
+    /// - `ObjectMask.id` は**新規発番**する（同じ id が 2 個並ぶと SwiftUI の `ForEach` と
+    ///   `firstIndex(where:)` が片方にしか当たらない。分割の後半に新しい id を振るのと同じ理由）
+    /// - キーフレームは**全部そのまま**（素材時刻・矩形・傾き）。素材使用範囲も速度も
+    ///   元クリップと同一なので、素材時刻アンカーはそのまま成立する。id だけは
+    ///   新規発番する（マスクが別物である以上、その部品も別物として扱う）
+    /// - `isRegionPlaceholder` は引き継ぐ（分割が前後どちらにも引き継ぐのと同じ。
+    ///   第 2 段が矩形サーチ由来の暫定マスクを見分けるためのフラグなので、
+    ///   複製先で落とすと見失う）
+    public static func masks(duplicatingClipID originalID: UUID,
+                             into copy: TimelineClip,
+                             existing: [ObjectMask]) -> [ObjectMask] {
+        let copies = existing.compactMap { mask -> ObjectMask? in
+            guard mask.anchor.clipID == originalID else { return nil }
+            return ObjectMask(anchor: .clip(clipID: copy.id, sourceID: copy.sourceID),
+                              keyframes: mask.keyframes.map {
+                                  ObjectMask.Keyframe(sourceTime: $0.sourceTime, rect: $0.rect,
+                                                      angle: $0.angle)
+                              },
+                              isRegionPlaceholder: mask.isRegionPlaceholder)
+        }
+        return existing + copies
+    }
+
     // MARK: - 分割
 
     /// クリップ分割にマスクを追従させる。

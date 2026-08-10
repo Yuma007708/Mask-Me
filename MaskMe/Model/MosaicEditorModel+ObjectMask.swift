@@ -128,7 +128,10 @@ extension MosaicEditorModel {
             let resolvedMask = ObjectMaskResolver.resolve(
                 of: mask, tracks: objectTracks, atSourceTime: resolved.time,
                 isTrackingRunning: isTrackingRunning)
-            let angle = mask.angle(atSourceTime: resolved.time)
+            // **角度もレイアウト写像を通す。** クリップを回すと矩形は回るのに
+            // 傾きが素材のまま残り、傾けた矩形が対象からずれる（`remapAngle` の doc）。
+            let angle = renderLayout.remapAngle(mask.angle(atSourceTime: resolved.time),
+                                                clipID: resolved.clipID)
             return VisibleObjectMask(
                 id: mask.id,
                 rect: renderLayout.remap(resolvedMask.rect, clipID: resolved.clipID),
@@ -209,16 +212,20 @@ extension MosaicEditorModel {
         let mask = objectMasks[index]
         let sourceRect: CGRect
         let sourceTime: Double
+        // 画面で指定された傾きも素材基準へ戻す（矩形と同じ写像の逆。
+        // 片方だけ戻すと、回したクリップで矩形を掴んだ瞬間に傾きが飛ぶ）。
+        var sourceAngle = angle
         if let clipID = mask.anchor.clipID {
             guard let mapped = renderLayout.inverseRemap(rect, clipID: clipID) else { return }
             sourceRect = mapped
+            sourceAngle = renderLayout.inverseRemapAngle(angle, clipID: clipID)
             sourceTime = resolveSourceLocation(atComposition: compositionTimeForOverlay).time
         } else {
             sourceRect = rect
             sourceTime = 0
         }
         let updated = mask.settingKeyframe(atSourceTime: sourceTime, rect: sourceRect,
-                                           angle: angle)
+                                           angle: sourceAngle)
         guard updated != mask else { return }
         objectMasks[index] = updated
         renderPreview()
@@ -298,31 +305,23 @@ extension MosaicEditorModel {
 
     // MARK: - クリップ編集への追従
 
-    /// クリップ編集の前後でマスクを付け替える（`applyTimelineEdit` から呼ぶ）。
+    /// クリップ編集の前後でマスクを付け替える（`applyTimelineEdit` から呼ぶ**唯一の入口**）。
     ///
-    /// 素材時刻アンカーなので、追従が要るのは**分割と削除だけ**
-    /// （`ObjectMaskEditOperations` の doc）。分割・削除の検出はクリップ列の差分で行う:
-    /// 個々の編集 API に手を入れると、新しい編集操作を足したときに漏れる。
-    func followClipEdit(from before: TimelineState, to after: TimelineState) {
-        let beforeIDs = before.clips.map(\.id)
-        let afterIDs = Set(after.clips.map(\.id))
-        // 消えたクリップのマスクを落とす（分割では消えない＝front が id を継承する）。
-        var result = objectMasks
-        for removed in beforeIDs where !afterIDs.contains(removed) {
-            result = ObjectMaskEditOperations.masks(removingClipID: removed, from: result)
-        }
-        // 分割: 直前のクリップと素材が同じ新規クリップが「後半」。
-        let newIDs = after.clips.filter { !Set(beforeIDs).contains($0.id) }.map(\.id)
-        for newID in newIDs {
-            guard let backIndex = after.clips.firstIndex(where: { $0.id == newID }), backIndex > 0
-            else { continue }
-            let back = after.clips[backIndex]
-            let front = after.clips[backIndex - 1]
-            guard front.sourceID == back.sourceID, Set(beforeIDs).contains(front.id) else { continue }
-            result = ObjectMaskEditOperations.masks(
-                splittingClip: front, into: back, atSourceTime: back.sourceStart,
-                isPhoto: after.sourceKind(of: back.sourceID) == .photo, existing: result)
-        }
+    /// 素材時刻アンカーなので、追従が要るのは**分割・複製・削除だけ**
+    /// （`ObjectMaskEditOperations` の doc）。追従の規則そのものはコア層の純関数
+    /// `ObjectMaskEditOperations.masks(following:from:to:existing:)` にあり、ここは
+    /// モデルの状態を渡して結果を書き戻すだけの薄い層である（`swift test` で回せる場所に
+    /// 規則を置くため）。
+    ///
+    /// **消えたクリップは差分で分かるが、新しく生まれたクリップの理由は差分では分からない。**
+    /// 分割の後半と複製先は見た目が同じなので、`lineage`（`ClipLineage`）で編集操作の側から
+    /// 種類を受け取る。追従の呼び出しを `applyTimelineEdit` の 1 箇所に集める意図
+    /// （新しい編集操作を足したときに呼び忘れない）はそのまま保っている——変わったのは
+    /// 「何が起きたか」の情報源が推測から血統になったところだけ。
+    func followClipEdit(from before: TimelineState, to after: TimelineState,
+                        lineage: [ClipLineage]) {
+        let result = ObjectMaskEditOperations.masks(following: lineage, from: before, to: after,
+                                                    existing: objectMasks)
         guard result != objectMasks else { return }
         objectMasks = result
     }

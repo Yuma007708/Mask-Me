@@ -8,7 +8,7 @@ extension TimelineState {
     // MARK: - Codable（後方互換）
 
     private enum CodingKeys: String, CodingKey {
-        case clips, transitions, applyRanges, audioItems, textItems, sources, schemaVersion
+        case clips, transitions, applyRanges, audioItems, textItems, sources, aspectRatio, schemaVersion
     }
 
     /// `clipID` を持たない v1 の適用区間（デコード専用）。
@@ -44,6 +44,13 @@ extension TimelineState {
         // BGM と同じく正規化を通す（手で書き換えられた下書きを実行系へ流さない）。
         self.textItems = Self.normalizedTextItems(
             try container.decodeIfPresent([TextItem].self, forKey: .textItems) ?? [])
+        // 出力の画面比率（v5 で追加）。**キーが無い旧下書きは `.source`（素材に合わせる
+        // ＝ 従来挙動）で復元する。** 未知の文字列（手書き・将来版で保存された下書き）も
+        // `.source` に倒す: ここで throw すると下書きが丸ごと開けなくなるうえ、
+        // 出力枠の指定は「見た目の枠」であって欠けても編集内容は失われないため。
+        let decodedAspectRatio: TimelineAspectRatio?? = try? container.decodeIfPresent(
+            TimelineAspectRatio.self, forKey: .aspectRatio)
+        self.aspectRatio = (decodedAspectRatio ?? .source) ?? .source
         let version = try container.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? 1
         if version >= 2 {
             self.applyRanges = try container.decode([MosaicApplyRange].self, forKey: .applyRanges)
@@ -66,6 +73,7 @@ extension TimelineState {
         try container.encode(audioItems, forKey: .audioItems)
         try container.encode(textItems, forKey: .textItems)
         try container.encode(sources, forKey: .sources)
+        try container.encode(aspectRatio, forKey: .aspectRatio)
         try container.encode(Self.currentSchemaVersion, forKey: .schemaVersion)
     }
 

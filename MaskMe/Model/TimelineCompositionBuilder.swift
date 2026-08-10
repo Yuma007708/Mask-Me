@@ -45,10 +45,17 @@ struct TimelineCompositionBuilder {
         let audioMix: AVMutableAudioMix?
         /// 顔ランドマーク（素材フレーム基準）を合成フレーム基準へ写すレイアウト。
         let layout: TimelineRenderLayout
-        /// 出力解像度（先頭クリップ基準）。**`videoComposition` が nil でもこの値が
+        /// 出力解像度。既定（`TimelineAspectRatio.source`）では先頭クリップ基準で、
+        /// 比率を選んでいればその枠、無料プランの上限に当たっていれば縮小後のサイズ。
+        /// **`videoComposition` が nil でもこの値が
         /// 出力サイズになる**（無装着構成は先頭＝唯一のフォーマットがそのまま出る）ので、
         /// UI へ出す値をここから取ること。クリップが 1 本も無いときだけ `.zero`。
         let outputSize: CGSize
+        /// 出力 1 コマの長さ（秒）。**`videoComposition` が nil でもこの値が実際のコマ間隔**
+        /// （無装着構成は素材のフレームレートがそのまま出る）なので、UI へ出す値は
+        /// `outputSize` と同じくここから取ること。クリップが 1 本も無いときだけ nil。
+        /// 算出は `VideoCompositionFactory.frameDuration(for:)` の単一実装。
+        let outputFrameDuration: Double?
         /// 出力枠より大きく、縮小されて収まるクリップの id（UI の注意表示用）。
         /// 判定は `TimelineOutputSummary.downscaledIndices`（コア層の純関数）。
         let downscaledClipIDs: Set<UUID>
@@ -104,10 +111,20 @@ struct TimelineCompositionBuilder {
     ///   既定 `true`（無制限）は、権限を意識しない既存の呼び出し（テスト等）の挙動を
     ///   変えないための後方互換値。実アプリの 2 経路
     ///   （プレビュー再構築・書き出し＝どちらも `rebuildComposition`）は必ず明示して渡す。
+    /// - Parameter aspectRatio: 出力の画面比率（`TimelineState.aspectRatio`）。
+    ///   `.source`（既定）は従来どおり先頭クリップの表示サイズがそのまま出力枠になる。
+    ///
+    ///   **プレビューと書き出しで比率が食い違わないのは、ここが唯一の入口だからである。**
+    ///   この値は `videoComposition.renderSize` と `Built.layout`（顔座標の写像）を
+    ///   同時に決め、両者は `MosaicEditorModel.apply(built:generation:)` で必ず組で
+    ///   差し替わる。新しい経路からこの builder を呼ぶときは必ず
+    ///   `timeline.aspectRatio` を渡すこと（既定値 `.source` は、比率を意識しない
+    ///   既存の呼び出し＝テストの挙動を変えないための後方互換値）。
     func build(clips: [TimelineClip],
                transitions: [UUID: TransitionSpec] = [:],
                audioItems: [AudioItem] = [],
                sources: [UUID: AVAsset],
+               aspectRatio: TimelineAspectRatio = .source,
                isPro: Bool) async throws -> Built {
         let mapping = TimelineMapping(clips: clips, transitions: transitions)
         // 重なりがあるときだけ 2 トラックへ交互配置する。重なりが無い構成では
@@ -167,8 +184,11 @@ struct TimelineCompositionBuilder {
 
         // BGM（E2）。**videoComposition を作る前に挿入する**（後にすると、丸めで
         // composition 尺が伸びたぶん instruction の被覆が足りなくなる）。
-        let backgroundTrack = try await insertBackgroundAudio(audioItems, sources: sources,
-                                                              into: composition)
+        // **戻り値の `items` を audioMix へ渡すこと**（生の `audioItems` ではない）。
+        // 挿入側は音源の実尺へクランプし、載らなかった曲を落とすので、両者は食い違う。
+        let background = try await insertBackgroundAudio(audioItems, sources: sources,
+                                                         into: composition)
+        let backgroundTrack = background.track
 
         // instruction の被覆に使う尺は「写像の合計」と「実際の composition 尺」の大きい方。
         // 挿入は timescale 600 へ丸められるため composition 尺が写像の合計より数 ms
@@ -178,21 +198,12 @@ struct TimelineCompositionBuilder {
         let totalDuration = max(mapping.totalDuration,
                                 compositionSeconds.isFinite ? compositionSeconds : 0)
 
-        // 出力解像度の**自然な**値の算出は `VideoCompositionFactory.renderSize(for:)` の
-        // 単一実装を使う（コア層に再実装しない。表示と実出力が食い違う二重管理を作らない
-        // ため。`TimelineOutputSummary` の doc 参照）。無料プランの書き出し制限は、この
-        // 自然な値の**結果に対して**判定・縮小する（`ExportRestrictionPolicy` の doc 参照）。
-        let naturalOutputSize = placements.first.map { VideoCompositionFactory.renderSize(for: $0.format) }
-            ?? .zero
-        let exportRestriction = ExportRestrictionPolicy.decide(
-            isPro: isPro, durationSeconds: totalDuration, resolution: naturalOutputSize)
-        let renderSizeOverride: CGSize?
-        if case .exceedsResolution(let limit) = exportRestriction {
-            renderSizeOverride = ExportRestrictionPolicy.clampedResolution(
-                naturalOutputSize, shortSideLimit: limit)
-        } else {
-            renderSizeOverride = nil
-        }
+        let sizing = Self.outputSizing(placements: placements, aspectRatio: aspectRatio,
+                                       isPro: isPro, totalDuration: totalDuration)
+        let naturalOutputSize = sizing.natural
+        let clampedOutputSize = sizing.clamped
+        let exportRestriction = sizing.restriction
+        let renderSizeOverride = sizing.renderSizeOverride
 
         let (videoComposition, layout) = VideoCompositionFactory.make(
             placements: placements, overlaps: mapping.overlaps,
@@ -200,16 +211,25 @@ struct TimelineCompositionBuilder {
         let audioMix = AudioMixFactory.make(placements: placements,
                                             overlaps: mapping.overlaps,
                                             tracks: survivingAudio,
-                                            backgroundItems: audioItems,
+                                            backgroundItems: background.items,
                                             backgroundTrack: backgroundTrack)
         // 実際に適用された出力解像度（縮小したならそのサイズ）。UI・書き出しはこちらを
         // 見ること（`outputSize` の doc 参照）。
-        let outputSize = renderSizeOverride ?? naturalOutputSize
+        let outputSize = clampedOutputSize
         let downscaled = TimelineOutputSummary.downscaledIndices(
             renderSize: outputSize,
-            displaySizes: placements.map { VideoCompositionFactory.displaySize(of: $0.format) })
+            displaySizes: placements.map {
+                VideoCompositionFactory.displaySize(of: $0.format,
+                                                    orientation: $0.clip.orientation)
+            })
+        // 1 コマの長さも「実際に出るもの」を 1 箇所で決めて配る（`outputSize` と同じ規約）。
+        // `videoComposition` を装着しない構成でも素材のフレームレートは分かるので、
+        // UI が既定値 30fps へ落ちずに済む。
+        let frameSeconds = CMTimeGetSeconds(VideoCompositionFactory.frameDuration(for: placements))
         return Built(composition: composition, videoComposition: videoComposition,
                      audioMix: audioMix, layout: layout, outputSize: outputSize,
+                     outputFrameDuration: placements.isEmpty || !frameSeconds.isFinite
+                         || frameSeconds <= 0 ? nil : frameSeconds,
                      downscaledClipIDs: Set(downscaled.map { placements[$0].clip.id }),
                      hasBackgroundAudio: backgroundTrack != nil,
                      exportRestriction: exportRestriction)
@@ -229,15 +249,26 @@ struct TimelineCompositionBuilder {
     ///
     /// 1 曲も載らなかったらトラックごと除去して nil を返す（空セグメントだけの
     /// 音声トラックを writer へ渡さない、という既存の規約と同じ）。
+    ///
+    /// ## 戻り値の `items` を必ず audioMix へ渡すこと
+    ///
+    /// ここは音源の実尺へクランプし、音声トラックの無い素材・短すぎる区間を**落とす**。
+    /// つまり「タイムライン上の曲の一覧」と「実際にトラックへ載った曲の一覧」は食い違う。
+    /// 生の一覧を `AudioMixFactory` へ渡すと**フェードアウトが無音区間に落ちる**:
+    /// 曲の後ろが実尺で切られているのに、ランプは切られる前の `compositionEnd` を
+    /// 基準に置かれるため、音が鳴っている間はずっと最大音量のままで、フェードは
+    /// 音が終わった後の何も無いところで進む＝**ぶつ切りに聞こえる**。
+    /// `AudioMixFactory.make` の `backgroundItems` の doc（「実際に載った曲を渡すこと」）
+    /// が指しているのはこの食い違いのこと。
     private func insertBackgroundAudio(_ items: [AudioItem],
                                        sources: [UUID: AVAsset],
                                        into composition: AVMutableComposition) async throws
-        -> AVMutableCompositionTrack? {
+        -> (track: AVMutableCompositionTrack?, items: [AudioItem]) {
         guard !items.isEmpty,
               let track = composition.addMutableTrack(
                 withMediaType: .audio,
-                preferredTrackID: kCMPersistentTrackID_Invalid) else { return nil }
-        var inserted = false
+                preferredTrackID: kCMPersistentTrackID_Invalid) else { return (nil, []) }
+        var insertedItems: [AudioItem] = []
         for item in items {
             guard let asset = sources[item.sourceID] else {
                 throw BuildError.missingSource(item.sourceID)
@@ -246,9 +277,17 @@ struct TimelineCompositionBuilder {
             // ここで throw すると、選び直すまで書き出しもプレビューも一切できなくなる。
             guard let sourceTrack = try await asset.loadTracks(withMediaType: .audio).first
             else { continue }
-            let sourceSeconds = CMTimeGetSeconds(asset.duration)
-            let end = sourceSeconds.isFinite && sourceSeconds > 0
-                ? min(item.sourceEnd, sourceSeconds) : item.sourceEnd
+            // **`asset.duration` ではなく音声トラックの終端で切ること。**
+            // `asset.duration` は全トラックの最大長なので、映像 12 秒・音声 3 秒の
+            // mp4 を BGM の音源に選ぶと 12 秒まで載ると誤判定する。実際に鳴るのは
+            // 3 秒までなので、フェードアウトが音の終わった後に置かれる（＝上の doc の
+            // 「無音区間に落ちる」がこの経路で残っていた）。音源に映像ファイルを
+            // 選べることは `test_backgroundAudio_sourceWithoutAudioTrack_isSkipped` の
+            // 前提でもある。
+            let trackEnd = CMTimeGetSeconds(
+                CMTimeRangeGetEnd(try await sourceTrack.load(.timeRange)))
+            let end = trackEnd.isFinite && trackEnd > 0
+                ? min(item.sourceEnd, trackEnd) : item.sourceEnd
             guard end - item.sourceStart >= AudioItem.minimumDuration else { continue }
             let range = CMTimeRange(
                 start: CMTime(seconds: item.sourceStart, preferredTimescale: 600),
@@ -256,13 +295,19 @@ struct TimelineCompositionBuilder {
             try track.insertTimeRange(
                 range, of: sourceTrack,
                 at: CMTime(seconds: item.compositionStart, preferredTimescale: 600))
-            inserted = true
+            // 実尺で切った姿を記録する。`sourceEnd` を縮めると `duration` が縮むので、
+            // フェードは `clampFades()` で新しい尺の半分へ丸め直す（丸めないと
+            // フェードインの終わりよりフェードアウトの始まりが前に来る）。
+            var effective = item
+            effective.sourceEnd = end
+            effective.clampFades()
+            insertedItems.append(effective)
         }
-        guard inserted else {
+        guard !insertedItems.isEmpty else {
             composition.removeTrack(track)
-            return nil
+            return (nil, [])
         }
-        return track
+        return (track, insertedItems)
     }
 
     /// A/B いずれかのトラック組（同じスロットの映像トラックと音声トラック）。
@@ -377,5 +422,66 @@ struct TimelineCompositionBuilder {
                 CMTimeRange(start: cursor, duration: range.duration), toDuration: scaledDuration)
         }
         return true
+    }
+}
+
+// MARK: - 出力サイズの決定
+//
+// extension に置いてあるのは `function_body_length` 対策（`build` が上限に達したため）。
+
+extension TimelineCompositionBuilder {
+    /// 出力枠のサイズ決定を 1 箇所にまとめたもの。
+    ///
+    /// **段の順序に意味がある**（自然な値 → 向き → 画面比率 → 無料プランの上限）ので、
+    /// 呼び出し側でばらして書かないこと。ばらすと片方の経路だけ順序が違う、という
+    /// 種類の欠陥ができる。
+    struct OutputSizing {
+        /// 先頭クリップの向きまで含めた「自然な」出力枠。
+        let natural: CGSize
+        /// 画面比率と無料プランの上限まで掛けた、実際に書き出す枠。
+        let clamped: CGSize
+        let restriction: ExportRestriction
+        /// 自然な枠と同じなら nil（＝合成の装着を強制しない）。
+        let renderSizeOverride: CGSize?
+    }
+
+    static func outputSizing(placements: [ClipPlacement],
+                             aspectRatio: TimelineAspectRatio,
+                             isPro: Bool,
+                             totalDuration: Double) -> OutputSizing {
+        // 出力解像度の**自然な**値の算出は `VideoCompositionFactory.renderSize(for:)` の
+        // 単一実装を使う（コア層に再実装しない。表示と実出力が食い違う二重管理を作らない
+        // ため。`TimelineOutputSummary` の doc 参照）。
+        // **先頭クリップの向き（回転・反転）も渡す。** 渡し忘れると回した縦動画の
+        // 出力枠だけが横のままになり、映像が枠に収まらない。
+        let natural = placements.first.map {
+            VideoCompositionFactory.renderSize(for: $0.format, orientation: $0.clip.orientation)
+        } ?? .zero
+        // 画面比率の適用は、自然な値の**結果に掛ける後処理**（`TimelineAspectRatio` の doc）。
+        // `.source` は入力をそのまま返すので、この 1 行は従来経路を一切変えない。
+        // 向きを掛けた**後**のサイズへ適用する（回した縦動画に 16:9 を選んだとき、
+        // 回す前の横向きサイズを基準にすると枠が二重に倒れる）。
+        let aspect = aspectRatio.renderSize(fittingSourceSize: natural)
+        // 無料プランの制限は「実際に書き出す解像度」＝比率を適用した**後**のサイズで判定する。
+        //
+        // **順序の効き方を正確に書いておく。** 現在の採寸規則
+        // （`TimelineAspectRatio.renderSize` は短辺を据え置き、長辺だけを比率から導く）では
+        // 比率の前後で短辺が変わらないので、この順序は**結果を一切変えない**。
+        // それでも後段に置くのは、採寸規則を長辺基準などへ変えたときに上限がすり抜けるのを
+        // 防ぐためであって、「いますり抜けるから」ではない。ここを「すり抜ける」と書くと、
+        // 採寸規則を変える人が誤った根拠で安心する。
+        let restriction = ExportRestrictionPolicy.decide(
+            isPro: isPro, durationSeconds: totalDuration, resolution: aspect)
+        let clamped: CGSize
+        if case .exceedsResolution(let limit) = restriction {
+            clamped = ExportRestrictionPolicy.clampedResolution(aspect, shortSideLimit: limit)
+        } else {
+            clamped = aspect
+        }
+        // 自然な出力枠と同じサイズになったなら override を渡さない（＝装着を強制しない）。
+        // 素材がちょうどその比率だった場合に無変換タイムラインの忠実度
+        // （`CompositionFidelityTests` の bit 同一契約）を壊さないため。
+        return OutputSizing(natural: natural, clamped: clamped, restriction: restriction,
+                            renderSizeOverride: clamped == natural ? nil : clamped)
     }
 }

@@ -35,6 +35,12 @@ struct VideoCompositionConditions: Equatable {
     /// 解像度・向き（`preferredTransform`）が混在している。
     /// renderSize へ揃えるために装着する（S8 で正式解禁）。
     var hasMixedFormats = false
+    /// ユーザーが掛けたクリップの向き（`TimelineClip.orientation`）がある。
+    ///
+    /// 無装着経路はトラックの `preferredTransform` しか反映しないので、装着しないと
+    /// 回転・反転が**映像にだけ効かない**（`TimelineRenderLayout` には入るので
+    /// モザイクだけが回り、顔が素通しになる）。ここは必ず装着側へ倒す。
+    var hasClipOrientation = false
     /// 出力解像度を先頭クリップの自然サイズから強制的に変える必要がある
     /// （無料プランの解像度制限による縮小。`ExportRestrictionPolicy` 参照）。
     /// これが真のときだけの単一クリップ・無変換タイムラインでも装着を強制しないと、
@@ -50,6 +56,7 @@ struct VideoCompositionConditions: Equatable {
             hasTransitions: !overlaps.isEmpty,
             hasRateChange: placements.contains { $0.clip.rate != 1.0 },
             hasMixedFormats: placements.contains { $0.format != reference },
+            hasClipOrientation: placements.contains { !$0.clip.orientation.isIdentity },
             forcesRenderSize: forcesRenderSize)
     }
 }
@@ -71,6 +78,7 @@ enum VideoCompositionPlan: Equatable {
             || conditions.hasRateChange
             || conditions.hasMixedFormats
             || conditions.forcesRenderSize
+            || conditions.hasClipOrientation
         return needsComposition ? .attach : .none
     }
 }
@@ -114,14 +122,20 @@ enum VideoCompositionFactory {
             return (nil, .identity)
         }
 
-        let renderSize = renderSizeOverride ?? renderSize(for: first.format)
+        let renderSize = renderSizeOverride
+            ?? renderSize(for: first.format, orientation: first.clip.orientation)
         var layoutRects: [UUID: CGRect] = [:]
+        var orientations: [UUID: ClipOrientation] = [:]
         var transforms: [UUID: CGAffineTransform] = [:]
         for placement in placements {
-            let display = displaySize(of: placement.format)
+            let orientation = placement.clip.orientation
+            // **配置は「向きを掛けた後」のサイズで求める**（90 度回転で縦横が入れ替わる）。
+            let display = displaySize(of: placement.format, orientation: orientation)
             let rect = AspectFit.placement(of: display, in: renderSize)
             layoutRects[placement.clip.id] = rect
+            orientations[placement.clip.id] = orientation
             transforms[placement.clip.id] = fitTransform(format: placement.format,
+                                                         orientation: orientation,
                                                          placement: rect,
                                                          renderSize: renderSize)
         }
@@ -134,19 +148,40 @@ enum VideoCompositionFactory {
                                                      transforms: transforms,
                                                      renderSize: renderSize,
                                                      totalDuration: totalDuration)
-        return (videoComposition, TimelineRenderLayout(placements: layoutRects))
+        // **`orientations` を渡し忘れないこと。** 映像だけが回ってモザイクが素材の
+        // まま残り、顔が素通しになる（このアプリで最も重い事故）。
+        return (videoComposition, TimelineRenderLayout(placements: layoutRects,
+                                                       orientations: orientations))
     }
 
     // MARK: - サイズ・変換
 
     /// `preferredTransform` 適用後の表示サイズ（縦動画なら縦横が入れ替わる）。
-    static func displaySize(of format: TimelineCompositionBuilder.VideoFormat) -> CGSize {
+    ///
+    /// - Parameter orientation: ユーザーが掛けたクリップの向き。90 / 270 度で
+    ///   さらに縦横が入れ替わる。既定の `.identity` は「向きを意識しない既存の
+    ///   呼び出し（テスト等）の挙動を変えない」ための後方互換値で、
+    ///   **実アプリの経路（`TimelineCompositionBuilder` / `make`）は必ず渡す**。
+    static func displaySize(of format: TimelineCompositionBuilder.VideoFormat,
+                            orientation: ClipOrientation = .identity) -> CGSize {
         let rect = CGRect(origin: .zero, size: format.size).applying(format.transform)
-        return CGSize(width: abs(rect.width), height: abs(rect.height))
+        return orientation.displaySize(CGSize(width: abs(rect.width), height: abs(rect.height)))
     }
 
-    /// 出力解像度。**先頭クリップの映像フォーマット基準**（表示サイズ）。
+    /// 向きを掛ける**前**の表示サイズ（`preferredTransform` だけ適用した素材の見た目）。
+    /// 向きのアフィン変換はこのサイズを入力に取る（`ClipRenderTransform.make`）。
+    static func sourceDisplaySize(of format: TimelineCompositionBuilder.VideoFormat) -> CGSize {
+        displaySize(of: format, orientation: .identity)
+    }
+
+    /// 出力解像度の**自然な**値。**先頭クリップの映像フォーマット基準**（表示サイズ）。
     /// エンコーダの都合で偶数へ丸める（奇数サイズは HEVC/H.264 で扱いが崩れる）。
+    ///
+    /// **ユーザーが画面比率を選んでいるときの最終的な出力枠はこの値ではない。**
+    /// `TimelineAspectRatio.renderSize(fittingSourceSize:)` がこの結果に掛かり、さらに
+    /// 無料プランの `ExportRestrictionPolicy.clampedResolution` が掛かる。3 段の合成は
+    /// `TimelineCompositionBuilder.build` の 1 箇所だけで行う（結果は
+    /// `Built.outputSize`）。UI も書き出しもそちらを読むこと。
     ///
     /// **仕様（S8 で意図的にこう決めた）**: 混在タイムラインの出力解像度は先頭クリップが
     /// 決める。他のクリップはこの枠へアスペクトフィット（レターボックス）される。
@@ -166,8 +201,15 @@ enum VideoCompositionFactory {
     /// （`Built.downscaledClipIDs` / `MosaicEditorModel.hasDownscaledClips`。判定は
     /// `TimelineOutputSummary.downscaledIndices`）は注意色になる。
     /// **表示側で renderSize を再計算しないこと**（この関数が単一実装）。
-    static func renderSize(for format: TimelineCompositionBuilder.VideoFormat) -> CGSize {
-        let display = displaySize(of: format)
+    ///
+    /// **クリップの向き（回転・反転）も先頭クリップぶんだけ効く（S12 でこう決めた）**:
+    /// 先頭クリップを 90 度回すと出力の縦横も入れ替わる。他のクリップを回しても
+    /// 出力枠は変わらず、回った結果がこの枠へレターボックスされる。
+    /// 「先頭クリップが主素材」という既存の規則をそのまま延長したもので、
+    /// 回転を「主素材の見せ方の変更」として扱うのが最も予測しやすい。
+    static func renderSize(for format: TimelineCompositionBuilder.VideoFormat,
+                           orientation: ClipOrientation = .identity) -> CGSize {
+        let display = displaySize(of: format, orientation: orientation)
         func even(_ value: CGFloat) -> CGFloat {
             let rounded = (value / 2).rounded() * 2
             return max(2, rounded.isFinite ? rounded : 2)
@@ -175,22 +217,27 @@ enum VideoCompositionFactory {
         return CGSize(width: even(display.width), height: even(display.height))
     }
 
-    /// 素材フレーム → 合成フレームの基本変換（回転の正規化 + アスペクトフィット）。
-    /// `preferredTransform` はここに畳み込まれる。
+    /// 素材フレーム → 合成フレームの基本変換
+    /// （`preferredTransform` の正規化 + クリップの向き + アスペクトフィット）。
+    ///
+    /// **向き以降の数式はここに書かない。** `ClipRenderTransform.make`（コア層）を
+    /// 呼ぶだけにしてあるのは、モザイク座標の写像（`TimelineRenderLayout.remap`）と
+    /// 同じ `ClipOrientation` / `AspectFit` から作られていることをコア層のテストで
+    /// 固定するためである（`ClipOrientationTests`）。ここに回転行列を書き写すと、
+    /// 映像とモザイクが別々に進化して顔が素通しになる。
     static func fitTransform(format: TimelineCompositionBuilder.VideoFormat,
+                             orientation: ClipOrientation = .identity,
                              placement: CGRect,
                              renderSize: CGSize) -> CGAffineTransform {
         // preferredTransform を掛けた矩形は原点が負になり得るので、左上を 0 へ寄せる。
         let rotated = CGRect(origin: .zero, size: format.size).applying(format.transform)
         let normalized = format.transform.concatenating(
             CGAffineTransform(translationX: -rotated.minX, y: -rotated.minY))
-        let display = displaySize(of: format)
+        let display = sourceDisplaySize(of: format)
         guard display.width > 0, display.height > 0 else { return normalized }
-        let scale = placement.width * renderSize.width / display.width
-        return normalized
-            .concatenating(CGAffineTransform(scaleX: scale, y: scale))
-            .concatenating(CGAffineTransform(translationX: placement.minX * renderSize.width,
-                                             y: placement.minY * renderSize.height))
+        return normalized.concatenating(
+            ClipRenderTransform.make(displaySize: display, orientation: orientation,
+                                     placement: placement, renderSize: renderSize))
     }
 
     /// 出力フレームレート（上限 `maxFrameRate`）。素材の公称値の最大を採り、
@@ -388,97 +435,5 @@ enum VideoCompositionFactory {
                y: normalized.minY * renderSize.height,
                width: normalized.width * renderSize.width,
                height: normalized.height * renderSize.height)
-    }
-}
-
-/// トランジションの音声クロスフェードと、クリップごとの元音声音量
-/// （`TimelineClip.originalAudioVolume`）を `AVMutableAudioMix` にまとめる。
-///
-/// 映像側（`VideoCompositionFactory`）と同じ重なりモデル（`TimelineMapping.overlaps`）
-/// から作るので、音と絵のクロスフェード区間が必ず一致する。
-///
-/// **audioMix を付けたら音声はパススルーできない**（元パケットのコピーには音量が
-/// 反映されない）。`AudioExportPipeline.decide(isTrimming:hasAudioMix:conditions:)` が
-/// 再エンコード経路を強制する。
-enum AudioMixFactory {
-    /// - Returns: 必要なとき（重なりがある / 音量が 1.0 でないクリップがある）だけ
-    ///   非 nil。無変換構成では nil を返し、従来のパススルー経路を温存する。
-    /// - Parameters:
-    ///   - backgroundItems: BGM（E2）。**`backgroundTrack` へ実際に載った曲**を渡すこと。
-    ///   - backgroundTrack: BGM 専用トラック（無ければ nil）。元音声のトラック
-    ///     （`tracks`）とは**別の入力パラメータ**を持つ。これが「元動画の音と BGM の
-    ///     音量を別々に調整できる」ことの実体である。
-    static func make(placements: [ClipPlacement],
-                     overlaps: [TimelineMapping.Overlap],
-                     tracks: [AVMutableCompositionTrack],
-                     backgroundItems: [AudioItem] = [],
-                     backgroundTrack: AVMutableCompositionTrack? = nil) -> AVMutableAudioMix? {
-        // BGM があるならトラックが無くても mix は要る（BGM だけの構成）。
-        guard !tracks.isEmpty || backgroundTrack != nil else { return nil }
-        let needsVolume = placements.contains { clampedVolume($0.clip.originalAudioVolume) != 1.0 }
-        // **BGM がある構成では常に mix を作る。** 音量が既定（1.0）でも作るのは、
-        // ここが nil になると `hasAudioMix` が false になり、書き出しが圧縮パススルーへ
-        // 落ちる経路が 1 つ増えるためである（`AudioExportPipeline` の
-        // `hasBackgroundAudio` と二重の守りにする）。
-        let hasBackground = backgroundTrack != nil
-        guard !overlaps.isEmpty || needsVolume || hasBackground else { return nil }
-
-        // トラック順に固定して作る（辞書順の非決定性を持ち込まない）。
-        let parameters: [(track: AVMutableCompositionTrack, params: AVMutableAudioMixInputParameters)] =
-            tracks.map { ($0, AVMutableAudioMixInputParameters(track: $0)) }
-
-        for placement in placements {
-            guard let audioTrack = placement.audioTrack,
-                  let entry = parameters.first(where: { $0.track === audioTrack }) else { continue }
-            let volume = clampedVolume(placement.clip.originalAudioVolume)
-            // 後続（incoming）側はトランジションの間に 0 → 音量へ立ち上げる。
-            if let overlap = overlaps.first(where: { $0.incomingClipID == placement.clip.id }) {
-                entry.params.setVolumeRamp(fromStartVolume: 0, toEndVolume: volume,
-                                           timeRange: range(of: overlap))
-                // ランプ終了後の値を明示的に固定する（以降の区間の音量が
-                // 実装依存にならないように）。
-                entry.params.setVolume(volume, at: time(overlap.end))
-            } else {
-                entry.params.setVolume(volume, at: time(placement.start))
-            }
-            // 先行（outgoing）側はトランジションの間に音量 → 0 へ落とす。
-            if let overlap = overlaps.first(where: { $0.outgoingClipID == placement.clip.id }) {
-                entry.params.setVolumeRamp(fromStartVolume: volume, toEndVolume: 0,
-                                           timeRange: range(of: overlap))
-            }
-        }
-
-        // BGM トラック（E2）。**曲ごとに音量を切り替える。**
-        //
-        // トラックは 1 本を共有するので、曲の切れ目で `setVolume(_:at:)` を打ち直す
-        // 必要がある（曲 A を 0.3、曲 B を 1.0 にしたとき、B の頭で戻さないと
-        // A の音量が最後まで効き続ける）。曲どうしは重ならないので、開始時刻に
-        // 打つだけで足りる。
-        var backgroundParams: AVMutableAudioMixInputParameters?
-        if let backgroundTrack {
-            let params = AVMutableAudioMixInputParameters(track: backgroundTrack)
-            for item in backgroundItems.sorted(by: { $0.compositionStart < $1.compositionStart }) {
-                params.setVolume(clampedVolume(item.volume), at: time(item.compositionStart))
-            }
-            backgroundParams = params
-        }
-
-        let mix = AVMutableAudioMix()
-        mix.inputParameters = parameters.map(\.params) + [backgroundParams].compactMap { $0 }
-        return mix
-    }
-
-    /// 音量は 0...1 にクランプする。NaN は min/max を素通りするため等倍（1）に落とす
-    /// （`TimelineClip.clampedRate` と同じ流儀）。
-    static func clampedVolume(_ volume: Float) -> Float {
-        volume.isNaN ? 1 : min(max(volume, 0), 1)
-    }
-
-    private static func range(of overlap: TimelineMapping.Overlap) -> CMTimeRange {
-        CMTimeRange(start: time(overlap.start), end: time(overlap.end))
-    }
-
-    private static func time(_ seconds: Double) -> CMTime {
-        CMTime(seconds: seconds, preferredTimescale: 600)
     }
 }

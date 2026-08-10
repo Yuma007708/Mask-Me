@@ -9,18 +9,97 @@ import SwiftUI
 extension VideoTimelineView {
     // MARK: - `root` 段の項目
 
-    /// 並びは**選択状態で変えない**。変わるのは
-    /// 「押せるかどうか」と「5 番目が追加か削除か」だけ。
+    /// 下部ツールバーの `root` 段の中身。**選んでいるものに応じて中身が入れ替わる。**
     ///
-    /// 選択のたびに項目そのものを入れ替えていた版は、同じ位置のボタンが別の操作に
-    /// 化けるため、狙って押すには毎回読み直す必要があった。位置を固定して活性だけ
-    /// 変えると、押せない理由が「今それを選んでいないから」だと見た目で分かる。
+    /// ## 「並びは選択状態で変えない」という以前の決定を、意図的に覆している
     ///
-    /// 末尾の項目（前へ／後へ／ズーム／モザイク区間）は幅に収まらないので
-    /// 横スクロールの向こう側に置く。**落とさずに残してある**理由は各項目の doc 参照。
+    /// 旧方針は「位置を固定して活性だけ変える。同じ位置のボタンが別の操作に化けると、
+    /// 狙って押すのに毎回読み直しになる」だった。項目が 5〜7 個で**全部見えていた**
+    /// 頃はそのとおりだったが、E1〜E3 と回転・複製で 13 個まで増えた結果、
+    /// **6 個目以降は横スクロールの向こう側**にいる。位置が固定でもその位置が画面外なら、
+    /// 固定であることの利点は無い（実測: 回転・反転は 8〜10 番目 ＝ x が 428〜608pt で、
+    /// iPhone の幅 390pt を大きく超える。「機能が無い」のと同じ状態だった）。
+    ///
+    /// 一般的な動画編集アプリ（CapCut / VLLO / iMovie）はいずれも
+    /// **クリップを選ぶと下の段がそのクリップへの操作に変わる**。旧方針が心配していた
+    /// 「同じ位置が別の操作に化ける」は、タイムラインで選んだ帯が目立って光るので
+    /// 「いまクリップを選んでいる」状態が見た目で分かり、実害になりにくい。
+    ///
+    /// ## 段の中身
+    ///
+    /// | 選択 | 並び |
+    /// |---|---|
+    /// | 無し | モザイク / テキスト / 音楽 / 比率 / 追加 |
+    /// | クリップ | 分割 / 複製 / 速度 / 音量 / 回転 / 反転 / 削除 |
+    /// | 加工レイヤー（テキスト・BGM・モザイク区間） | 削除 |
+    ///
+    /// ズームは**どの段でも末尾に置く**（ピンチが使えないときの代替という
+    /// アクセシビリティ上の役割があり、落とせない。`zoomItems` の doc 参照）。
     var toolItems: [TimelineToolItem] {
-        [splitItem, mosaicItem, speedItem, volumeItem, addOrRemoveItem]
-            + [addTextItem, addAudioItem] + zoomItems
+        selectionToolItems + zoomItems
+    }
+
+    /// 選択状態で入れ替わる部分（ズームを除く）。
+    private var selectionToolItems: [TimelineToolItem] {
+        if selectedClip != nil {
+            return [splitItem, duplicateItem, speedItem, volumeItem,
+                    rotateItem, flipItem, removeItem]
+        }
+        if selectedLayer != nil {
+            // 加工レイヤーは中身の編集をプレビュー・帯側が持っているので、
+            // 段に出すのは削除だけでよい（音量は BGM を選んだときだけ意味がある）。
+            return canSetVolume ? [volumeItem, removeItem] : [removeItem]
+        }
+        return [mosaicItem, addTextItem, addAudioItem, aspectRatioItem, addMediaItem]
+    }
+
+    /// クリップを時計回りに 90 度回す。
+    ///
+    /// **1 ボタンに畳んである**（押すたびに 90 度）。一般的な編集アプリはどれもこの形で、
+    /// 左回転は 3 回押せば届く。左右 2 ボタンに分けていた版は、ただでさえ狭い段を
+    /// 1 枠余計に使っていた。
+    private var rotateItem: TimelineToolItem {
+        let target = selectedClipID
+        return TimelineToolItem(title: "回転", systemImage: "rotate.right",
+                                isEnabled: selectedClip != nil, separatorBefore: true) {
+            guard let target else { return }
+            model.rotateClipRight(id: target)
+        }
+    }
+
+    /// クリップを左右反転する。
+    private var flipItem: TimelineToolItem {
+        let target = selectedClipID
+        return TimelineToolItem(
+            title: "反転",
+            systemImage: "arrow.left.and.right.righttriangle.left.righttriangle.right",
+            isEnabled: selectedClip != nil
+        ) {
+            guard let target else { return }
+            model.flipClipHorizontally(id: target)
+        }
+    }
+
+    /// 選んでいるものを消す。**クリップと加工レイヤーで同じボタン**（`removeSelection` が
+    /// 種で振り分ける）。
+    private var removeItem: TimelineToolItem {
+        TimelineToolItem(title: "削除", systemImage: "trash",
+                         isEnabled: canRemoveSelection, separatorBefore: true) {
+            removeSelection()
+        }
+    }
+
+    /// 出力の画面比率。**作品全体の設定**なので、何も選んでいないときの段に置く。
+    ///
+    /// 以前は再生行（`VideoControlsView.transportRow`）にあったが、そこは
+    /// コマ戻し・再生・コマ送り・時刻・出力解像度・取り消し・やり直しで 8 要素あり、
+    /// iPhone の幅では確実に潰れる。比率はクリップ操作ではないので、
+    /// 「素材を足す」と同じ段が意味の上でも自然。
+    private var aspectRatioItem: TimelineToolItem {
+        TimelineToolItem(title: "比率", systemImage: "aspectratio",
+                         isEnabled: !model.timeline.clips.isEmpty) {
+            showAspectRatioSheet = true
+        }
     }
 
     /// テキストを足す。**段の「＋」チップは置かない**（アイコン列に小さなボタンを
@@ -58,18 +137,6 @@ extension VideoTimelineView {
         }
     }
 
-    /// 5 番目の枠。何も選んでいなければ素材追加、選んでいればそれを削除。
-    ///
-    /// 削除の対象は**いま選んでいるもの**（クリップでも加工レイヤーでも同じボタン）。
-    /// 対象ごとにボタンを分けると、選択のたびに並びが動く。
-    private var addOrRemoveItem: TimelineToolItem {
-        guard selectedLayer != nil || selectedClipID != nil else { return addMediaItem }
-        return TimelineToolItem(title: "削除", systemImage: "trash",
-                                isEnabled: canRemoveSelection) {
-            removeSelection()
-        }
-    }
-
     private var speedItem: TimelineToolItem {
         TimelineToolItem(title: "速度", systemImage: "speedometer",
                          isEnabled: selectedClip != nil) {
@@ -77,8 +144,17 @@ extension VideoTimelineView {
         }
     }
 
+    /// 音量シートを開く。**消音中はアイコンで分かるようにする。**
+    ///
+    /// 音量は開かないと分からない設定で、しかも 0 にすると波形も出ない（無音素材と
+    /// 見分けがつかない）。「音が出ないのは自分で消したからだ」を思い出す手がかりが
+    /// 段の上に無いと、素材や書き出しの不具合を疑って時間を溶かす。一般的な編集アプリも
+    /// 消音中はスピーカーに斜線を出す。
     private var volumeItem: TimelineToolItem {
-        TimelineToolItem(title: "音量", systemImage: "speaker.wave.2", isEnabled: canSetVolume) {
+        let muted = isSelectedAudioMuted
+        return TimelineToolItem(title: muted ? "消音中" : "音量",
+                                systemImage: muted ? "speaker.slash.fill" : "speaker.wave.2",
+                                isEnabled: canSetVolume) {
             // **活性判定と同じ純関数で対象を決める**（別々に書くと「押せるのに
             // 何も起きない」が作れる）。
             volumeSheetTarget = TimelineVolumeAvailability.target(
@@ -90,6 +166,17 @@ extension VideoTimelineView {
         TimelineToolItem(title: "分割", systemImage: "scissors", isEnabled: canSplit) {
             guard let id = splitTargetClipID else { return }
             model.splitClip(id: id)
+        }
+    }
+
+    /// 選択中のクリップを直後に複製する。**活性判定は「クリップを選択しているとき」**
+    /// （`speedItem` / `mosaicItem` と同じ規則: `selectedClipID`/`selectedClip` が
+    /// 選択状態の唯一の情報源であり、活性判定と実行の両方がそこから対象を読む）。
+    private var duplicateItem: TimelineToolItem {
+        TimelineToolItem(title: "複製", systemImage: "plus.square.on.square",
+                         isEnabled: selectedClip != nil) {
+            guard let id = selectedClipID else { return }
+            model.duplicateClip(id: id)
         }
     }
 
@@ -166,6 +253,12 @@ extension VideoTimelineView {
     private var canSetVolume: Bool {
         TimelineVolumeAvailability.target(timeline: model.timeline,
                                          selection: model.timelineSelection) != nil
+    }
+
+    /// いま音量ボタンが指している対象が消音されているか（判定は純関数側）。
+    private var isSelectedAudioMuted: Bool {
+        TimelineVolumeAvailability.isMuted(timeline: model.timeline,
+                                           selection: model.timelineSelection)
     }
 
 }

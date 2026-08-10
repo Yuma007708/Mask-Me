@@ -85,9 +85,11 @@ struct TimelineToolItem: Identifiable {
 
 /// ドックの `root` 段に並ぶ編集項目（`EditorDockView` の中身のひとつ）。
 ///
-/// **並びは選択状態で変えない**（`VideoTimelineView.toolItems` の doc 参照）。
-/// 幅に収まる 5 項目のうしろに、収まらない項目（前へ／後へ・ズーム・モザイク区間）を
-/// 横スクロールで続ける。項目を絞って落とすのではなく、順序で優先度を付ける形。
+/// 並びは**選んでいるものに応じて入れ替わる**（`VideoTimelineView.toolItems` の doc に
+/// 段ごとの中身と、以前の「並びを変えない」方針を覆した理由がある）。
+///
+/// **右端にフェードを掛けて「続きがある」ことを示す。** 合図が無かった頃は、
+/// 画面外の項目が「無い」と受け取られていた（実地検証の指摘）。
 struct TimelineToolbarView: View {
     let items: [TimelineToolItem]
 
@@ -105,6 +107,20 @@ struct TimelineToolbarView: View {
             .frame(height: TimelineMetrics.toolbarHeight)
         }
         .frame(height: TimelineMetrics.toolbarHeight)
+        // 端のフェードは**当たり判定を持たせない**（`allowsHitTesting(false)`）。
+        // 重ねたグラデーションがボタンのタップを食うと、右端の項目が押せなくなる。
+        .overlay(alignment: .trailing) { edgeFade(.trailing) }
+        .overlay(alignment: .leading) { edgeFade(.leading) }
+    }
+
+    /// スクロールの端に掛けるフェード。
+    private func edgeFade(_ edge: HorizontalAlignment) -> some View {
+        LinearGradient(
+            colors: [.black.opacity(0), .black.opacity(0.55)],
+            startPoint: edge == .trailing ? .leading : .trailing,
+            endPoint: edge == .trailing ? .trailing : .leading)
+        .frame(width: 18)
+        .allowsHitTesting(false)
     }
 
     private func button(_ item: TimelineToolItem) -> some View {

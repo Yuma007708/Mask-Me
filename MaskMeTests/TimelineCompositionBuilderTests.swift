@@ -201,6 +201,151 @@ final class TimelineCompositionBuilderTests: XCTestCase {
         XCTAssertGreaterThan(duration, 1.9, "クランプが効きすぎて BGM がほぼ載っていない")
     }
 
+    /// **フェード（E2-2）が実際に音量ランプとして載っていること。**
+    ///
+    /// これまで `AudioItem` 側の丸めしかテストが無く、「丸めた値が
+    /// `AVMutableAudioMix` の何にもならずに捨てられている」状態を誰も見ていなかった。
+    func test_backgroundAudio_fadeBecomesVolumeRamps() async throws {
+        let videoURL = try await makeTestVideo(seconds: 6.0)
+        let audioURL = try await makeTestAudio(seconds: 6.0)
+        defer {
+            try? FileManager.default.removeItem(at: videoURL)
+            try? FileManager.default.removeItem(at: audioURL)
+        }
+        let videoSource = UUID()
+        let audioSource = UUID()
+        let clip = TimelineClip(sourceID: videoSource, sourceStart: 0, sourceEnd: 6)
+        var item = AudioItem(sourceID: audioSource, sourceStart: 0, sourceEnd: 6,
+                             compositionStart: 0)
+        item.fadeInDuration = 1
+        item.fadeOutDuration = 2
+
+        let built = try await TimelineCompositionBuilder().build(
+            clips: [clip], audioItems: [item],
+            sources: [videoSource: AVURLAsset(url: videoURL),
+                      audioSource: AVURLAsset(url: audioURL)], isPro: true)
+
+        let params = try XCTUnwrap(built.audioMix?.inputParameters.first)
+        let fadeIn = try XCTUnwrap(Self.volumeRamp(in: params, at: CMTime(seconds: 0.5, preferredTimescale: 600)),
+                                   "フェードインのランプが載っていない")
+        XCTAssertEqual(fadeIn.start, 0, accuracy: 1e-6, "フェードインが 0 から始まっていない")
+        XCTAssertEqual(CMTimeGetSeconds(fadeIn.range.end), 1, accuracy: 0.05,
+                       "フェードインの終わりが指定と違う")
+
+        let fadeOut = try XCTUnwrap(Self.volumeRamp(in: params, at: CMTime(seconds: 5, preferredTimescale: 600)),
+                                    "フェードアウトのランプが載っていない")
+        XCTAssertEqual(fadeOut.end, 0, accuracy: 1e-6, "フェードアウトが 0 で終わっていない")
+        XCTAssertEqual(CMTimeGetSeconds(fadeOut.range.start), 4, accuracy: 0.05,
+                       "フェードアウトの始まりが指定と違う")
+    }
+
+    /// **番人: 音源が要求より短いとき、フェードアウトを音の無いところへ置かない。**
+    ///
+    /// 挿入側は音源の実尺へクランプするのに、audioMix へは生の一覧を渡していたため、
+    /// 2 秒の音源に 0...10 秒を要求すると、音は 2 秒で切れるのにランプは 9...10 秒に
+    /// 置かれていた（＝最大音量のままぶつ切り。フェードが一切聞こえない）。
+    func test_backgroundAudio_shortSource_fadeOutStaysWithinAudibleRange() async throws {
+        let videoURL = try await makeTestVideo(seconds: 12.0)
+        let audioURL = try await makeTestAudio(seconds: 2.0)
+        defer {
+            try? FileManager.default.removeItem(at: videoURL)
+            try? FileManager.default.removeItem(at: audioURL)
+        }
+        let videoSource = UUID()
+        let audioSource = UUID()
+        let clip = TimelineClip(sourceID: videoSource, sourceStart: 0, sourceEnd: 12)
+        // 2 秒しかない音源に 0...10 秒を要求する（下書きの復元・音源差し替えで起こる）。
+        var item = AudioItem(sourceID: audioSource, sourceStart: 0, sourceEnd: 10,
+                             compositionStart: 0)
+        item.fadeOutDuration = 1
+
+        let built = try await TimelineCompositionBuilder().build(
+            clips: [clip], audioItems: [item],
+            sources: [videoSource: AVURLAsset(url: videoURL),
+                      audioSource: AVURLAsset(url: audioURL)], isPro: true)
+
+        let params = try XCTUnwrap(built.audioMix?.inputParameters.first)
+        // 音が鳴っているのは 0...2 秒。その中でフェードアウトが終わっていること。
+        let fadeOut = try XCTUnwrap(Self.volumeRamp(in: params, at: CMTime(seconds: 1.5, preferredTimescale: 600)),
+                                    "音が鳴っている区間にフェードアウトのランプが無い")
+        XCTAssertEqual(fadeOut.end, 0, accuracy: 1e-6)
+        XCTAssertLessThanOrEqual(CMTimeGetSeconds(fadeOut.range.end), 2.05,
+                                 "フェードアウトが音の終わり（2 秒）より後ろに置かれている")
+        // 音が終わった後（実尺クランプ前の compositionEnd 付近）にランプが無いこと。
+        XCTAssertNil(Self.volumeRamp(in: params, at: CMTime(seconds: 9.5, preferredTimescale: 600)),
+                     "音が鳴っていない区間にフェードアウトが置かれている")
+    }
+
+    /// **番人: 実尺の判定に `asset.duration` を使わないこと。**
+    ///
+    /// `asset.duration` は全トラックの最大長なので、映像 12 秒・音声 3 秒の素材を
+    /// BGM の音源に選ぶと「12 秒ぶん載る」と誤判定する。実際に鳴るのは 3 秒までで、
+    /// フェードアウトが音の終わった後に置かれる（＝ぶつ切り）。切るべきは
+    /// **音声トラックの終端**。
+    func test_backgroundAudio_映像が長く音声が短い音源でも音の終わりで切る() async throws {
+        let videoURL = try await makeTestVideo(seconds: 12.0)
+        let longVideoURL = try await makeTestVideo(seconds: 12.0)
+        let shortAudioURL = try await makeTestAudio(seconds: 3.0)
+        defer {
+            try? FileManager.default.removeItem(at: videoURL)
+            try? FileManager.default.removeItem(at: longVideoURL)
+            try? FileManager.default.removeItem(at: shortAudioURL)
+        }
+        // 映像 12 秒 ＋ 音声 3 秒の 1 本の素材を組み立てる（`asset.duration` は 12 秒、
+        // 音声トラックの終端は 3 秒）。
+        let mixedSource = AVMutableComposition()
+        let videoAsset = AVURLAsset(url: longVideoURL)
+        let audioAsset = AVURLAsset(url: shortAudioURL)
+        let videoTrack = try XCTUnwrap(mixedSource.addMutableTrack(
+            withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid))
+        let audioTrack = try XCTUnwrap(mixedSource.addMutableTrack(
+            withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid))
+        // `XCTUnwrap` の autoclosure は await を通せないので、先に取り出しておく。
+        let loadedVideo = try await videoAsset.loadTracks(withMediaType: .video).first
+        let loadedAudio = try await audioAsset.loadTracks(withMediaType: .audio).first
+        try videoTrack.insertTimeRange(
+            CMTimeRange(start: .zero, duration: CMTime(seconds: 12, preferredTimescale: 600)),
+            of: try XCTUnwrap(loadedVideo), at: .zero)
+        try audioTrack.insertTimeRange(
+            CMTimeRange(start: .zero, duration: CMTime(seconds: 3, preferredTimescale: 600)),
+            of: try XCTUnwrap(loadedAudio), at: .zero)
+        XCTAssertEqual(CMTimeGetSeconds(mixedSource.duration), 12, accuracy: 0.2,
+                       "テスト前提: asset.duration は映像の 12 秒であること")
+
+        let videoSource = UUID()
+        let audioSource = UUID()
+        let clip = TimelineClip(sourceID: videoSource, sourceStart: 0, sourceEnd: 12)
+        var item = AudioItem(sourceID: audioSource, sourceStart: 0, sourceEnd: 12,
+                             compositionStart: 0)
+        item.fadeOutDuration = 1
+
+        let built = try await TimelineCompositionBuilder().build(
+            clips: [clip], audioItems: [item],
+            sources: [videoSource: AVURLAsset(url: videoURL),
+                      audioSource: mixedSource], isPro: true)
+
+        let params = try XCTUnwrap(built.audioMix?.inputParameters.first)
+        // 音が鳴っているのは 0...3 秒。その中でフェードアウトが終わっていること。
+        let fadeOut = try XCTUnwrap(Self.volumeRamp(in: params, at: CMTime(seconds: 2.5, preferredTimescale: 600)),
+                                    "音が鳴っている区間にフェードアウトのランプが無い")
+        XCTAssertEqual(fadeOut.end, 0, accuracy: 1e-6)
+        XCTAssertLessThanOrEqual(CMTimeGetSeconds(fadeOut.range.end), 3.05,
+                                 "フェードアウトが音の終わり（3 秒）より後ろに置かれている")
+        XCTAssertNil(Self.volumeRamp(in: params, at: CMTime(seconds: 11.5, preferredTimescale: 600)),
+                     "音が鳴っていない区間にフェードアウトが置かれている")
+    }
+
+    /// `getVolumeRamp` の読み出しラッパ（ポインタ渡しをテスト本体から隠す）。
+    private static func volumeRamp(in params: AVAudioMixInputParameters, at time: CMTime)
+        -> (start: Float, end: Float, range: CMTimeRange)? {
+        var start: Float = 0
+        var end: Float = 0
+        var range = CMTimeRange.zero
+        guard params.getVolumeRamp(for: time, startVolume: &start, endVolume: &end,
+                                   timeRange: &range) else { return nil }
+        return (start, end, range)
+    }
+
     /// 音源に音声トラックが無い（映像だけの mp4 を選んだ）ときは、その曲を飛ばして
     /// **書き出しごと失敗させない**。
     func test_backgroundAudio_sourceWithoutAudioTrack_isSkipped() async throws {
@@ -514,5 +659,91 @@ final class TimelineCompositionBuilderTests: XCTestCase {
 
         let duration = try await composition.load(.duration)
         XCTAssertEqual(CMTimeGetSeconds(duration), 2.0, accuracy: 0.15)
+    }
+
+    // MARK: - 出力の画面比率（`TimelineAspectRatio`）
+
+    /// 既定（`.source`）は従来どおり先頭クリップ基準で、無変換構成なら装着もしない。
+    func test_aspectRatioSourceKeepsLegacyBehaviour() async throws {
+        let url = try await makeTestVideo(seconds: 1.0)  // 320x240
+        defer { try? FileManager.default.removeItem(at: url) }
+        let sourceID = UUID()
+        let built = try await TimelineCompositionBuilder().build(
+            clips: [TimelineClip(sourceID: sourceID, sourceStart: 0, sourceEnd: 1)],
+            sources: [sourceID: AVURLAsset(url: url)], aspectRatio: .source, isPro: true)
+        XCTAssertEqual(built.outputSize, CGSize(width: 320, height: 240))
+        XCTAssertNil(built.videoComposition, "既定の比率で videoComposition が装着された")
+        XCTAssertEqual(built.layout, .identity)
+    }
+
+    /// 比率を選ぶと出力枠が変わり、**プレビューと書き出しが読む唯一の値**
+    /// （`videoComposition.renderSize` と `Built.outputSize`）が一致すること。
+    func test_aspectRatioChangesRenderSizeAndOutputSizeTogether() async throws {
+        let url = try await makeTestVideo(seconds: 1.0)  // 320x240（4:3）
+        defer { try? FileManager.default.removeItem(at: url) }
+        let sourceID = UUID()
+        let expected: [(TimelineAspectRatio, CGSize)] = [
+            (.portrait9x16, CGSize(width: 240, height: 426)),
+            (.square1x1, CGSize(width: 240, height: 240)),
+            (.landscape16x9, CGSize(width: 426, height: 240))
+        ]
+        for (ratio, size) in expected {
+            let built = try await TimelineCompositionBuilder().build(
+                clips: [TimelineClip(sourceID: sourceID, sourceStart: 0, sourceEnd: 1)],
+                sources: [sourceID: AVURLAsset(url: url)], aspectRatio: ratio, isPro: true)
+            XCTAssertEqual(built.outputSize, size, "\(ratio) の出力サイズが違う")
+            let videoComposition = try XCTUnwrap(built.videoComposition,
+                                                 "\(ratio) で videoComposition が装着されていない")
+            XCTAssertEqual(videoComposition.renderSize, size,
+                           "\(ratio) で表示用の outputSize と実出力の renderSize が食い違っている")
+        }
+    }
+
+    /// **モザイクの座標系が絵と一致していること**（この機能でいちばん重い契約）。
+    ///
+    /// 顔座標の写像（`Built.layout`）が、映像側の配置と同じ矩形から作られているかを
+    /// 出力ピクセルで突き合わせる。ずれると素材の顔にモザイクが乗らない。
+    func test_aspectRatioLayoutMatchesVideoPlacement() async throws {
+        let url = try await makeTestVideo(seconds: 1.0)  // 320x240
+        defer { try? FileManager.default.removeItem(at: url) }
+        let sourceID = UUID()
+        let clip = TimelineClip(sourceID: sourceID, sourceStart: 0, sourceEnd: 1)
+        let built = try await TimelineCompositionBuilder().build(
+            clips: [clip], sources: [sourceID: AVURLAsset(url: url)],
+            aspectRatio: .portrait9x16, isPro: true)
+        let renderSize = built.outputSize  // 240x426
+        let place = built.layout.placement(for: clip.id)
+        // 4:3 素材が 9:16 枠へ収まる: 幅は全面、高さは 240*(240/320)=180px。
+        XCTAssertEqual(place.width, 1.0, accuracy: 1e-9)
+        XCTAssertEqual(place.height * renderSize.height, 180, accuracy: 0.5)
+        XCTAssertEqual(place.minX, 0, accuracy: 1e-9)
+        XCTAssertEqual(place.minY, (1 - place.height) / 2, accuracy: 1e-9, "上下中央に置かれていない")
+
+        // 素材中央の顔は、出力でも配置矩形の中央に乗る。
+        let set = FaceLandmarkSet(points: [FaceLandmark(x: 0.5, y: 0.5)], confidence: 1)
+        let mapped = try XCTUnwrap(built.layout.remap([set], clipID: clip.id).first?.points.first)
+        XCTAssertEqual(CGFloat(mapped.x) * renderSize.width, renderSize.width / 2, accuracy: 0.01)
+        XCTAssertEqual(CGFloat(mapped.y) * renderSize.height, renderSize.height / 2, accuracy: 0.01)
+
+        // 素材の上端の顔は、黒帯の下（＝映像の上端）に乗る。枠基準のままなら 0px になる。
+        let top = FaceLandmarkSet(points: [FaceLandmark(x: 0.5, y: 0)], confidence: 1)
+        let mappedTop = try XCTUnwrap(built.layout.remap([top], clipID: clip.id).first?.points.first)
+        XCTAssertEqual(CGFloat(mappedTop.y) * renderSize.height,
+                       place.minY * renderSize.height, accuracy: 0.01)
+        XCTAssertGreaterThan(CGFloat(mappedTop.y) * renderSize.height, 100,
+                             "黒帯ぶんの下駄が乗っていない（枠基準のまま取り残されている）")
+    }
+
+    /// 素材がちょうどその比率なら自然な値と一致し、無変換構成の忠実度を壊さない。
+    func test_matchingAspectRatioDoesNotForceComposition() async throws {
+        let url = try await makeTestVideo(seconds: 1.0, width: 320, height: 180)  // 16:9
+        defer { try? FileManager.default.removeItem(at: url) }
+        let sourceID = UUID()
+        let built = try await TimelineCompositionBuilder().build(
+            clips: [TimelineClip(sourceID: sourceID, sourceStart: 0, sourceEnd: 1)],
+            sources: [sourceID: AVURLAsset(url: url)], aspectRatio: .landscape16x9, isPro: true)
+        XCTAssertEqual(built.outputSize, CGSize(width: 320, height: 180))
+        XCTAssertNil(built.videoComposition,
+                     "素材と同じ比率を選んだだけで再合成経路へ落ちている")
     }
 }

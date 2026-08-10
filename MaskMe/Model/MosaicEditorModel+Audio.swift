@@ -91,6 +91,14 @@ extension MosaicEditorModel {
         applyTimelineEdit { $0.settingAudioVolume(id: id, volume: volume) }
     }
 
+    /// 指定した BGM のフェードイン／アウト時間（秒）を設定する（E2-2）。
+    ///
+    /// 上限（`duration / 2`）は `TimelineState.settingAudioFade` が丸める。
+    /// ここでは呼び出しを `applyTimelineEdit` へ橋渡しするだけ（undo/redo・下書きに載せる）。
+    public func setAudioFade(id: UUID, fadeIn: Double, fadeOut: Double) {
+        applyTimelineEdit { $0.settingAudioFade(id: id, fadeIn: fadeIn, fadeOut: fadeOut) }
+    }
+
     /// BGM の音源の実尺（秒）。取得できない場合は nil。
     ///
     /// `sourceDuration(forClipID:)` と同じ流儀（同期取得・ローカル素材のみ）。

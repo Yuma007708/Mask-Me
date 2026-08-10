@@ -44,7 +44,7 @@ extension MosaicEditorModel {
     /// `splitClip(id:)` を使う。
     public func splitAtCurrentPosition() {
         let time = compositionTime(forPosition: playbackPosition)
-        applyTimelineEdit { $0.splitting(atDisplayTime: time) }
+        applyClipCreatingEdit { $0.splittingEdit(atDisplayTime: time) }
     }
 
     /// 指定クリップを現在の再生位置で 2 分割する（UI の「分割」ボタンの入口）。
@@ -54,12 +54,32 @@ extension MosaicEditorModel {
     /// （実行と同じ純関数）を UI がそのまま使うこと。
     public func splitClip(id: UUID) {
         let time = compositionTime(forPosition: playbackPosition)
-        applyTimelineEdit { $0.splitting(clipID: id, atDisplayTime: time) }
+        applyClipCreatingEdit { $0.splittingEdit(clipID: id, atDisplayTime: time) }
     }
 
     /// 指定クリップを取り除く（最後の 1 本は消せない）。
     public func removeClip(id: UUID) {
         applyTimelineEdit { $0.removing(clipID: id) }
+    }
+
+    /// 指定クリップを複製し、その直後に挿入する（UI の「複製」ボタンの入口）。
+    ///
+    /// トリム範囲・速度・音量・モザイク適用区間の引き継ぎとトランジションの付け替えは
+    /// `TimelineState.duplicating(clipID:)` の doc 参照。**複製後は複製されたほうを選択状態にする**
+    /// （続けてトリム・速度調整などを行えるように。一般的な動画編集アプリと同じ挙動）。
+    ///
+    /// **物体マスク（`ObjectMask`）も複製先へ丸ごとコピーされる**
+    /// （`ObjectMaskEditOperations.masks(duplicatingClipID:into:existing:)`。追従は
+    /// `applyClipCreatingEdit` が `TimelineEdit.lineage` を見て行う）。
+    ///
+    /// 複製先の id は `applyTimelineEdit` 適用前後のクリップ id 集合の差分で特定する
+    /// （`TimelineState.duplicating` は失敗時に自分自身を返す契約なので、差分が空なら
+    /// 複製できなかったということであり、その場合は選択を変えない）。
+    public func duplicateClip(id: UUID) {
+        let oldIDs = Set(timeline.clips.map(\.id))
+        applyClipCreatingEdit { $0.duplicatingEdit(clipID: id) }
+        guard let newID = timeline.clips.first(where: { !oldIDs.contains($0.id) })?.id else { return }
+        timelineSelection.selectClip(newID)
     }
 
     /// 指定クリップを `toIndex` の位置へ並べ替える。
@@ -111,6 +131,26 @@ extension MosaicEditorModel {
         applyTimelineEdit { $0.settingVolume(clipID: id, volume: volume) }
     }
 
+    /// 指定クリップを**画面で見て**反時計回りに 90 度回す。
+    ///
+    /// 向きは合成尺を変えないが、`applyTimelineEdit` を必ず通す
+    /// （`setClipVolume` と同じ理由に加えて、**向きは composition の再構築が要る**。
+    /// `TimelineRenderLayout` は再構築でしか更新されないので、省くと映像だけ古い
+    /// 向きのまま・モザイクの写像だけ新しい向き、という最悪の食い違いになる）。
+    public func rotateClipLeft(id: UUID) {
+        applyTimelineEdit { $0.rotatingClipLeft(clipID: id) }
+    }
+
+    /// 指定クリップを**画面で見て**時計回りに 90 度回す。
+    public func rotateClipRight(id: UUID) {
+        applyTimelineEdit { $0.rotatingClipRight(clipID: id) }
+    }
+
+    /// 指定クリップを**画面で見て**左右反転する。
+    public func flipClipHorizontally(id: UUID) {
+        applyTimelineEdit { $0.flippingClipHorizontally(clipID: id) }
+    }
+
     /// 素材IDに対応するローカルファイル URL（サムネイル生成用）。
     ///
     /// load / 下書き復元 / 写真クリップ追加の経路の asset は常に `AVURLAsset` である。
@@ -153,113 +193,21 @@ extension MosaicEditorModel {
         applyTimelineEdit { $0.removingTransition(afterClipID: id) }
     }
 
-    // MARK: - モザイク適用区間（S9 で状態編集と表示、S10 で描画ゲートを配線）
+    // MARK: - 出力の画面比率
 
-    /// 合成時刻の区間 [from, to) をモザイク適用区間として追加する。
+    /// 出力（＝プレビューの合成フレーム）の画面比率を切り替える。
     ///
-    /// UI は合成時刻で操作し、保存は素材時刻アンカーへ写す（`MosaicApplyGate` が担当）。
-    /// クリップを跨ぐ区間は素材ごとに分解され、重複・隣接はマージされる。
-    public func addMosaicApplyRange(fromCompositionTime from: Double, to: Double) {
-        applyTimelineEdit { $0.addingApplyRange(fromCompositionTime: from, to: to) }
-    }
-
-    /// 指定した適用区間を取り除く。
-    public func removeMosaicApplyRange(id: UUID) {
-        applyTimelineEdit { $0.removingApplyRange(id: id) }
-    }
-
-    /// 適用区間が 1 本も無ければ区間を作る。**クリップを選択しているときはそのクリップ
-    /// だけ**、選択が無い（または選択が解決できない）ときは**従来どおり全クリップ**に
-    /// 全域の区間を作る。
+    /// `applyTimelineEdit` 経由なので、undo/redo（`EditSnapshot.timeline`）・下書き
+    /// （`TimelineState` の Codable）・Composition 再構築（`replaceTimeline` が積む）に
+    /// そのまま載る。**プレビューと書き出しが同時に切り替わるのはここが唯一の入口だから**
+    /// で、`videoComposition` と顔座標の写像（`renderLayout`）は
+    /// `apply(built:generation:)` で必ず組で差し替わる。
     ///
-    /// **モザイクを「かける」操作の入口で必ず通すこと。** 区間 0 本は
-    /// 「全区間 OFF」であり（`MosaicApplyGate` の仕様）、効果のフラグを立てただけでは
-    /// 何も描かれない。実際に「加工レイヤーを消す → もう一度かける → 完了を押しても
-    /// 何も起きない」というユーザー報告になった。効果の ON/OFF と区間の有無は
-    /// 別々に持っているので、**繋ぐのは操作の入口の責任**である。
-    ///
-    /// クリップ 1 本だけに絞るのは、実機で「1 本選んでからモザイクを掛けたのに全クリップに
-    /// 掛かる」という報告があったため（安全側＝モザイクが掛かる範囲を狭める変更）。
-    /// 判定は `timelineSelection.clipID`。`TimelineSelection.prune(against:)` が
-    /// タイムライン変化のたびに消えたクリップの選択を刈っているので、ここで見る値は
-    /// 常に「今も存在するクリップ」か `nil` のどちらかのはずだが、`fullCoverRange` が
-    /// nil を返す壊れたクリップ（非有限・`sourceStart >= sourceEnd`）に対しては
-    /// **安全側の全クリップへフォールバックする**（選択が無いときと同じ扱い）。
-    ///
-    /// **判定の単位は「選んだクリップ」であって「全体」ではない。**
-    ///
-    /// クリップを選んでいるときに見るのは**そのクリップに区間があるか**だけで、
-    /// 他のクリップの区間の有無は関係ない。ここを「`applyRanges` が空のときだけ」に
-    /// すると、**A に掛けた後で B を選んで掛けても何も起きない**（全体としては
-    /// 空でないため入口で弾かれる）。ユーザーからは「掛けたのに反応しない」に見える。
-    ///
-    /// **一部だけ残っているときは触らない**（選択が無い場合）。特定のクリップの区間を
-    /// 消したのは意図的な操作なので、別のクリップで効果を入れ直したからといって
-    /// 復活させない。全部消えているときだけ「掛けるつもりで何も無い」＝繋ぎ忘れとみなす。
-    ///
-    /// **「区間があるか」は `timeline.applyRanges` ではなく `effectiveApplyRanges`
-    /// （＝孤児区間を除いた有効区間）で見ること。**
-    ///
-    /// 適用区間は素材時刻アンカーなので、クリップをトリムすると区間がクリップの使用範囲と
-    /// 交差しなくなる（孤児区間）。孤児はデータとしては温存されるが**帯にも出ずゲートも
-    /// 全区間 OFF** で（不変条件 I1）、ユーザーから見れば「区間は 1 本も無い」状態である。
-    /// ここを生データで判定すると、**孤児だけが残った状態でモザイクを掛け直しても
-    /// 入口で弾かれ、何も起きない**（トリムしただけのユーザーには理由が分からない）。
-    /// 孤児は `effectiveApplyRanges` が既に除いているので、そちらを見れば同じ規則のまま
-    /// この穴だけが閉じる。
-    func ensureApplyRangesExist() {
-        guard !timeline.clips.isEmpty else { return }
-        let selectedClipID = timelineSelection.clipID
-        // 選択中のクリップが解決でき、まだそのクリップの**有効な**区間が無いときだけ 1 本足す。
-        if let selectedClipID,
-           timeline.clips.contains(where: { $0.id == selectedClipID }),
-           !effectiveApplyRanges.contains(where: { $0.clipID == selectedClipID }) {
-            applyTimelineEdit { state in
-                guard let clip = state.clips.first(where: { $0.id == selectedClipID }),
-                      let range = MosaicApplyGate.fullCoverRange(
-                          for: clip, isPhoto: state.photoSourceIDs.contains(clip.sourceID))
-                else { return state }   // 壊れたクリップ。ここでは何も足さない
-                var next = state
-                // **このクリップの孤児区間はここで捨てる。** 残すと、後でトリムを戻したとき
-                // 孤児が生き返って今足した全域区間と重なる（同じ clipID に重複区間が並ぶ）。
-                // 温存の目的は「トリムの往復で区間が戻ること」だが、ユーザーはいま
-                // 「このクリップに掛け直す」と言ったので、その意思が古い区間より優先される。
-                next.applyRanges.removeAll { $0.clipID == selectedClipID }
-                next.applyRanges.append(range)
-                return next
-            }
-        }
-        // ここへ来るのは「選択が無い／解決できない」か、`fullCoverRange` が nil を返す
-        // 壊れたクリップで何も足せなかった場合。安全側で全クリップを覆う。
-        guard effectiveApplyRanges.isEmpty else { return }
-        applyTimelineEdit { state in
-            var next = state
-            next.applyRanges = MosaicApplyGate.fullCoverRanges(
-                for: state.clips, photoSourceIDs: state.photoSourceIDs)
-            return next
-        }
-    }
-
-    /// 掴んだセグメント（適用区間 × クリップ）を新しい合成区間で置き換える（端ドラッグの確定）。
-    ///
-    /// 差し替えは素材時刻で行われ、当該クリップの使用範囲外にある素材区間は温存される
-    /// （`TimelineState.replacingApplyRange(id:clipID:compositionInterval:)` の doc 参照）。
-    /// マージで id が変わり得るので、UI は編集後に区間を引き直すこと。
-    public func setMosaicApplyRange(id: UUID, clipID: UUID, interval: CompositionInterval) {
-        applyTimelineEdit { $0.replacingApplyRange(id: id, clipID: clipID, compositionInterval: interval) }
-    }
-
-    /// 掴んだセグメント（適用区間 × クリップ）を、同一クリップ内で合成時刻換算 `delta` 秒だけ
-    /// 平行移動する（区間「移動」ジェスチャの確定。端ドラッグではなく本体ドラッグ）。
-    ///
-    /// **`TimelineState.movingApplyRange(id:clipID:byCompositionDelta:)` への薄いラッパ**
-    /// （`setMosaicApplyRange` と対称）。掴んだセグメントの現在位置を素材アンカーから
-    /// 求め直したうえで移動するため、`replacingApplyRange` に絶対区間を渡すのと違い、
-    /// UI 側の下書き表示がわずかに古くても取り違えない。クリップを跨ぐ移動はせず境界で
-    /// クランプし、`delta == 0` や写真クリップは no-op。マージで id が変わり得るので、
-    /// UI は編集後に区間を引き直すこと（`setMosaicApplyRange` と同じ契約）。
-    public func moveMosaicApplyRange(id: UUID, clipID: UUID, byCompositionDelta delta: Double) {
-        applyTimelineEdit { $0.movingApplyRange(id: id, clipID: clipID, byCompositionDelta: delta) }
+    /// 素材は切り取らない（レターボックス）。顔・矩形の座標は素材フレーム基準のまま
+    /// 保存され、描画・書き出しの直前に `renderLayout` が同じ写像を掛ける
+    /// （`TimelineAspectRatio` の doc 参照）。
+    public func setOutputAspectRatio(_ ratio: TimelineAspectRatio) {
+        applyTimelineEdit { $0.settingAspectRatio(ratio) }
     }
 
     // MARK: - 描画ゲート（S10）
@@ -324,17 +272,34 @@ extension MosaicEditorModel {
     /// （`private` にできないのは、素材追加経路（`MosaicEditorModel+TimelineMedia.swift`）が
     /// 同じ入口を通るため。）
     ///
-    /// **物体マスクの追従はここで行う**（`followClipEdit(from:to:)`）。マスクは
-    /// `TimelineState` に同居しないので、分割・削除の付け替えを誰かが明示的に呼ぶ必要が
+    /// **物体マスクの追従はここで行う**（`followClipEdit(from:to:lineage:)`）。マスクは
+    /// `TimelineState` に同居しないので、分割・複製・削除の付け替えを誰かが明示的に呼ぶ必要が
     /// ある。個々の編集 API ではなくこの唯一の入口に置くのは、新しい編集操作を足したときに
     /// 呼び忘れないため。**`commitEdit` より前**に行うこと（後にすると、undo で戻る
     /// スナップショットに追従前のマスクが載る）。
+    ///
+    /// **クリップを生む編集（分割・複製）はこれではなく `applyClipCreatingEdit` を使うこと。**
+    /// 生まれたクリップの理由（`ClipLineage`）は差分から推測できず、推測すると複製が分割として
+    /// 処理されて元クリップのマスクが潰れる（`ClipLineage` の doc）。渡し忘れは DEBUG で
+    /// `ObjectMaskEditOperations` が落とす。
     func applyTimelineEdit(_ edit: (TimelineState) -> TimelineState) {
-        let newState = edit(timeline)
-        guard newState != timeline else { return }
+        applyEditResult(TimelineEdit(edit(timeline)))
+    }
+
+    /// **クリップを生む編集（分割・複製）の入口。** `TimelineState` の `splittingEdit` /
+    /// `duplicatingEdit` が返す血統付きの結果をそのまま渡す。`applyTimelineEdit` の
+    /// 多重定義にしないのは、クロージャの戻り値型でしか呼び分けられず複数文のクロージャ
+    /// （`ensureApplyRangesExist` など）で型推論が壊れるため。
+    func applyClipCreatingEdit(_ edit: (TimelineState) -> TimelineEdit) {
+        applyEditResult(edit(timeline))
+    }
+
+    /// 編集結果の適用本体（`applyTimelineEdit` / `applyClipCreatingEdit` の共通後段）。
+    private func applyEditResult(_ result: TimelineEdit) {
+        guard result.state != timeline else { return }
         let previous = timeline
-        replaceTimeline(newState)
-        followClipEdit(from: previous, to: newState)
+        replaceTimeline(result.state)
+        followClipEdit(from: previous, to: result.state, lineage: result.lineage)
         commitEdit()
     }
 
@@ -394,7 +359,17 @@ extension MosaicEditorModel {
         // クリップが 1 本も無い build では `.zero` が来る（表示するサイズが無い ＝ nil）。
         let size = built.outputSize
         outputRenderSize = size.width > 0 && size.height > 0 ? size : nil
+        outputFrameDuration = built.outputFrameDuration
+        // **画面比率を自分で選んでいるときは注意表示を出さない。**
+        //
+        // `downscaledClipIDs` は「出力枠より大きいクリップ」を機械的に拾うので、
+        // 16:9 の素材に 9:16 を選ぶ（＝ TikTok 向けの最も典型的な操作）と必ず立つ。
+        // それは画質劣化の警告ではなく**意図した構図変更**なので、警告として出すと
+        // 「比率を選ぶと毎回⚠︎が出る」状態になり、本来の用途——解像度混在や
+        // 無料プランの上限で意図せず縮む——を知らせる合図として機能しなくなる。
+        // 一般的な編集アプリも比率変更でこの種の警告は出さない。
         hasDownscaledClips = !built.downscaledClipIDs.isEmpty
+            && timeline.aspectRatio == .source
         exportRestriction = built.exportRestriction
         compositionGeneration = generation  // mapping との整合性照合（exportVideo）に使う
     }
@@ -418,6 +393,11 @@ extension MosaicEditorModel {
         // 0 に戻り、その窓でサムネイル生成が始まってしまう。
         beginPreviewDecode()
         defer { endPreviewDecode() }
+        // 待ち表示は「遅かったときだけ」。猶予より早く終われば一度も立たない
+        // （`isRebuildingComposition` / `beginRebuild` の doc 参照）。
+        // **数で持つこと**（連続編集で再構築が重なるため。理由は `rebuildDepth` の doc）。
+        beginRebuild()
+        defer { endRebuild() }
         guard generation == timelineGeneration else { return }
         let clipsSnapshot = timeline.clips
         let sourcesSnapshot = sources
@@ -435,10 +415,13 @@ extension MosaicEditorModel {
         let audioItemsSnapshot = timeline
             .effectiveAudioItems(totalDuration: mapping.totalDuration)
             .filter { sourcesSnapshot[$0.sourceID] != nil }
+        // 出力の画面比率も await を跨ぐ前に閉じ込める（他のスナップショットと同じ理由）。
+        let aspectRatioSnapshot = timeline.aspectRatio
         do {
             let built = try await TimelineCompositionBuilder()
                 .build(clips: clipsSnapshot, transitions: transitionsSnapshot,
                        audioItems: audioItemsSnapshot, sources: sourcesSnapshot,
+                       aspectRatio: aspectRatioSnapshot,
                        isPro: entitlements.isPro)
             guard generation == timelineGeneration else { return }  // 古い世代の結果は破棄
             apply(built: built, generation: generation)

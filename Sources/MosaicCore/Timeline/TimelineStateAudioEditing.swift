@@ -117,6 +117,9 @@ extension TimelineState {
             next.sourceEnd += applied
         }
         guard next.duration >= AudioItem.minimumDuration else { return self }
+        // duration が変わった（伸縮した）ので、古いフェード値のままだと重ならない
+        // 規則（`AudioItem.clampFades` の doc）を破り得る。ここで丸め直す。
+        next.clampFades()
         var result = self
         result.audioItems[index] = next
         result.audioItems = Self.normalizedAudioItems(result.audioItems)
@@ -130,6 +133,22 @@ extension TimelineState {
         guard clamped != audioItems[index].volume else { return self }
         var next = self
         next.audioItems[index].volume = clamped
+        return next
+    }
+
+    /// 指定した BGM のフェードイン／アウト時間（秒）を設定する（E2-2）。
+    ///
+    /// **上限は再生尺の半分**（`AudioItem.clampedFade` の doc）。それぞれ独立に丸めるので、
+    /// 呼び出し側は「両方 duration/2 いっぱいまで」を渡してもぶつからない。
+    public func settingAudioFade(id: UUID, fadeIn: Double, fadeOut: Double) -> TimelineState {
+        guard let index = audioItems.firstIndex(where: { $0.id == id }) else { return self }
+        let item = audioItems[index]
+        let clampedIn = AudioItem.clampedFade(fadeIn, duration: item.duration)
+        let clampedOut = AudioItem.clampedFade(fadeOut, duration: item.duration)
+        guard clampedIn != item.fadeInDuration || clampedOut != item.fadeOutDuration else { return self }
+        var next = self
+        next.audioItems[index].fadeInDuration = clampedIn
+        next.audioItems[index].fadeOutDuration = clampedOut
         return next
     }
 
@@ -167,6 +186,9 @@ extension TimelineState {
                 next.sourceStart += shift
                 guard next.duration >= AudioItem.minimumDuration else { continue }
             }
+            // 最後の砦: 手で書き換えられた下書き・将来の不整合で fadeIn/Out が
+            // duration/2 を超えていても、ここで必ず丸め直す。
+            next.clampFades()
             result.append(next)
         }
         return result

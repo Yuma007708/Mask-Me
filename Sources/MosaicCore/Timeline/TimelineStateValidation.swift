@@ -45,7 +45,8 @@ extension TimelineState {
         return true
     }
 
-    /// BGM が昇順・非重複で、音量が 0...1 に収まること（I-A1〜I-A3）。
+    /// BGM が昇順・非重複で、音量が 0...1 に、フェードが `duration / 2` 以下に
+    /// 収まること（I-A1〜I-A4）。
     ///
     /// **合成尺との関係はここでは見ない。** クリップを消して縮んだタイムラインから
     /// はみ出した BGM は不正ではなく温存対象である（`AudioItem` 型の doc）。
@@ -57,6 +58,10 @@ extension TimelineState {
                   item.sourceStart >= 0, item.compositionStart >= 0,
                   item.duration >= AudioItem.minimumDuration,
                   item.volume >= 0, item.volume <= 1 else { return false }
+            guard item.fadeInDuration.isFinite, item.fadeOutDuration.isFinite,
+                  item.fadeInDuration >= 0, item.fadeOutDuration >= 0,
+                  item.fadeInDuration <= item.duration / 2 + 1e-9,
+                  item.fadeOutDuration <= item.duration / 2 + 1e-9 else { return false }
             guard item.compositionStart >= previousEnd - 1e-9 else { return false }
             previousEnd = item.compositionEnd
         }

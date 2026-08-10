@@ -8,7 +8,10 @@ struct EditorView: View {
     /// 再開する下書きのパラメータ（新規編集なら nil）。
     private let resume: ResumeContext?
 
-    @StateObject private var model: MosaicEditorModel
+    /// **`private` にしないこと。** プレビュー上段の組み立ては
+    /// `EditorView+Preview.swift`（別ファイルの extension）にあり、`private` だと
+    /// そこから見えない。
+    @StateObject var model: MosaicEditorModel
     @EnvironmentObject private var draftStore: DraftStore
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
@@ -22,7 +25,8 @@ struct EditorView: View {
     /// 動画下書きの更新先 ID（同一セッションは上書き保存）。
     @State private var videoDraftID: UUID?
     /// テキストの見た目設定シート（E3-3b）の提示対象。プレビュー上の選択から開く。
-    @State private var textStyleItemID: UUID?
+    /// **`private` にしないこと**（`model` と同じ理由。`EditorView+Preview.swift` が使う）。
+    @State var textStyleItemID: UUID?
     /// 自動保存のデバウンス用タスク（最新 1 件のみ生かす）。
     @State private var autosaveTask: Task<Void, Never>?
 
@@ -151,45 +155,7 @@ struct EditorView: View {
         .modifier(EditorTextStyleSheetModifier(model: model, itemID: $textStyleItemID))
     }
 
-    // MARK: - Preview
-
-    private var previewArea: some View {
-        ZStack {
-            Color.black
-
-            if let image = model.previewImage {
-                Image(uiImage: image)
-                    .resizable()
-                    .scaledToFit()
-            } else if model.isLoading {
-                ProgressView().tint(.white)
-            }
-
-            // 顔の枠は矩形より**下**に置く。重なったときは矩形の枠と ✕ を
-            // 優先させる（矩形は自分で置いたものなので、消せなくなると困る）。
-            FacePickOverlay(model: model)
-            RectangleDrawingOverlay(model: model)
-
-            // テキストの当たり判定は物体マスクと同じ理由でさらに**上**に置く
-            // （`TextOverlayEditView` の doc 参照。矩形の新規作成ドラッグより
-            // テキストの選択・移動を優先する）。動画モード限定はビュー内部で判定する。
-            if model.mode == .video {
-                TextOverlayEditView(model: model, styleSheetItemID: $textStyleItemID)
-            }
-
-            if model.mode == .video {
-                VStack {
-                    HStack {
-                        Spacer()
-                        TrackingBadge(status: model.status)
-                            .padding(12)
-                    }
-                    Spacer()
-                }
-            }
-        }
-        .frame(maxWidth: .infinity, minHeight: 200, maxHeight: .infinity)
-    }
+    // MARK: - Preview（本体は `EditorView+Preview.swift`）
 
     // MARK: - Dock（下段：顔サムネ / 調整バー / タブバー）
 

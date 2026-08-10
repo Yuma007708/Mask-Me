@@ -22,10 +22,13 @@ public struct ObjectMaskPlacement: Equatable, Sendable {
     public let rect: CGRect
     /// **ピクセル空間での**傾き（ラジアン、時計回り）。
     ///
-    /// レイアウト写像（レターボックス）を通しても角度は変わらない。あの写像は
-    /// 正規化空間では縦横で別々の倍率になるが、ピクセル空間で見ると素材の縦横比を
-    /// 保った等方の拡大縮小だからである（`TimelineRenderLayout.remap` の doc）。
-    /// **アスペクト比を変える配置を許すようになったら、ここで角度も写す必要がある。**
+    /// レターボックスの配置写像だけなら角度は変わらない。あの写像は正規化空間では
+    /// 縦横で別々の倍率になるが、ピクセル空間で見ると素材の縦横比を保った等方の
+    /// 拡大縮小だからである（`TimelineRenderLayout.remap` の doc）。
+    /// **ただしクリップの向き（`ClipOrientation`）は角度を変える**ので、
+    /// `TimelineRenderLayout.remapAngle` を必ず通すこと（90 度回すと矩形の傾きも
+    /// 90 度回らなければ、傾けた矩形が素材からずれて素通しになる）。
+    /// **アスペクト比を変える配置を許すようになったら、そこでも角度を写す必要がある。**
     public let angle: Double
 
     public init(rect: CGRect, angle: Double) {
@@ -82,7 +85,8 @@ public enum ObjectMaskResolver {
                 // **角度は追跡ではなくキーフレームから採る。** 追跡（オプティカルフロー）は
                 // 矩形の平行移動しか追わないので、角度を持っていない。被写体が回り込んでも
                 // 傾きは置いたときのまま固定される（この割り切りはユーザー合意済み）。
-                angle: mask.angle(atSourceTime: sourceTime))
+                // **クリップの向きだけは写す**（矩形と角度が別々の空間になるのを防ぐ）。
+                angle: layout.remapAngle(mask.angle(atSourceTime: sourceTime), clipID: clipID))
         }
     }
 

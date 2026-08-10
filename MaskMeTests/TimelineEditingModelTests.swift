@@ -1336,6 +1336,48 @@ final class TimelineEditingModelTests: XCTestCase {
         XCTAssertFalse(model.isPreviewDecodeBusy)
     }
 
+    /// **番人: 再構築が重なったとき、先に終わった方が待ち表示を消さないこと。**
+    ///
+    /// `replaceTimeline` は古い再構築を cancel せず新しいタスクを積むだけなので、
+    /// 連続編集すると古い方が後から終わる。1 本ごとの `defer` で消す実装だと、
+    /// 「新しい方がまだ再構築中なのに表示が消える」＝最も待たされる場面でだけ
+    /// 表示が出ない、という目的の真逆が起きる。
+    func test_rebuildIndicator_重なった再構築で先に終わった方が消さない() async throws {
+        let model = makeModel()
+        XCTAssertFalse(model.isRebuildingComposition)
+
+        model.beginRebuild()
+        model.beginRebuild()                       // 連続編集で 2 本目が重なる
+        // 猶予（0.4 秒）を超えるまで待つ。ここで初めて表示が立つ。
+        try await Task.sleep(nanoseconds: 700_000_000)
+        XCTAssertTrue(model.isRebuildingComposition, "猶予を超えたのに待ち表示が立たない")
+
+        model.endRebuild()                         // 先に終わった 1 本目
+        XCTAssertTrue(model.isRebuildingComposition,
+                      "まだ再構築中なのに待ち表示が消えた")
+        model.endRebuild()                         // 最後の 1 本
+        XCTAssertFalse(model.isRebuildingComposition)
+        XCTAssertEqual(model.rebuildDepthForTesting, 0)
+
+        // 余分な end で深さが負に沈まないこと（沈むと以降の begin が効かなくなる）。
+        model.endRebuild()
+        XCTAssertEqual(model.rebuildDepthForTesting, 0)
+    }
+
+    /// 猶予より早く終わる再構築では待ち表示を**一度も**出さないこと
+    /// （分割・トリムのような日常操作でインジケータが光らない）。
+    func test_rebuildIndicator_すぐ終わる再構築では出ない() async throws {
+        let model = makeModel()
+        model.beginRebuild()
+        try await Task.sleep(nanoseconds: 100_000_000)   // 猶予 0.4 秒より十分短い
+        model.endRebuild()
+        XCTAssertFalse(model.isRebuildingComposition)
+        // 猶予を過ぎても、キャンセル済みのタスクが後から立てないこと。
+        try await Task.sleep(nanoseconds: 600_000_000)
+        XCTAssertFalse(model.isRebuildingComposition,
+                       "終わった後に待ち表示が立った（タスクがキャンセルされていない）")
+    }
+
     /// 実素材での編集（composition 差し替え + seek）とスクラブ用シークの後、
     /// 占有の深さが 0 に戻ること（`defer` の対が崩れていないことの実測）。
     func test_previewDecodeBusy_returnsToZeroAfterEditAndSeek() async throws {
@@ -4175,6 +4217,54 @@ final class TimelineVolumeSheetWiringTests: XCTestCase {
                        "未選択で音量メニューが活性になっている")
         XCTAssertFalse(TimelineVolumeAvailability.isEnabled(timeline: timeline, clipID: UUID()),
                        "存在しないクリップIDで音量メニューが活性になっている")
+    }
+
+    /// **消音の見た目は、音量ボタンが実際に指している対象を見て決めること。**
+    ///
+    /// クリップと BGM は同じ音量ボタンを共有する（ユーザー決定 2026-08-02）。
+    /// 対象の決定を `target(timeline:selection:)` へ通さずに書くと、
+    /// 「クリップを選んでいるのに BGM の消音状態でアイコンが変わる」取り違えが起きる。
+    func test_isMuted_音量ボタンが指している対象の消音だけを見る() {
+        let videoSourceID = UUID()
+        let audioSourceID = UUID()
+        var loudClip = TimelineClip(sourceID: videoSourceID, sourceStart: 0, sourceEnd: 4)
+        loudClip.originalAudioVolume = 1
+        var mutedClip = TimelineClip(sourceID: videoSourceID, sourceStart: 0, sourceEnd: 4)
+        mutedClip.originalAudioVolume = 0
+        let mutedAudio = AudioItem(sourceID: audioSourceID, sourceStart: 0, sourceEnd: 3,
+                                   compositionStart: 0, volume: 0)
+        let timeline = TimelineState(
+            clips: [loudClip, mutedClip], audioItems: [mutedAudio],
+            sources: [videoSourceID: TimelineSource(id: videoSourceID, kind: .video),
+                      audioSourceID: TimelineSource(id: audioSourceID, kind: .audio)])
+
+        func selecting(clip id: UUID) -> TimelineSelection {
+            var selection = TimelineSelection()
+            selection.selectClip(id)
+            return selection
+        }
+
+        XCTAssertFalse(
+            TimelineVolumeAvailability.isMuted(timeline: timeline, selection: selecting(clip: loudClip.id)),
+            "消音していないクリップが消音として出ている")
+        XCTAssertTrue(
+            TimelineVolumeAvailability.isMuted(timeline: timeline, selection: selecting(clip: mutedClip.id)),
+            "消音したクリップが消音として出ていない")
+        // **BGM が消音でも、クリップを選んでいるならクリップ側を見ること。**
+        // （BGM は `volume: 0` で登録してあるので、対象の取り違えがあればここが落ちる）
+        XCTAssertFalse(
+            TimelineVolumeAvailability.isMuted(timeline: timeline, selection: selecting(clip: loudClip.id)),
+            "BGM の消音状態がクリップ選択時に漏れている")
+        // BGM を選んでいるときは BGM 側を見る。
+        var audioSelection = TimelineSelection()
+        audioSelection.selectLayer(TimelineLayerSelection(kind: .audio, id: mutedAudio.id))
+        XCTAssertTrue(
+            TimelineVolumeAvailability.isMuted(timeline: timeline, selection: audioSelection),
+            "消音した BGM が消音として出ていない")
+        // 何も選んでいなければボタン自体が非活性なので消音の見た目にしない。
+        XCTAssertFalse(
+            TimelineVolumeAvailability.isMuted(timeline: timeline, selection: TimelineSelection()),
+            "未選択で消音の見た目になっている")
     }
 
     /// シートのコールバック（`TimelineVolumeSheet.onApply`）を通した値変更が

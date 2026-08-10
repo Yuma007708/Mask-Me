@@ -158,6 +158,23 @@ final class TimelineInvariantFuzzTests: XCTestCase {
                 let target = state.audioItems[random.next(state.audioItems.count)]
                 return state.settingAudioVolume(id: target.id,
                                                 volume: Float(random.double(-0.5...1.5)))
+            }),
+            // **フェードを混ぜること。** これが無いと、フューザが作る状態のフェードは
+            // 常に 0 のままで、不変条件 I-A4（フェードは尺の半分以下）が**恒真として
+            // 素通り**する＝新しい不変条件が空回りする。
+            // I-A4 が本当に守りたいのは「フェードを上限まで上げてから、トリムや
+            // 正規化で尺が縮む」という列で、それはまさにここでしか作れない。
+            // 上限を超える値・負・非有限もわざと投げ込む（丸めが効いているかを見る）。
+            ("audioFade", { state, _, random in
+                guard !state.audioItems.isEmpty else { return state }
+                let target = state.audioItems[random.next(state.audioItems.count)]
+                let extremes: [Double] = [-1, 0, .infinity, .nan]
+                let inSeed = random.next(8)
+                let inValue = inSeed < 4 ? extremes[inSeed] : random.double(0...20)
+                let outSeed = random.next(8)
+                let outValue = outSeed < 4 ? extremes[outSeed] : random.double(0...20)
+                return state.settingAudioFade(id: target.id,
+                                              fadeIn: inValue, fadeOut: outValue)
             })
         ]
     }
@@ -201,6 +218,10 @@ final class TimelineInvariantFuzzTests: XCTestCase {
             ("removeTransition", { state, pick, _ in
                 guard let pick else { return state }
                 return state.removingTransition(afterClipID: pick)
+            }),
+            ("duplicate", { state, pick, _ in
+                guard let pick else { return state }
+                return state.duplicating(clipID: pick)
             }),
             ("appendPhoto", { state, _, random in
                 state.appending(

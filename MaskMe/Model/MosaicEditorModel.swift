@@ -162,9 +162,72 @@ public final class MosaicEditorModel: ObservableObject {
     /// 書き込みは `apply(built:generation:)` 一箇所だけ（別ファイルの extension なので
     /// `private(set)` は使えない。`detectedFaces` と同じく `internal(set)`）。
     @Published public internal(set) var outputRenderSize: CGSize?
+
+    /// 出力 1 コマの長さ（秒。クリップ未構築なら nil）。コマ送りが 1 回で動く量。
+    ///
+    /// **UI はここを読むこと。`videoComposition?.frameDuration` を直接読んではならない**
+    /// （`outputRenderSize` とまったく同じ理由。`videoComposition` は `@Published` では
+    /// ないので更新が届かず、そもそも無装着構成では nil になる——そこで既定値 30fps へ
+    /// 落ちると 60fps の素材でコマ送りが 2 コマぶん飛ぶ）。値の算出は
+    /// `VideoCompositionFactory.frameDuration(for:)` の単一実装で、
+    /// `TimelineCompositionBuilder.Built.outputFrameDuration` を経由して届く。
+    /// 書き込みは `apply(built:generation:)` 一箇所だけ。
+    @Published public internal(set) var outputFrameDuration: Double?
+
     /// 出力枠より大きく、縮小されて収まるクリップがあるか（UI の注意表示用）。
     /// 並べ替えで先頭クリップ＝出力解像度が変わると true / false が入れ替わる。
     @Published public internal(set) var hasDownscaledClips = false
+
+    /// **合成の作り直しに時間がかかっているか**（プレビューの待ち表示用）。
+    ///
+    /// `isPreviewDecodeBusy` を使ってはいけない。あれは seek 一回・1 フレーム描画でも
+    /// 立つので、スクラブ中は 30fps で点滅する（＝待ち表示としては使い物にならない）。
+    /// ここは `rebuildComposition` の全体（build → replaceAsset → seek）だけを覆う。
+    ///
+    /// **すぐには立てない。** 分割・トリムのような普段の編集は一瞬で終わるため、
+    /// 即座に立てるとインジケータが編集のたびに一瞬だけ光る。`rebuildIndicatorDelay`
+    /// を超えて終わらなかったときだけ立てる（画面比率の変更や素材追加のように、
+    /// 実際に待たされる操作だけが見える）。
+    @Published public internal(set) var isRebuildingComposition = false
+
+    /// 待ち表示を出すまでの猶予（秒）。これより早く終わる再構築では何も出さない。
+    static let rebuildIndicatorDelay: Double = 0.4
+
+    /// 進行中の `rebuildComposition` の本数（`isPreviewDecodeBusy` の深さと同じ流儀）。
+    ///
+    /// **1 本ずつの `defer` で立ち下げてはいけない。** `replaceTimeline` は古い
+    /// 再構築を cancel せず新しいタスクを積むだけなので、古い方は build を最後まで
+    /// 走り切ってから世代 guard で return する。連続編集すると
+    /// 「新しい方がまだ再構築中なのに、古い方の後始末が待ち表示を消す」が起き、
+    /// **最も待たされる場面でだけ表示が消える**（目的の真逆）。数で持てば、
+    /// 最後の 1 本が終わったときだけ消える。
+    private var rebuildDepth = 0
+    /// 猶予待ちのタスク（先頭の 1 本が始めたものを共有する）。
+    private var rebuildIndicatorTask: Task<Void, Never>?
+
+    /// 再構築の開始を宣言する（`defer { endRebuild() }` と対で使う）。
+    func beginRebuild() {
+        rebuildDepth += 1
+        guard rebuildDepth == 1 else { return }
+        rebuildIndicatorTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds:
+                UInt64(Self.rebuildIndicatorDelay * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            self?.isRebuildingComposition = true
+        }
+    }
+
+    /// 再構築の終了を宣言する。最後の 1 本が終わったときだけ待ち表示を消す。
+    func endRebuild() {
+        rebuildDepth = max(0, rebuildDepth - 1)
+        guard rebuildDepth == 0 else { return }
+        rebuildIndicatorTask?.cancel()
+        rebuildIndicatorTask = nil
+        isRebuildingComposition = false
+    }
+
+    /// テスト用: 立ち下げ漏れ（`begin` と `end` の非対称）を検出するための深さ。
+    var rebuildDepthForTesting: Int { rebuildDepth }
 
     /// 現在のタイムラインに適用される書き出し制限（`ExportRestrictionPolicy.decide` の結果）。
     ///
@@ -772,6 +835,7 @@ public final class MosaicEditorModel: ObservableObject {
                 let built = try await TimelineCompositionBuilder()
                     .build(clips: clips, transitions: timeline.transitions,
                            audioItems: audioItems, sources: sources,
+                           aspectRatio: timeline.aspectRatio,
                            isPro: entitlements.isPro)
                 let isStale = loadGeneration != timelineGeneration
                 if !isStale {

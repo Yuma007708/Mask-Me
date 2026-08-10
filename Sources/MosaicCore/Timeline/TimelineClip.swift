@@ -32,12 +32,21 @@ public struct TimelineClip: Identifiable, Hashable, Sendable, Codable {
         didSet { rate = Self.clampedRate(rate) }
     }
 
+    /// クリップに掛ける向き（90 度単位の回転 + 左右反転）。既定は無変換。
+    ///
+    /// **これは映像だけの設定ではない。** 顔ランドマークと矩形モザイクの正規化座標も
+    /// 同じ向きで写さなければモザイクが素材からずれて顔が素通しになる。写像の唯一の
+    /// 経路は `TimelineRenderLayout`（`orientations`）で、映像側の
+    /// `VideoCompositionFactory.fitTransform` と同じ `ClipOrientation` から作られる。
+    public var orientation: ClipOrientation
+
     public init(id: UUID = UUID(),
                 sourceID: UUID,
                 sourceStart: Double,
                 sourceEnd: Double,
                 originalAudioVolume: Float = 1.0,
-                rate: Double = 1.0) {
+                rate: Double = 1.0,
+                orientation: ClipOrientation = .identity) {
         self.id = id
         self.sourceID = sourceID
         self.sourceStart = sourceStart
@@ -45,6 +54,7 @@ public struct TimelineClip: Identifiable, Hashable, Sendable, Codable {
         // init 中は didSet が走らないため、rate と同様に明示的にクランプする。
         self.originalAudioVolume = Self.clampedVolume(originalAudioVolume)
         self.rate = Self.clampedRate(rate)
+        self.orientation = orientation
     }
 
     /// このクリップが合成タイムライン上で占める長さ（秒）。
@@ -67,11 +77,12 @@ public struct TimelineClip: Identifiable, Hashable, Sendable, Codable {
     // MARK: - Codable
 
     private enum CodingKeys: String, CodingKey {
-        case id, sourceID, sourceStart, sourceEnd, originalAudioVolume, rate
+        case id, sourceID, sourceStart, sourceEnd, originalAudioVolume, rate, orientation
     }
 
     /// `rate` キーを持たない旧 JSON（rate 導入前に保存された下書き）も
-    /// 等速（1.0）としてデコードできるようにする。
+    /// 等速（1.0）としてデコードできるようにする。`orientation` も同じ規約で、
+    /// キーが無い旧下書きは**回転なし・反転なし**（`ClipOrientation.identity`）になる。
     ///
     /// **`init(from:)` は didSet を経由しない**ため、`rate`・`originalAudioVolume` の
     /// どちらも明示的にクランプする（壊れた下書きから範囲外の値が入るのを防ぐ）。
@@ -84,5 +95,7 @@ public struct TimelineClip: Identifiable, Hashable, Sendable, Codable {
         self.originalAudioVolume = Self.clampedVolume(
             try container.decode(Float.self, forKey: .originalAudioVolume))
         self.rate = Self.clampedRate(try container.decodeIfPresent(Double.self, forKey: .rate) ?? 1.0)
+        self.orientation = try container.decodeIfPresent(
+            ClipOrientation.self, forKey: .orientation) ?? .identity
     }
 }

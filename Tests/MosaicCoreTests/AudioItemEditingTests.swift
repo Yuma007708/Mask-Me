@@ -3,6 +3,9 @@ import XCTest
 
 /// E2-1: BGM（`AudioItem`）のデータモデル・編集操作・永続化。
 ///
+/// フェードイン／アウト（E2-2）は `type_body_length` の閾値に張り付いたため
+/// `AudioItemFadeTests` へ分けてある。
+///
 /// **BGM は合成時刻アンカー**（クリップ編集に追従しない）で、**曲どうしは重ならない**
 /// （ユーザー決定 2026-08-02）。この 2 点が全テストの前提である。
 final class AudioItemEditingTests: XCTestCase {

@@ -326,4 +326,44 @@ final class TimelineEditOperationsTests: XCTestCase {
         let decoded = try JSONDecoder().decode(TimelineClip.self, from: Data(json.utf8))
         XCTAssertEqual(decoded.rate, 10.0, accuracy: 1e-9)
     }
+
+    // MARK: - duplicate
+
+    /// 複製先は新規 id を持ち、元クリップの直後に挿入され、
+    /// sourceID・sourceStart/sourceEnd・rate・音量を引き継ぐこと。
+    func test_duplicateInsertsCopyRightAfterOriginalWithSameAttributes() {
+        let clips = makeClips()
+        let original = TimelineClip(sourceID: sourceA, sourceStart: 1, sourceEnd: 5,
+                                    originalAudioVolume: 0.5, rate: 2.0)
+        let result = TimelineEditOperations.duplicate(clips: [original, clips[1]], clipID: original.id)
+
+        XCTAssertEqual(result.count, 3)
+        XCTAssertEqual(result[0], original)
+        let copy = result[1]
+        XCTAssertNotEqual(copy.id, original.id)
+        XCTAssertEqual(copy.sourceID, original.sourceID)
+        XCTAssertEqual(copy.sourceStart, original.sourceStart, accuracy: 1e-9)
+        XCTAssertEqual(copy.sourceEnd, original.sourceEnd, accuracy: 1e-9)
+        XCTAssertEqual(copy.rate, original.rate, accuracy: 1e-9)
+        XCTAssertEqual(copy.originalAudioVolume, original.originalAudioVolume)
+        // 元のクリップ B はそのまま残る。
+        XCTAssertEqual(result[2], clips[1])
+    }
+
+    /// 中間クリップを複製した場合も、複製先はそのクリップの直後（前後は変わらない）。
+    func test_duplicateMiddleClipInsertsRightAfterIt() {
+        let clips = makeClips()
+        let result = TimelineEditOperations.duplicate(clips: clips, clipID: clips[0].id)
+        XCTAssertEqual(result.count, 3)
+        XCTAssertEqual(result[0], clips[0])
+        XCTAssertEqual(result[1].sourceID, clips[0].sourceID)
+        XCTAssertNotEqual(result[1].id, clips[0].id)
+        XCTAssertEqual(result[2], clips[1])
+    }
+
+    /// 未知の id では変更なし（他の編集操作と同じ「失敗時は無変更」契約）。
+    func test_duplicateRejectsUnknownID() {
+        let clips = makeClips()
+        XCTAssertEqual(TimelineEditOperations.duplicate(clips: clips, clipID: UUID()), clips)
+    }
 }

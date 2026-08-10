@@ -109,6 +109,40 @@ final class RenderLayoutInverseRemapTests: XCTestCase {
         XCTAssertEqual(layout.inverseRemap(original, clipID: clipID), original)
     }
 
+    /// **`remap` と `inverseRemap` が全 8 向き × レターボックスで往復すること。**
+    ///
+    /// この 2 つは別々の機能（ライブ検出の座標系修正 / クリップの回転）として
+    /// 実装されたので、**マージで片方だけ向きを掛ける状態になった前科がある**
+    /// （行きは「向き → 配置」、帰りは「配置」だけ、という食い違い）。
+    /// git は競合を出さないので、ここが唯一の番人になる。
+    func test_全ての向きとレターボックスで往復する() {
+        let clipID = UUID()
+        let placements: [CGRect] = [
+            CGRect(x: 0, y: 0, width: 1, height: 1),          // 全面
+            CGRect(x: 0, y: 0.25, width: 1, height: 0.5),     // 上下に黒帯
+            CGRect(x: 0.2, y: 0, width: 0.6, height: 1)       // 左右に黒帯
+        ]
+        let orientations: [ClipOrientation] = ClipRotation.allCases.flatMap { rotation in
+            [ClipOrientation(rotation: rotation, isMirrored: false),
+             ClipOrientation(rotation: rotation, isMirrored: true)]
+        }
+        let original = [face(cx: 0.3, cy: 0.7), face(cx: 0.6, cy: 0.2)]
+        for placement in placements {
+            for orientation in orientations {
+                let layout = TimelineRenderLayout(placements: [clipID: placement],
+                                                  orientations: [clipID: orientation])
+                let round = layout.inverseRemap(layout.remap(original, clipID: clipID),
+                                                clipID: clipID)
+                for (index, face) in original.enumerated() {
+                    XCTAssertEqual(round[index].points[0].x, face.points[0].x, accuracy: 1e-5,
+                                   "\(orientation) \(placement)")
+                    XCTAssertEqual(round[index].points[0].y, face.points[0].y, accuracy: 1e-5,
+                                   "\(orientation) \(placement)")
+                }
+            }
+        }
+    }
+
     /// 件数と順序を変えないこと（呼び出し側が `signatures` と添字で対応させている）。
     func test_inverseRemapPreservesCountAndOrder() {
         let clipID = UUID()

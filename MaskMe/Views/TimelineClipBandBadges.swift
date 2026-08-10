@@ -27,6 +27,19 @@ extension TimelineClipBandView {
                 if width >= 40, let clip, abs(clip.rate - 1) > 1e-6 {
                     badgeLabel(String(format: "%.2gx", clip.rate))
                 }
+                // 向き（回転・左右反転）。**帯のサムネイルは回らない**ので、
+                // これが「このクリップを回したか」を読み取る唯一の手がかりになる
+                // （回した結果はプレビューでしか見えず、帯だけ見て編集していると
+                // 押したのに変わらないと誤解して連打する、という指摘への対応）。
+                if width >= 40, let clip, !clip.orientation.isIdentity {
+                    badgeLabel(Self.orientationLabel(clip.orientation))
+                }
+                // 消音。**波形では判別できない**（音量 0 でも波形は素材の波形を
+                // 描くし、そもそも無音素材と見分けがつかない）。選ばないと分からない
+                // 設定なので、帯の側にも出す。
+                if width >= 40, let clip, TimelineClip.clampedVolume(clip.originalAudioVolume) <= 0 {
+                    badgeLabel("消音")
+                }
                 Spacer(minLength: 0)
                 if width >= 72 {
                     Text(Self.durationLabel(duration))
@@ -48,6 +61,15 @@ extension TimelineClipBandView {
         if seconds < 60 { return String(format: "%.0fs", seconds) }
         let whole = Int(seconds.rounded())
         return String(format: "%d:%02d", whole / 60, whole % 60)
+    }
+
+    /// 向きのバッジ表示（例: "90°" / "反転" / "90°反転"）。
+    /// 無変換のときは呼ばない（呼び出し側が `isIdentity` で弾く）。
+    static func orientationLabel(_ orientation: ClipOrientation) -> String {
+        var parts: [String] = []
+        if orientation.rotation != .none { parts.append("\(orientation.rotation.rawValue)°") }
+        if orientation.isMirrored { parts.append("反転") }
+        return parts.joined()
     }
 
     private func badgeLabel(_ text: String) -> some View {

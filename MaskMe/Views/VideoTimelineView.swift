@@ -60,6 +60,8 @@ struct VideoTimelineView: View {
     @State var showAudioPicker = false
     /// テキスト入力シート（E3）の提示条件。プレイヘッド位置に新規テキストを置く。
     @State var showTextInputSheet = false
+    /// 画面比率シートの提示条件。作品全体の設定なので、何も選んでいないときの段から開く。
+    @State var showAspectRatioSheet = false
     /// スクロールの見え方（トラック内 x 座標系）。`TimelineScrollContainer` が更新し、
     /// サムネイル要求の可視範囲を決めるのに使う。
     @State var viewport = TimelineViewport(scrollOffset: 0, visibleWidth: 0, contentWidth: 0)
@@ -179,6 +181,9 @@ struct VideoTimelineView: View {
             transitionClipID: $transitionSheetClipID, showMediaPicker: $showMediaPicker,
             showAudioPicker: $showAudioPicker, audioInsertTime: playheadTime,
             showTextInputSheet: $showTextInputSheet, textInsertTime: playheadTime))
+        .sheet(isPresented: $showAspectRatioSheet) {
+            TimelineAspectRatioSheet(model: model) { showAspectRatioSheet = false }
+        }
     }
 
     /// サムネイル生成の抑止を 1 箇所で決める。
@@ -196,7 +201,7 @@ struct VideoTimelineView: View {
     private var isSheetPresented: Bool {
         speedSheetClipID != nil || volumeSheetTarget != nil
             || transitionSheetClipID != nil || showMediaPicker || showAudioPicker
-            || showTextInputSheet
+            || showTextInputSheet || showAspectRatioSheet
     }
 
     /// プレビューのデコード占有をサムネイル生成の抑止条件へ繋ぐ。

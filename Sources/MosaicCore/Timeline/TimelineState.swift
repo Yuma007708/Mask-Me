@@ -52,19 +52,33 @@ public struct TimelineState: Codable, Equatable, Sendable {
     /// エントリが無い素材は動画（`TimelineSource.Kind.video`）として扱う
     /// （kind 導入前のデータとの互換）。
     public var sources: [UUID: TimelineSource]
+    /// 出力（＝プレビューの合成フレーム）の画面比率。既定は `.source`（素材に合わせる）。
+    ///
+    /// **プレビューと書き出しは同じ値から作られる**: この値は
+    /// `TimelineCompositionBuilder.build(aspectRatio:)` にだけ渡り、そこで
+    /// `videoComposition.renderSize` と `TimelineRenderLayout`（顔座標の写像）を
+    /// **同時に**決める。両者は `apply(built:generation:)` で必ず組で差し替わるので、
+    /// 「プレビューだけ比率が変わる／書き出しだけ変わる」は構造上起こらない。
+    ///
+    /// 座標系への影響は `TimelineAspectRatio` の doc を参照（素材は切り取らず、
+    /// レターボックスで縮んだぶんは `TimelineRenderLayout.remap` が顔座標側にも同じ写像を
+    /// 掛ける）。
+    public var aspectRatio: TimelineAspectRatio
 
     public init(clips: [TimelineClip] = [],
                 transitions: [UUID: TransitionSpec] = [:],
                 applyRanges: [MosaicApplyRange] = [],
                 audioItems: [AudioItem] = [],
                 textItems: [TextItem] = [],
-                sources: [UUID: TimelineSource] = [:]) {
+                sources: [UUID: TimelineSource] = [:],
+                aspectRatio: TimelineAspectRatio = .source) {
         self.audioItems = audioItems
         self.textItems = textItems
         self.clips = clips
         self.transitions = transitions
         self.applyRanges = applyRanges
         self.sources = sources
+        self.aspectRatio = aspectRatio
     }
 
     // MARK: - 永続化スキーマ版
@@ -79,7 +93,10 @@ public struct TimelineState: Codable, Equatable, Sendable {
     /// - v3: `audioItems`（BGM）を追加。**v2 以前の JSON は BGM 無しとして読める**
     ///   （追加しただけで既存キーの意味は変えていない）ので、移行処理は要らない。
     /// - v4: `textItems`（テキスト）を追加。v3 と同じくキーを足しただけ。
-    public static let currentSchemaVersion = 4
+    /// - v5: `aspectRatio`（出力の画面比率）を追加。**v4 以前の JSON はキーが無いので
+    ///   `.source`（素材に合わせる ＝ 従来挙動）として復元する**。既存キーの意味は
+    ///   変えていないので移行処理は要らない。
+    public static let currentSchemaVersion = 5
 
     // MARK: - 素材種別（写真クリップの時刻規則）
 
@@ -123,8 +140,18 @@ public struct TimelineState: Codable, Equatable, Sendable {
     /// UI は対象を明示する `splitting(clipID:atDisplayTime:)` と、その活性判定
     /// `canSplit(clipID:atDisplayTime:)` を使う。
     public func splitting(atDisplayTime displayTime: Double) -> TimelineState {
-        guard let editTime = mapping.editTime(forDisplayTime: displayTime) else { return self }
-        return splitting(at: editTime)
+        splittingEdit(atDisplayTime: displayTime).state
+    }
+
+    /// `splitting(atDisplayTime:)` に**血統**（`ClipLineage`）を添えた版。
+    ///
+    /// アプリ層（`MosaicEditorModel.applyTimelineEdit`）はこちらを使うこと。物体マスクの
+    /// 追従は血統を見て分割と複製を見分ける（`ClipLineage` の doc）。
+    public func splittingEdit(atDisplayTime displayTime: Double) -> TimelineEdit {
+        guard let editTime = mapping.editTime(forDisplayTime: displayTime) else {
+            return TimelineEdit(self)
+        }
+        return splittingEdit(at: editTime)
     }
 
     /// 指定したクリップを、表示タイムラインの時刻で 2 分割する。
@@ -132,8 +159,15 @@ public struct TimelineState: Codable, Equatable, Sendable {
     /// 帰属規則に頼らず `clipID` のクリップを割るため、トランジションの重なり区間でも
     /// 「選択したクリップが割れる」ことが保証される。分割できない場合は self を返す。
     public func splitting(clipID: UUID, atDisplayTime displayTime: Double) -> TimelineState {
-        guard let editTime = splitEditTime(clipID: clipID, displayTime: displayTime) else { return self }
-        return splitting(at: editTime)
+        splittingEdit(clipID: clipID, atDisplayTime: displayTime).state
+    }
+
+    /// `splitting(clipID:atDisplayTime:)` に**血統**（`ClipLineage`）を添えた版（UI の分割ボタンの入口）。
+    public func splittingEdit(clipID: UUID, atDisplayTime displayTime: Double) -> TimelineEdit {
+        guard let editTime = splitEditTime(clipID: clipID, displayTime: displayTime) else {
+            return TimelineEdit(self)
+        }
+        return splittingEdit(at: editTime)
     }
 
     /// `splitting(clipID:atDisplayTime:)` が実際に分割するかどうか。
@@ -178,11 +212,16 @@ public struct TimelineState: Codable, Equatable, Sendable {
     /// **適用区間も追従させる**（`MosaicApplyGate.ranges(splittingClip:into:...)`）。区間は `clipID` アンカーなので、
     /// 分割で新しい clipID が生まれた側へ付け替えないと後半クリップの区間が丸ごと効かなくなる。
     public func splitting(at compositionTime: Double) -> TimelineState {
+        splittingEdit(at: compositionTime).state
+    }
+
+    /// `splitting(at:)` に**血統**（`ClipLineage`）を添えた版（分割の実装本体）。
+    public func splittingEdit(at compositionTime: Double) -> TimelineEdit {
         let newClips = TimelineEditOperations.split(clips: clips, at: compositionTime)
-        guard newClips != clips else { return self }
+        guard newClips != clips else { return TimelineEdit(self) }
         let oldIDs = Set(clips.map(\.id))
         guard let backIndex = newClips.firstIndex(where: { !oldIDs.contains($0.id) }),
-              backIndex > 0 else { return self }
+              backIndex > 0 else { return TimelineEdit(self) }
         var newTransitions = transitions
         let front = newClips[backIndex - 1]
         let back = newClips[backIndex]
@@ -195,8 +234,9 @@ public struct TimelineState: Codable, Equatable, Sendable {
                                                atSourceTime: back.sourceStart,
                                                isPhoto: sourceKind(of: front.sourceID) == .photo,
                                                existing: applyRanges)
-        return replacing(clips: newClips, transitions: newTransitions, applyRanges: newRanges)
+        let state = replacing(clips: newClips, transitions: newTransitions, applyRanges: newRanges)
             .normalizingTransitions()
+        return TimelineEdit(state, lineage: [.split(front: front.id, back: back.id)])
     }
 
     /// 指定したクリップを取り除く。
@@ -315,6 +355,40 @@ public struct TimelineState: Codable, Equatable, Sendable {
         return replacing(clips: newClips, transitions: transitions)
     }
 
+    /// 指定したクリップの向き（90 度単位の回転 + 左右反転）を設定する。
+    ///
+    /// **`normalizingTransitions()` は通さない**（`settingVolume` と同じ理由。向きは
+    /// 合成尺 `duration` を一切変えないので、トランジションのクランプ条件に影響しない）。
+    /// 適用区間にも何もしない（素材時刻アンカーなので、向きを変えても「素材のどこに
+    /// モザイクを掛けるか」は変わらない。変わるのは**画面のどこに出るか**だけで、
+    /// それは `TimelineRenderLayout` の写像が担当する）。
+    public func settingOrientation(clipID: UUID, orientation: ClipOrientation) -> TimelineState {
+        let newClips = TimelineEditOperations.setOrientation(
+            clips: clips, clipID: clipID, orientation: orientation)
+        guard newClips != clips else { return self }
+        return replacing(clips: newClips, transitions: transitions)
+    }
+
+    /// 指定したクリップを**画面で見て**反時計回りに 90 度回す。
+    public func rotatingClipLeft(clipID: UUID) -> TimelineState {
+        guard let clip = clips.first(where: { $0.id == clipID }) else { return self }
+        return settingOrientation(clipID: clipID, orientation: clip.orientation.rotatedLeft())
+    }
+
+    /// 指定したクリップを**画面で見て**時計回りに 90 度回す。
+    public func rotatingClipRight(clipID: UUID) -> TimelineState {
+        guard let clip = clips.first(where: { $0.id == clipID }) else { return self }
+        return settingOrientation(clipID: clipID, orientation: clip.orientation.rotatedRight())
+    }
+
+    /// 指定したクリップを**画面で見て**左右反転する
+    /// （`ClipOrientation.flippedHorizontally()` の doc 参照。回転も逆向きになる）。
+    public func flippingClipHorizontally(clipID: UUID) -> TimelineState {
+        guard let clip = clips.first(where: { $0.id == clipID }) else { return self }
+        return settingOrientation(clipID: clipID,
+                                  orientation: clip.orientation.flippedHorizontally())
+    }
+
     /// クリップをタイムライン末尾へ追加する（素材メタも同時登録できる）。
     ///
     /// 写真クリップの追加（`PhotoClipEncoder` でエンコード済みの静止 mp4）が主用途。使用範囲が壊れているクリップ
@@ -387,9 +461,12 @@ public struct TimelineState: Codable, Equatable, Sendable {
     /// `sources`（素材メタ）が黙って落ちるため、内部の再構築はこのヘルパに集約する。
     /// `applyRanges` を省略すると現在の区間をそのまま維持する
     /// （`moving` / `trimming` / `settingRate` は区間を書き換えない）。
-    private func replacing(clips newClips: [TimelineClip],
-                           transitions newTransitions: [UUID: TransitionSpec],
-                           applyRanges newApplyRanges: [MosaicApplyRange]? = nil) -> TimelineState {
+    ///
+    /// **`internal`（`private` ではない）のは、複製のように別ファイルへ分けた編集操作
+    /// （`TimelineStateDuplication.swift`）からも同じヘルパを通すため。** モジュール外へは出さない。
+    func replacing(clips newClips: [TimelineClip],
+                   transitions newTransitions: [UUID: TransitionSpec],
+                   applyRanges newApplyRanges: [MosaicApplyRange]? = nil) -> TimelineState {
         var result = self
         result.clips = newClips
         result.transitions = newTransitions
@@ -402,7 +479,10 @@ public struct TimelineState: Codable, Equatable, Sendable {
     /// ペアが実在しない（キーが末尾または不在の）ものは破棄、
     /// `duration > min(両クリップ合成尺)/2` はクランプ、
     /// クランプ後 `TransitionSpec.minimumDuration` 未満になるものは破棄する。
-    private func normalizingTransitions() -> TimelineState {
+    ///
+    /// `replacing(clips:transitions:applyRanges:)` と同じ理由で `internal`
+    /// （別ファイルへ分けた編集操作からも通す。モジュール外へは出さない）。
+    func normalizingTransitions() -> TimelineState {
         var newTransitions: [UUID: TransitionSpec] = [:]
         for (key, spec) in transitions {
             guard let index = clips.firstIndex(where: { $0.id == key }),

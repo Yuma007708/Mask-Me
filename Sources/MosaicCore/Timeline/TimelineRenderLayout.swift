@@ -28,12 +28,47 @@ public enum AspectFit {
     }
 }
 
+/// 素材の表示フレーム（`preferredTransform` 適用後）→ 合成フレームの**ピクセル変換**。
+///
+/// **映像とモザイクの一致は、この型と `TimelineRenderLayout` が同じ
+/// `ClipOrientation` / `AspectFit` から作られていることで保証している。**
+/// 映像側（`VideoCompositionFactory.fitTransform`）はここを呼ぶだけにし、
+/// 回転・反転の数式を向こうに書かないこと。`ClipOrientationTests` が
+/// 「この変換で写したピクセル座標」と「`TimelineRenderLayout.remap` で写した
+/// 正規化座標」が一致することを全 8 向きで固定している。
+public enum ClipRenderTransform {
+    /// - Parameters:
+    ///   - displaySize: `preferredTransform` 適用後・**向きを掛ける前**の素材表示サイズ。
+    ///   - orientation: クリップの向き（90 度回転 + 左右反転）。
+    ///   - placement: 合成フレーム内の配置矩形（`AspectFit.placement(of:in:)` の結果。
+    ///     **向きを掛けた後のサイズ**で求めたものを渡すこと）。
+    ///   - renderSize: 合成フレームのピクセルサイズ。
+    public static func make(displaySize: CGSize,
+                            orientation: ClipOrientation,
+                            placement: CGRect,
+                            renderSize: CGSize) -> CGAffineTransform {
+        let rotate = orientation.transform(sourceSize: displaySize)
+        let oriented = orientation.displaySize(displaySize)
+        guard oriented.width > 0, oriented.height > 0 else { return rotate }
+        let scale = placement.width * renderSize.width / oriented.width
+        return rotate
+            .concatenating(CGAffineTransform(scaleX: scale, y: scale))
+            .concatenating(CGAffineTransform(translationX: placement.minX * renderSize.width,
+                                             y: placement.minY * renderSize.height))
+    }
+}
+
 /// クリップ id → 合成フレーム内の配置（正規化矩形）。
 ///
 /// 検出キャッシュに入っている顔ランドマークは**素材フレーム基準**の正規化座標なので、
 /// 描画・書き出しへ渡す前にこの写像で合成フレーム基準へ移す必要がある
 /// （`remap(_:clipID:)`）。無変換タイムライン（単一フォーマット）では全クリップが
 /// 単位矩形になり恒等写像になる＝従来挙動と一致する。
+/// **クリップの向き（`ClipOrientation`）もここに入る。** 素材フレームの正規化座標は
+/// 「向きを掛ける → 配置矩形へ収める」の順で合成フレームへ写る。この順序は映像側
+/// （`VideoCompositionFactory.fitTransform` が `preferredTransform → 向き → 配置`
+/// の順に畳む）と同じでなければならない。**向きを映像にだけ掛けてここへ入れ忘れると、
+/// 顔・矩形モザイクが素材からずれて素通しになる。**
 public struct TimelineRenderLayout: Equatable, Sendable {
     /// 全面（レターボックスなし）を表す単位矩形。
     public static let unitRect = CGRect(x: 0, y: 0, width: 1, height: 1)
@@ -41,11 +76,20 @@ public struct TimelineRenderLayout: Equatable, Sendable {
     /// 未登録のクリップは単位矩形（全面）として扱う。
     public let placements: [UUID: CGRect]
 
-    /// 全クリップが合成フレーム全面（レターボックスなし）の恒等レイアウト。
+    /// クリップ id → 向き。未登録は無変換（`ClipOrientation.identity`）。
+    ///
+    /// **配置矩形（`placements`）は「向きを掛けた後の表示サイズ」で計算されていること。**
+    /// 90 度回転で縦横が入れ替わるので、回転前のサイズでアスペクトフィットすると
+    /// レターボックスの位置が合わず、映像とモザイクが食い違う。
+    public let orientations: [UUID: ClipOrientation]
+
+    /// 全クリップが合成フレーム全面（レターボックスなし）・無変換の恒等レイアウト。
     public static let identity = TimelineRenderLayout(placements: [:])
 
-    public init(placements: [UUID: CGRect]) {
+    public init(placements: [UUID: CGRect],
+                orientations: [UUID: ClipOrientation] = [:]) {
         self.placements = placements
+        self.orientations = orientations
     }
 
     /// クリップの配置矩形（未登録は単位矩形）。
@@ -54,12 +98,20 @@ public struct TimelineRenderLayout: Equatable, Sendable {
         return rect
     }
 
+    /// クリップの向き（未登録は無変換）。
+    public func orientation(for clipID: UUID?) -> ClipOrientation {
+        guard let clipID, let orientation = orientations[clipID] else { return .identity }
+        return orientation
+    }
+
     /// 素材フレーム基準の正規化ランドマークを、合成フレーム基準へ写す。
-    /// 配置が全面（恒等）のときは値をそのまま返す（浮動小数点の再計算誤差も入れない）。
+    /// 向き → 配置矩形の順に適用する。どちらも恒等なら値をそのまま返す
+    /// （浮動小数点の再計算誤差も入れない）。
     public func remap(_ sets: [FaceLandmarkSet], clipID: UUID?) -> [FaceLandmarkSet] {
         let rect = placement(for: clipID)
-        guard rect != Self.unitRect else { return sets }
-        return sets.map { $0.remapped(into: rect) }
+        let orientation = orientation(for: clipID)
+        guard rect != Self.unitRect || !orientation.isIdentity else { return sets }
+        return sets.map { $0.oriented(orientation).remapped(into: rect) }
     }
 
     /// 合成フレーム基準の正規化ランドマークを、素材フレーム基準へ逆写像する
@@ -75,23 +127,47 @@ public struct TimelineRenderLayout: Equatable, Sendable {
     /// **矩形版（`inverseRemap(_ rect:clipID:)`）と違い、黒帯へのはみ出しを切り取らない。**
     /// 顔のランドマークは顔の輪郭より外へ出ることがあり、切り取ると顔が痩せて
     /// モザイクが小さくなる＝露出が増える方向へ倒れる。安全側は「素直に逆写像する」。
+    ///
+    /// **向きも戻すこと。** `remap` は「向き → 配置」の順で掛けるので、逆は
+    /// 「配置の逆 → 向きの逆」でなければならない（矩形版と同じ順序）。
+    /// 片方だけ戻すと、回したクリップで往復が成立せず顔が素通しになる。
+    /// この 2 つは別々の機能として実装されたため、**マージで黙って食い違った前科がある。**
     public func inverseRemap(_ sets: [FaceLandmarkSet], clipID: UUID?) -> [FaceLandmarkSet] {
         let rect = placement(for: clipID)
-        guard rect != Self.unitRect else { return sets }
+        let orientation = orientation(for: clipID)
+        guard rect != Self.unitRect || !orientation.isIdentity else { return sets }
         guard rect.width > 0, rect.height > 0 else { return sets }
-        return sets.map { $0.unmapped(from: rect) }
+        return sets.map { $0.unmapped(from: rect).oriented(orientation.inverted) }
     }
 
     /// 素材フレーム基準の正規化矩形を、合成フレーム基準へ写す
     /// （ランドマークの `remap` と同じ写像を矩形に適用したもの。`inverseRemap` の対）。
-    /// 配置が全面（恒等）のときは値をそのまま返す（再計算誤差も入れない）。
+    /// 配置・向きがどちらも恒等のときは値をそのまま返す（再計算誤差も入れない）。
     public func remap(_ rect: CGRect, clipID: UUID?) -> CGRect {
         let place = placement(for: clipID)
-        guard place != Self.unitRect else { return rect }
-        return CGRect(x: place.minX + rect.minX * place.width,
-                      y: place.minY + rect.minY * place.height,
-                      width: rect.width * place.width,
-                      height: rect.height * place.height)
+        let oriented = orientation(for: clipID).map(rect)
+        guard place != Self.unitRect else { return oriented }
+        return CGRect(x: place.minX + oriented.minX * place.width,
+                      y: place.minY + oriented.minY * place.height,
+                      width: oriented.width * place.width,
+                      height: oriented.height * place.height)
+    }
+
+    /// 素材フレーム基準の**ピクセル空間の傾き**（ラジアン・時計回り）を合成フレーム基準へ写す。
+    ///
+    /// レターボックス（`placements`）は素材の縦横比を保った等方変換なので角度を変えないが、
+    /// **向き（回転・反転）は角度を変える**（`ObjectMaskPlacement.angle` の doc 参照）。
+    public func remapAngle(_ angle: Double, clipID: UUID?) -> Double {
+        let orientation = orientation(for: clipID)
+        guard !orientation.isIdentity else { return angle }
+        return orientation.mapAngle(angle)
+    }
+
+    /// `remapAngle(_:clipID:)` の逆写像（画面で指定された傾きを素材基準へ戻す）。
+    public func inverseRemapAngle(_ angle: Double, clipID: UUID?) -> Double {
+        let orientation = orientation(for: clipID)
+        guard !orientation.isIdentity else { return angle }
+        return orientation.inverseMapAngle(angle)
     }
 
     /// 合成フレーム基準の正規化矩形を、素材フレーム基準へ逆写像する（`remap` の対）。
@@ -108,17 +184,23 @@ public struct TimelineRenderLayout: Equatable, Sendable {
     /// 呼び出し側は「この素材には対応する領域が無い」として走査対象から外す
     /// （潰れた矩形で素材の端を誤検索しない）。
     /// 配置が全面（恒等）のときは値をそのまま返す（再計算誤差も入れない）。
+    ///
+    /// **向きも逆に戻す**（配置の逆写像 → 向きの逆写像の順。`remap` と逆順）。
+    /// ユーザーが画面に描いた矩形は「回った後の絵」の上に描かれているので、
+    /// 向きを戻さずに保存すると素材上の別の場所を指す。
     public func inverseRemap(_ rect: CGRect, clipID: UUID?) -> CGRect? {
         let place = placement(for: clipID)
-        guard place != Self.unitRect else { return rect }
+        let orientation = orientation(for: clipID)
+        guard place != Self.unitRect else { return orientation.inverseMap(rect) }
         guard place.width > 0, place.height > 0 else { return nil }
         let clipped = rect.standardized.intersection(place)
         guard !clipped.isNull, clipped.width > 0, clipped.height > 0 else { return nil }
         let originX = min(max((clipped.minX - place.minX) / place.width, 0), 1)
         let originY = min(max((clipped.minY - place.minY) / place.height, 0), 1)
-        return CGRect(x: originX,
-                      y: originY,
-                      width: min(clipped.width / place.width, 1 - originX),
-                      height: min(clipped.height / place.height, 1 - originY))
+        let inPlacement = CGRect(x: originX,
+                                 y: originY,
+                                 width: min(clipped.width / place.width, 1 - originX),
+                                 height: min(clipped.height / place.height, 1 - originY))
+        return orientation.inverseMap(inPlacement)
     }
 }
