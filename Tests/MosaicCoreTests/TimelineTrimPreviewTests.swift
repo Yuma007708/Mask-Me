@@ -116,7 +116,7 @@ final class TimelineTrimPreviewTests: XCTestCase {
     func test_previewApplySpans_shiftsOnlyFollowingClips() {
         let layouts = threeClipLayouts()
         let spans = layouts.map { layout in
-            TimelineApplySpan(rangeID: UUID(), clipID: layout.clipID,
+            TimelineApplySpan(rangeID: UUID(), clipID: layout.clipID, kind: .mosaic,
                               start: layout.bandStart + 0.5, end: layout.bandEnd - 0.5)
         }
         let preview = TimelineBandLayout.previewApplySpans(spans: spans, layouts: layouts,
@@ -134,7 +134,7 @@ final class TimelineTrimPreviewTests: XCTestCase {
     func test_previewApplySpans_startEdgeMovesGrabbedClipContentAndClamps() {
         let layouts = threeClipLayouts()
         let rangeID = UUID()
-        let spans = [TimelineApplySpan(rangeID: rangeID, clipID: layouts[1].clipID, start: 2, end: 4)]
+        let spans = [TimelineApplySpan(rangeID: rangeID, clipID: layouts[1].clipID, kind: .mosaic, start: 2, end: 4)]
         let preview = TimelineBandLayout.previewApplySpans(spans: spans, layouts: layouts,
                                                            trimmingClipID: layouts[1].clipID,
                                                            edge: .start, effectiveDeltaSeconds: 0.5)
@@ -146,7 +146,7 @@ final class TimelineTrimPreviewTests: XCTestCase {
     /// `.end` を内向きに縮めたとき、掴んだクリップのスパンはプレビュー帯の右端で止まる。
     func test_previewApplySpans_endEdgeClampsGrabbedClipToPreviewBand() {
         let layouts = threeClipLayouts()
-        let spans = [TimelineApplySpan(rangeID: UUID(), clipID: layouts[1].clipID, start: 2.2, end: 4)]
+        let spans = [TimelineApplySpan(rangeID: UUID(), clipID: layouts[1].clipID, kind: .mosaic, start: 2.2, end: 4)]
         let preview = TimelineBandLayout.previewApplySpans(spans: spans, layouts: layouts,
                                                            trimmingClipID: layouts[1].clipID,
                                                            edge: .end, effectiveDeltaSeconds: -0.8)
@@ -157,7 +157,7 @@ final class TimelineTrimPreviewTests: XCTestCase {
     /// `layouts` に載っていない clipID のスパン・差分 0 は素通し。
     func test_previewApplySpans_identityCases() {
         let layouts = threeClipLayouts()
-        let stranger = TimelineApplySpan(rangeID: UUID(), clipID: UUID(), start: 0, end: 1)
+        let stranger = TimelineApplySpan(rangeID: UUID(), clipID: UUID(), kind: .mosaic, start: 0, end: 1)
         let spans = [stranger]
         XCTAssertEqual(TimelineBandLayout.previewApplySpans(spans: spans, layouts: layouts,
                                                             trimmingClipID: layouts[0].clipID,
@@ -172,7 +172,7 @@ final class TimelineTrimPreviewTests: XCTestCase {
     /// `isEdgeAdjustable`（写真クリップのハンドル抑止）はシフトで失われない。
     func test_previewApplySpans_preservesEdgeAdjustableFlag() {
         let layouts = threeClipLayouts()
-        let spans = [TimelineApplySpan(rangeID: UUID(), clipID: layouts[2].clipID,
+        let spans = [TimelineApplySpan(rangeID: UUID(), clipID: layouts[2].clipID, kind: .mosaic,
                                        start: 4.2, end: 5.8, isEdgeAdjustable: false)]
         let preview = TimelineBandLayout.previewApplySpans(spans: spans, layouts: layouts,
                                                            trimmingClipID: layouts[0].clipID,

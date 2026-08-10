@@ -77,9 +77,31 @@ final class TimelineInvariantFuzzTests: XCTestCase {
 
         // 適用区間は生きているクリップだけを指し、写真は必ず [0, ...) から始まること。
         let clipIDs = Set(state.clips.map(\.id))
+        let photoSourceIDs = state.photoSourceIDs
         for range in state.applyRanges {
             XCTAssertTrue(clipIDs.contains(range.clipID),
                           "適用区間が消えたクリップを指している: \(context)")
+            XCTAssertTrue(range.sourceStart.isFinite && range.sourceEnd.isFinite,
+                          "適用区間の端が非有限: \(context)")
+            XCTAssertLessThan(range.sourceStart, range.sourceEnd,
+                              "長さ 0 以下の適用区間が残っている: \(context)")
+            if photoSourceIDs.contains(range.sourceID) {
+                // 写真の素材時刻は常に 0 へ丸められるので、`sourceStart > 0` の区間は
+                // ゲートに**絶対にヒットしない**（帯だけ出てモザイクが消える I1 違反）。
+                XCTAssertEqual(range.sourceStart, 0, accuracy: 1e-9,
+                               "写真クリップの区間が 0 から始まっていない: \(context)")
+            }
+        }
+
+        // **同じクリップの適用区間どうしは重ならない**（マージ正規化の契約）。
+        // 重なりを許すと、端ドラッグ・移動で片方だけを掴んだときに、見えている帯 1 本の
+        // 裏にもう 1 本が隠れて「消したはずの区間が残る」状態になる。
+        for (_, ranges) in Dictionary(grouping: state.applyRanges, by: \.clipID) {
+            let sorted = ranges.sorted { $0.sourceStart < $1.sourceStart }
+            for (index, range) in sorted.enumerated() where index > 0 {
+                XCTAssertGreaterThanOrEqual(range.sourceStart, sorted[index - 1].sourceEnd - 1e-9,
+                                            "同じクリップの適用区間が重なっている: \(context)")
+            }
         }
     }
 
@@ -132,6 +154,21 @@ final class TimelineInvariantFuzzTests: XCTestCase {
                 let from = random.double(0...total)
                 return state.addingApplyRange(fromCompositionTime: from,
                                               to: random.double(from...total))
+            }),
+            ("moveApplyRange", { state, _, random in
+                guard !state.applyRanges.isEmpty else { return state }
+                let target = state.applyRanges[random.next(state.applyRanges.count)]
+                return state.movingApplyRange(id: target.id, clipID: target.clipID,
+                                              byCompositionDelta: random.double(-6...6))
+            }),
+            ("replaceApplyRange", { state, _, random in
+                guard !state.applyRanges.isEmpty else { return state }
+                let target = state.applyRanges[random.next(state.applyRanges.count)]
+                let total = max(0.1, state.mapping.totalDuration)
+                let from = random.double(0...total)
+                let interval = CompositionInterval(start: from, end: random.double(from...total))
+                return state.replacingApplyRange(id: target.id, clipID: target.clipID,
+                                                 compositionInterval: interval)
             }),
             ("removeApplyRange", { state, _, random in
                 guard !state.applyRanges.isEmpty else { return state }
@@ -202,7 +239,14 @@ final class TimelineInvariantFuzzTests: XCTestCase {
             MosaicApplyGate.fullCoverRanges(for: state.clips, photoSourceIDs: state.photoSourceIDs))
 
         for step in 0..<120 {
-            switch random.next(5) {
+            switch random.next(6) {
+            case 5:
+                // 区間の移動（本体ドラッグの確定）も往復に含める。素材時刻アンカーが
+                // 移動後も正しく書き戻っていなければ、ここで往復が壊れる。
+                if let target = state.applyRanges.first {
+                    state = state.movingApplyRange(id: target.id, clipID: target.clipID,
+                                                   byCompositionDelta: random.double(-3...3))
+                }
             case 0: state = state.splitting(at: random.double(0...max(0.1, state.mapping.totalDuration)))
             case 1:
                 state = state.appending(

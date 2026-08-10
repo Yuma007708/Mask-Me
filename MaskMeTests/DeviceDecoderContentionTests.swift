@@ -203,6 +203,14 @@ final class DeviceDecoderContentionTests: XCTestCase {
 @MainActor
 private final class PlaybackFlag {
     var value = false
+
+    /// **`init` だけ `nonisolated`。** 生成はテスト本体（MainActor 外の `async` 関数）から
+    /// 行い、値の読み書きだけ `MainActor.run` を通す。これが無いと
+    /// 「main actor-isolated initializer cannot be called from outside of the actor」で
+    /// **実機ビルドだけがコンパイルできない**（このファイルは
+    /// `#if !targetEnvironment(simulator)` で囲ってあり、Simulator では丸ごと消えるため、
+    /// 常用の Simulator スイートでは一度も露呈しない）。
+    nonisolated init() {}
 }
 
 #endif

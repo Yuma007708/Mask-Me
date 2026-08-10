@@ -170,6 +170,21 @@ public struct TimelineJointLayout: Equatable, Sendable, Identifiable {
     }
 }
 
+/// タイムラインの帯へ乗るレイヤーの種類（コア層の識別子）。
+///
+/// **これは表示用の型ではない。** タイトル・アイコンなど UI 固有の見た目は
+/// `MaskMe/Views/TimelineLayerStackView.swift` の `TimelineLayerRowKind`
+/// （UI 専用。まだ中身が無い段の器も含む）が持つ。こちらはコア層が
+/// `TimelineApplySpan.kind` / `TimelineSelection` で「実体を持つレイヤーの種類」を
+/// 区別するためだけの型で、**まだ `.mosaic` しか無い**。
+///
+/// E2（BGM）/ E3（テキスト）でコレクションが増えたら case を足す。
+/// `TimelineSelection.prune` がこの型を `default` 無しの `switch` で網羅しているため、
+/// case を足すとその switch がコンパイルエラーになり、対応漏れがビルドで検出できる。
+public enum TimelineLayerKind: Equatable, Sendable, CaseIterable {
+    case mosaic
+}
+
 /// モザイク適用区間 1 本を、それが属するクリップへ写した合成時刻の区間。
 ///
 /// **1 本の `MosaicApplyRange` は最大 1 つのセグメントにしか写らない（不変条件 I2）。**
@@ -178,6 +193,10 @@ public struct TimelineJointLayout: Equatable, Sendable, Identifiable {
 public struct TimelineApplySpan: Equatable, Sendable, Identifiable {
     public let rangeID: UUID
     public let clipID: UUID
+    /// このセグメントが属するレイヤー種。**現時点では常に `.mosaic`**
+    /// （`TimelineBandLayout.applySpans` の入力が `MosaicApplyRange` のみのため）。
+    /// E2/E3 で音声・テキストのセグメントが同じ段の仕組みに乗るときの受け皿。
+    public let kind: TimelineLayerKind
     public let start: Double
     public let end: Double
     /// 端ドラッグ（区間の伸縮）を受け付けるか。
@@ -192,10 +211,20 @@ public struct TimelineApplySpan: Equatable, Sendable, Identifiable {
     public var id: String { "\(rangeID.uuidString)/\(clipID.uuidString)" }
     public var duration: Double { max(0, end - start) }
 
-    public init(rangeID: UUID, clipID: UUID, start: Double, end: Double,
+    /// 区間全体を掴んで平行移動できるか。
+    ///
+    /// **独立した保存プロパティにしない。** 現時点では「伸縮できる ⇔ 動かせる ⇔
+    /// 動画素材」が常に一致する（`TimelineItemDrag.snappedDraft` の
+    /// `guard span.isEdgeAdjustable else { return 入力そのまま }` が `.move` にも掛かる）。
+    /// 2 つを別々の保存値にすると「表示は動かせると言い、core は no-op を返す」という
+    /// 無言の失敗を作れてしまう。`isEdgeAdjustable` から導出する。
+    public var isMovable: Bool { isEdgeAdjustable }
+
+    public init(rangeID: UUID, clipID: UUID, kind: TimelineLayerKind, start: Double, end: Double,
                 isEdgeAdjustable: Bool = true) {
         self.rangeID = rangeID
         self.clipID = clipID
+        self.kind = kind
         self.start = start
         self.end = end
         self.isEdgeAdjustable = isEdgeAdjustable
@@ -283,6 +312,7 @@ public enum TimelineBandLayout {
                 result.append(TimelineApplySpan(
                     rangeID: range.id,
                     clipID: clip.id,
+                    kind: .mosaic,
                     start: span.start + (clipped.start - clip.sourceStart) / clip.rate,
                     end: span.start + (clipped.end - clip.sourceStart) / clip.rate,
                     isEdgeAdjustable: !photoSourceIDs.contains(clip.sourceID)))

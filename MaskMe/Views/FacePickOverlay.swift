@@ -52,7 +52,7 @@ struct FacePickOverlay: View {
             )
             .frame(width: rect.width, height: rect.height)
             // **見た目の枠は顔の大きさのまま、当たり判定だけ 44pt へ広げる**
-            // （`TimelineApplyTrackView.edgeHandle` と同じ手）。frame ごと広げると
+            // （`TimelineLayerTrackView.edgeHandle` と同じ手）。frame ごと広げると
             // 遠くの小さい顔に不釣り合いな大枠が描かれ、隣の顔まで覆う。
             .overlay(
                 Color.clear

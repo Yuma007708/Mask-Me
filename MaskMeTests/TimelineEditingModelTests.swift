@@ -56,6 +56,37 @@ final class TimelineEditingModelTests: XCTestCase {
         XCTAssertEqual(model.videoDuration, 10.0, accuracy: 1e-9)
     }
 
+    /// 実機報告の再現手当て: クリップを分割した直後、**別の（分割していない）クリップ**を
+    /// 選び直せること。View 層（`TimelineClipBandView` のタップ・トリムハンドルの
+    /// ヒットテスト）を経由しないモデル層だけの経路（`timelineSelection.selectClip` を
+    /// 直接呼ぶ）で検証する。ここが落ちれば選択の相互排他／`prune` 側の欠陥、
+    /// 通れば View 層（ジェスチャ・ヒットテスト）を疑う切り分けに使う。
+    func test_splitClip_thenSelectingAnotherClip_updatesSelection() {
+        let model = makeModel()
+        let source = model.currentSourceID
+        let first = TimelineClip(sourceID: source, sourceStart: 0, sourceEnd: 4)
+        let second = TimelineClip(sourceID: source, sourceStart: 4, sourceEnd: 8)
+        model.setClipsForTesting([first, second])
+        // first の中ほど（合成 1.0s）で分割する。first.id は前半へ引き継がれる
+        // （`TimelineState.splitting(at:)` の doc 参照）。
+        model.playbackPosition = 1.0 / 8.0
+        model.timelineSelection.selectClip(first.id)
+
+        model.splitClip(id: first.id)
+
+        XCTAssertEqual(model.clips.count, 3, "分割でクリップが3本になっていない")
+        XCTAssertEqual(model.timelineSelection.clipID, first.id,
+                       "分割直後は前半（id 継承）が選ばれたままのはず")
+
+        // 分割で新たに増えた・関係しない `second` を選び直す。
+        model.timelineSelection.selectClip(second.id)
+
+        XCTAssertEqual(model.timelineSelection.clipID, second.id,
+                       "分割後に別のクリップへ選択を移せていない（モデル層の欠陥）")
+        XCTAssertNil(model.timelineSelection.layer,
+                     "クリップ選択でレイヤー選択が残っている（相互排他の欠陥）")
+    }
+
     /// クリップ境界（先頭）での分割は no-op で、世代も進めないこと
     /// （無駄な rebuild・in-flight 破棄を起こさない）。
     func test_splitAtClipBoundary_isNoOpAndKeepsGeneration() {
@@ -896,6 +927,99 @@ final class TimelineEditingModelTests: XCTestCase {
                        "適用区間の編集後に composition と mapping の世代が揃わない")
     }
 
+    // MARK: - S13: モザイク適用区間の「移動」（本体ドラッグの確定）
+
+    /// 移動後も composition と mapping の世代が揃うこと（`setMosaicApplyRange` と同じ契約）。
+    /// undo 1 回で素材アンカー（`sourceStart` / `sourceEnd`）が完全に元へ戻ること。
+    func test_moveMosaicApplyRange_keepsGenerationAlignedAndIsUndoableExactly() async throws {
+        let url = try await makeTestVideo(seconds: 2.0)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let model = makeModel()
+        model.load(videoURL: url)
+        try await waitUntilLoaded(model)
+
+        model.addMosaicApplyRange(fromCompositionTime: 0.2, to: 0.6)
+        await model.awaitPendingTimelineRebuild()
+        let id = try XCTUnwrap(model.timeline.applyRanges.first).id
+        let clipID = try XCTUnwrap(model.clips.first).id
+        XCTAssertEqual(model.timeline.applyRanges[0].sourceStart, 0.2, accuracy: 1e-9)
+        XCTAssertEqual(model.timeline.applyRanges[0].sourceEnd, 0.6, accuracy: 1e-9)
+
+        model.moveMosaicApplyRange(id: id, clipID: clipID, byCompositionDelta: 0.3)
+        await model.awaitPendingTimelineRebuild()
+
+        XCTAssertEqual(model.timeline.applyRanges.count, 1)
+        XCTAssertEqual(model.timeline.applyRanges[0].sourceStart, 0.5, accuracy: 1e-9)
+        XCTAssertEqual(model.timeline.applyRanges[0].sourceEnd, 0.9, accuracy: 1e-9)
+        XCTAssertEqual(model.compositionGeneration, model.timelineGeneration,
+                       "区間移動後に composition と mapping の世代が揃わない")
+
+        model.undo()
+        XCTAssertEqual(model.timeline.applyRanges.count, 1)
+        XCTAssertEqual(model.timeline.applyRanges[0].sourceStart, 0.2, accuracy: 1e-9,
+                       "undo 1 回で素材アンカーが完全に元へ戻っていない")
+        XCTAssertEqual(model.timeline.applyRanges[0].sourceEnd, 0.6, accuracy: 1e-9,
+                       "undo 1 回で素材アンカーが完全に元へ戻っていない")
+    }
+
+    /// 移動しても、マージが起きない限り「帯の本数」（`TimelineBandLayout.applySpans`）と
+    /// 「有効な適用区間の本数」（`MosaicApplyGate.effectiveRanges` ＝ `effectiveApplyRanges`）が
+    /// 一致し続けること（不変条件 I1 が移動でも保たれる）。
+    func test_moveMosaicApplyRange_bandCountMatchesEffectiveRangeCount() throws {
+        let (model, clipA, _) = makeTwoClipModel()
+        model.addMosaicApplyRange(fromCompositionTime: 0, to: 1)
+        model.addMosaicApplyRange(fromCompositionTime: 2, to: 3)
+        XCTAssertEqual(model.timeline.applyRanges.count, 2, "前提が崩れている")
+
+        let movingID = try XCTUnwrap(
+            model.timeline.applyRanges.first { $0.sourceStart == 2 }).id
+
+        model.moveMosaicApplyRange(id: movingID, clipID: clipA.id, byCompositionDelta: 0.3)
+
+        XCTAssertEqual(model.timeline.applyRanges.count, 2, "無関係な区間とマージしてしまった")
+        let bandCount = TimelineBandLayout.applySpans(
+            ranges: model.timeline.applyRanges, mapping: model.mapping,
+            photoSourceIDs: model.timeline.photoSourceIDs).count
+        XCTAssertEqual(bandCount, model.effectiveApplyRanges.count)
+        XCTAssertEqual(bandCount, 2)
+        let moved = try XCTUnwrap(model.timeline.applyRanges.first { $0.sourceStart != 0 })
+        XCTAssertEqual(moved.sourceStart, 2.3, accuracy: 1e-9)
+        XCTAssertEqual(moved.sourceEnd, 3.3, accuracy: 1e-9)
+    }
+
+    /// 移動した先で別の区間と隣接・重複してマージされた場合でも、移動した位置に
+    /// （マージ後の）区間が解決できること。`VideoTimelineView.commitApplyMove` は移動確定後、
+    /// 掴んでいたセグメントの最終位置の中点で `TimelineBandLayout.applySpans` を引き直して
+    /// 選択を復元する（`reselectApplyRange` と同じ作法）ため、ここではその材料
+    /// （帯の本数・掴んでいた位置に帯が存在すること）を検証する。
+    func test_moveMosaicApplyRange_mergeLeavesReselectableSpanAtMovedPosition() throws {
+        let (model, clipA, _) = makeTwoClipModel()
+        model.addMosaicApplyRange(fromCompositionTime: 0, to: 1)
+        model.addMosaicApplyRange(fromCompositionTime: 1.5, to: 2.5)
+        XCTAssertEqual(model.timeline.applyRanges.count, 2, "前提が崩れている")
+
+        let movingID = try XCTUnwrap(
+            model.timeline.applyRanges.first { $0.sourceStart == 0 }).id
+
+        // [0,1) を +0.5 動かすと [0.5,1.5) になり、隣接する [1.5,2.5) とマージされる。
+        model.moveMosaicApplyRange(id: movingID, clipID: clipA.id, byCompositionDelta: 0.5)
+
+        XCTAssertEqual(model.timeline.applyRanges.count, 1, "隣接した区間とマージされていない")
+        let bandCount = TimelineBandLayout.applySpans(
+            ranges: model.timeline.applyRanges, mapping: model.mapping,
+            photoSourceIDs: model.timeline.photoSourceIDs).count
+        XCTAssertEqual(bandCount, model.effectiveApplyRanges.count)
+        XCTAssertEqual(bandCount, 1)
+
+        // 掴んでいたセグメントの最終位置（合成 [0.5, 1.5)）の中点で選択を引き直せること。
+        let near = (0.5 + 1.5) / 2
+        let spans = TimelineBandLayout.applySpans(
+            ranges: model.timeline.applyRanges, mapping: model.mapping,
+            photoSourceIDs: model.timeline.photoSourceIDs)
+        let reselected = spans.first { near >= $0.start && near < $0.end }
+        XCTAssertNotNil(reselected, "マージ後、移動先の位置に選択し直せる帯が無い")
+    }
+
     // MARK: - S10: モザイク適用区間の描画ゲート
 
     /// 素材時刻 `step` 刻みで顔を詰めた単一クリップのモデル（ゲート判定だけを見たいので
@@ -1461,25 +1585,29 @@ final class TimelineEditingModelTests: XCTestCase {
 
     // MARK: - S11: 適用区間の自動生成と「区間 0 本 = 全区間 OFF」
 
-    /// **新規読み込みでクリップ全体を覆う区間が 1 本だけ生成され、全時刻 ON になること。**
+    /// **掛ける操作を通した編集では、クリップ全体を覆う区間が 1 本だけできて全時刻 ON になること。**
     ///
-    /// 新仕様では区間 0 本 = 全区間 OFF なので、生成しないと新規プロジェクトが
-    /// 「どこにもモザイクが乗らない」状態で始まる。
-    func test_initialLoad_createsSingleFullCoverApplyRange() async throws {
+    /// 区間 0 本 = 全区間 OFF なので、掛ける操作の入口（`ensureApplyRangesExist`）が
+    /// 区間を作らないと「ON にしたのにどこにも乗らない」状態になる。
+    /// **新規読み込みの直後は区間 0 本**（レイヤーを出さない）で、それは
+    /// `test_newProject_startsWithNoApplyRangeLayer` が固定している。
+    func test_appliedProject_hasSingleFullCoverApplyRange() async throws {
         let url = try await makeTestVideo(seconds: 1.0)
         defer { try? FileManager.default.removeItem(at: url) }
         let model = makeModel()
         model.load(videoURL: url)
         try await waitUntilLoaded(model)
+        // 掛ける操作の入口（実アプリでは効果を ON にしたとき）を通す。
+        model.ensureApplyRangesExist()
 
-        XCTAssertEqual(model.timeline.applyRanges.count, 1, "新規読み込みで全体区間が作られていない")
+        XCTAssertEqual(model.timeline.applyRanges.count, 1, "掛ける操作の入口で全体区間が作られていない")
         let clip = try XCTUnwrap(model.clips.first)
         XCTAssertEqual(model.timeline.applyRanges[0].clipID, clip.id)
         XCTAssertEqual(model.timeline.applyRanges[0].sourceStart, clip.sourceStart, accuracy: 1e-12)
         XCTAssertEqual(model.timeline.applyRanges[0].sourceEnd, clip.sourceEnd, accuracy: 1e-12)
         XCTAssertTrue(model.timeline.validate())
         for t in stride(from: 0.0, to: model.mapping.totalDuration, by: 0.02) {
-            XCTAssertTrue(model.isMosaicActive(atComposition: t), "新規読み込み直後に OFF の時刻がある t=\(t)")
+            XCTAssertTrue(model.isMosaicActive(atComposition: t), "掛けているのに OFF の時刻がある t=\(t)")
         }
 
         // 区間を全削除 → 全時刻 OFF。
@@ -1498,7 +1626,318 @@ final class TimelineEditingModelTests: XCTestCase {
         XCTAssertFalse(model.isMosaicActive(atComposition: 0.5))
     }
 
-    /// 素材追加でも新クリップに全体区間が 1 本付くこと（既存クリップの区間は変わらない）。
+    // MARK: - S: クリップを選択しているときは、そのクリップだけに掛ける
+
+    /// 実機報告の再現: クリップを 2 本にして 1 本を選んでから掛ける操作をしたら、
+    /// 選んだクリップにだけ区間ができ、もう 1 本のクリップの時刻ではゲートが閉じていること。
+    func test_ensureApplyRangesExist_withClipSelected_onlyCoversSelectedClip() {
+        let model = makeModel()
+        let source = model.currentSourceID
+        let first = TimelineClip(sourceID: source, sourceStart: 0, sourceEnd: 4)
+        let second = TimelineClip(sourceID: source, sourceStart: 4, sourceEnd: 8)
+        model.setClipsForTesting([first, second])
+        model.timelineSelection.selectClip(second.id)
+
+        model.ensureApplyRangesExist()
+
+        XCTAssertEqual(model.timeline.applyRanges.count, 1,
+                       "選択中のクリップだけに絞ったはずが本数が違う")
+        let range = model.timeline.applyRanges[0]
+        XCTAssertEqual(range.clipID, second.id, "選んでいないクリップに区間ができている")
+        XCTAssertEqual(range.sourceStart, second.sourceStart, accuracy: 1e-12)
+        XCTAssertEqual(range.sourceEnd, second.sourceEnd, accuracy: 1e-12)
+
+        // 選んだクリップ（合成時刻 4...8）は ON、選んでいないクリップ（合成時刻 0...4）は OFF。
+        for t in stride(from: 4.0, to: 8.0, by: 0.1) {
+            XCTAssertTrue(model.isMosaicActive(atComposition: t), "選んだクリップなのに OFF の時刻がある t=\(t)")
+        }
+        for t in stride(from: 0.0, to: 4.0, by: 0.1) {
+            XCTAssertFalse(model.isMosaicActive(atComposition: t), "選んでいないクリップに掛かっている t=\(t)")
+        }
+    }
+
+    /// 何も選択せずに掛ける操作をしたら、従来どおり全クリップぶんの区間ができること
+    /// （選択機能を足す前の挙動の回帰）。
+    func test_ensureApplyRangesExist_withoutSelection_coversAllClips() {
+        let model = makeModel()
+        let source = model.currentSourceID
+        let first = TimelineClip(sourceID: source, sourceStart: 0, sourceEnd: 4)
+        let second = TimelineClip(sourceID: source, sourceStart: 4, sourceEnd: 8)
+        model.setClipsForTesting([first, second])
+        XCTAssertNil(model.timelineSelection.clipID, "前提: 何も選択していない")
+
+        model.ensureApplyRangesExist()
+
+        XCTAssertEqual(model.timeline.applyRanges.count, 2, "全クリップぶんの区間ができていない")
+        for t in stride(from: 0.0, to: 8.0, by: 0.1) {
+            XCTAssertTrue(model.isMosaicActive(atComposition: t), "選択なしなのに OFF の時刻がある t=\(t)")
+        }
+    }
+
+    /// 選択が消えたクリップを指している（存在しないクリップ id）場合は安全側の全クリップ
+    /// にフォールバックすること。`TimelineSelection.prune` が通常は刈るはずだが、
+    /// 入口側でも安全側に倒れることを固定する。
+    func test_ensureApplyRangesExist_withDanglingSelection_fallsBackToAllClips() {
+        let model = makeModel()
+        let source = model.currentSourceID
+        let first = TimelineClip(sourceID: source, sourceStart: 0, sourceEnd: 4)
+        let second = TimelineClip(sourceID: source, sourceStart: 4, sourceEnd: 8)
+        model.setClipsForTesting([first, second])
+        model.timelineSelection.selectClip(UUID())  // 存在しない id
+
+        model.ensureApplyRangesExist()
+
+        XCTAssertEqual(model.timeline.applyRanges.count, 2,
+                       "解決できない選択で全クリップへフォールバックしていない")
+    }
+
+    /// **別のクリップを選んで掛けたら、そのクリップにも区間ができる。**
+    ///
+    /// 判定の単位は「選んだクリップ」であって「全体」ではない。ここを
+    /// 「`applyRanges` が空のときだけ足す」にすると、A に掛けた後で B を選んで掛けても
+    /// 全体としては空でないため入口で弾かれ、**ユーザーには「掛けたのに反応しない」**
+    /// に見える（`ensureApplyRangesExist` の doc 参照）。
+    func test_ensureApplyRangesExist_withAnotherClipSelected_addsRangeForThatClip() {
+        let model = makeModel()
+        let source = model.currentSourceID
+        let first = TimelineClip(sourceID: source, sourceStart: 0, sourceEnd: 4)
+        let second = TimelineClip(sourceID: source, sourceStart: 4, sourceEnd: 8)
+        model.setClipsForTesting([first, second])
+        model.timelineSelection.selectClip(second.id)
+        model.ensureApplyRangesExist()
+        XCTAssertEqual(model.timeline.applyRanges.count, 1)
+
+        model.timelineSelection.selectClip(first.id)
+        model.ensureApplyRangesExist()
+
+        XCTAssertEqual(model.timeline.applyRanges.count, 2,
+                       "別のクリップを選んで掛けたのに区間が増えていない（掛けても無反応）")
+        XCTAssertEqual(Set(model.timeline.applyRanges.map(\.clipID)), [first.id, second.id])
+        for t in stride(from: 0.0, to: 8.0, by: 0.1) {
+            XCTAssertTrue(model.isMosaicActive(atComposition: t), "両方掛けたのに OFF の時刻がある t=\(t)")
+        }
+    }
+
+    /// **同じクリップで二度掛けても増えない**（重複した区間を作らない）。
+    func test_ensureApplyRangesExist_calledTwiceForSameClip_doesNotDuplicate() {
+        let model = makeModel()
+        let source = model.currentSourceID
+        let first = TimelineClip(sourceID: source, sourceStart: 0, sourceEnd: 4)
+        let second = TimelineClip(sourceID: source, sourceStart: 4, sourceEnd: 8)
+        model.setClipsForTesting([first, second])
+        model.timelineSelection.selectClip(second.id)
+        model.ensureApplyRangesExist()
+        let firstResult = model.timeline.applyRanges
+
+        model.ensureApplyRangesExist()
+
+        XCTAssertEqual(model.timeline.applyRanges, firstResult,
+                       "同じクリップで二度掛けたら区間が増えた（重複）")
+    }
+
+    /// 既存の不変条件（回帰）: **選択が無い**ときは、区間が 1 本でも残っていれば触らない。
+    /// 特定のクリップの区間を消したのは意図的な操作なので復活させない。
+    func test_ensureApplyRangesExist_withoutSelection_andExistingRange_doesNotAddMore() {
+        let model = makeModel()
+        let source = model.currentSourceID
+        let first = TimelineClip(sourceID: source, sourceStart: 0, sourceEnd: 4)
+        let second = TimelineClip(sourceID: source, sourceStart: 4, sourceEnd: 8)
+        model.setClipsForTesting([first, second])
+        model.timelineSelection.selectClip(second.id)
+        model.ensureApplyRangesExist()
+        XCTAssertEqual(model.timeline.applyRanges.count, 1)
+
+        model.timelineSelection.selectClip(nil)
+        model.ensureApplyRangesExist()
+
+        XCTAssertEqual(model.timeline.applyRanges.count, 1,
+                       "選択が無いのに区間が増えている（消したものが復活する）")
+        XCTAssertEqual(model.timeline.applyRanges[0].clipID, second.id,
+                       "既存区間の対象が入れ替わっている（触ってはいけない）")
+    }
+
+    /// **孤児区間だけが残った状態で掛け直したら、ちゃんと掛かること。**
+    ///
+    /// 区間は素材時刻アンカーなので、クリップをトリムすると区間がクリップの使用範囲と
+    /// 交差しなくなる（孤児区間）。孤児はデータとしては残るが帯にもゲートにも出ないので、
+    /// ユーザーから見れば「区間は 1 本も無い」。ここで入口の判定を生データ
+    /// （`timeline.applyRanges`）で行うと**掛け直しても入口で弾かれ、何も起きない**。
+    /// 判定は `effectiveApplyRanges` で行うこと（`ensureApplyRangesExist` の doc 参照）。
+    func test_ensureApplyRangesExist_withOnlyOrphanRange_recreatesRange() {
+        let model = makeModel()
+        let source = model.currentSourceID
+        let clip = TimelineClip(sourceID: source, sourceStart: 4, sourceEnd: 8)
+        model.setClipsForTesting([clip])
+        // クリップが使っている素材範囲 [4,8) と交差しない区間＝孤児。
+        setApplyRanges(model, [MosaicApplyRange(clipID: clip.id, sourceID: source,
+                                               sourceStart: 0, sourceEnd: 2)])
+        XCTAssertEqual(model.timeline.applyRanges.count, 1, "前提: 区間データは 1 本残っている")
+        XCTAssertTrue(model.effectiveApplyRanges.isEmpty, "前提が崩れている（孤児になっていない）")
+
+        model.ensureApplyRangesExist()
+
+        XCTAssertFalse(model.effectiveApplyRanges.isEmpty,
+                       "孤児区間だけ残った状態で掛け直しても無反応（帯もゲートも空のまま）")
+        for t in stride(from: 0.0, to: 4.0, by: 0.1) {
+            XCTAssertTrue(model.isMosaicActive(atComposition: t),
+                          "掛け直したのに OFF の時刻がある t=\(t)")
+        }
+    }
+
+    /// 同じ状況でクリップを選択している場合。**新しい区間を足すときに、そのクリップの
+    /// 孤児区間は捨てる。** 残すと、後でトリムを戻したとき孤児が生き返って今足した
+    /// 全域区間と重なる（同じ clipID に重複区間が並ぶ）。
+    func test_ensureApplyRangesExist_withSelectedClipHavingOnlyOrphanRange_dropsOrphan() {
+        let model = makeModel()
+        let source = model.currentSourceID
+        let clip = TimelineClip(sourceID: source, sourceStart: 4, sourceEnd: 8)
+        model.setClipsForTesting([clip])
+        setApplyRanges(model, [MosaicApplyRange(clipID: clip.id, sourceID: source,
+                                               sourceStart: 0, sourceEnd: 2)])
+        model.timelineSelection.selectClip(clip.id)
+
+        model.ensureApplyRangesExist()
+
+        XCTAssertEqual(model.timeline.applyRanges.count, 1,
+                       "孤児区間を残したまま足している（トリムを戻すと重複する）")
+        let range = model.timeline.applyRanges[0]
+        XCTAssertEqual(range.sourceStart, 4, accuracy: 1e-12, "新しい区間がクリップ全体を覆っていない")
+        XCTAssertEqual(range.sourceEnd, 8, accuracy: 1e-12)
+        for t in stride(from: 0.0, to: 4.0, by: 0.1) {
+            XCTAssertTrue(model.isMosaicActive(atComposition: t),
+                          "掛け直したのに OFF の時刻がある t=\(t)")
+        }
+    }
+
+    /// 既存の不変条件（回帰）: 全区間を削除して 0 本にすると、タイムライン全域でゲートが
+    /// 閉じていること（選択の有無に関わらず）。
+    func test_removingAllApplyRanges_closesGateAcrossWholeTimeline() {
+        let model = makeModel()
+        let source = model.currentSourceID
+        let first = TimelineClip(sourceID: source, sourceStart: 0, sourceEnd: 4)
+        let second = TimelineClip(sourceID: source, sourceStart: 4, sourceEnd: 8)
+        model.setClipsForTesting([first, second])
+        model.ensureApplyRangesExist()
+        XCTAssertEqual(model.timeline.applyRanges.count, 2)
+
+        for range in model.timeline.applyRanges {
+            model.removeMosaicApplyRange(id: range.id)
+        }
+
+        XCTAssertTrue(model.timeline.applyRanges.isEmpty)
+        for t in stride(from: 0.0, to: 8.0, by: 0.1) {
+            XCTAssertFalse(model.isMosaicActive(atComposition: t), "全削除したのに ON の時刻がある t=\(t)")
+        }
+    }
+
+    // MARK: - S: 再生位置に区間を足す導線（`addMosaicApplyRange`）
+
+    /// 再生位置に区間を足す操作（`VideoTimelineView.addApplyRangeAtPlayhead` が呼ぶ
+    /// `addMosaicApplyRange` そのもの）は、全域を覆う区間を作らないこと。
+    /// `defaultApplyRangeLength = 2.0` の短い区間が再生位置から伸びるだけで、
+    /// タイムライン全域（8 秒）を覆ってはならない。
+    func test_addMosaicApplyRange_atPlayhead_doesNotCoverWholeTimeline() {
+        let model = makeModel()
+        let source = model.currentSourceID
+        let first = TimelineClip(sourceID: source, sourceStart: 0, sourceEnd: 4)
+        let second = TimelineClip(sourceID: source, sourceStart: 4, sourceEnd: 8)
+        model.setClipsForTesting([first, second])
+        XCTAssertTrue(model.timeline.applyRanges.isEmpty, "前提: 区間 0 本から始める")
+
+        let defaultApplyRangeLength = 2.0
+        let playheadTime = 3.0
+        let end = min(playheadTime + defaultApplyRangeLength, model.mapping.totalDuration)
+        model.addMosaicApplyRange(fromCompositionTime: playheadTime, to: end)
+
+        // **2 本**になるのが正しい。区間は素材時刻アンカーで**クリップ単位**に持つので、
+        // クリップ境界（合成 4.0 秒）をまたぐ区間は 2 本に割れる（1 本を期待すると、
+        // 境界をまたいだときだけ落ちるテストになる）。
+        XCTAssertEqual(model.timeline.applyRanges.count, 2,
+                       "クリップ境界をまたぐ区間がクリップ単位に割れていない")
+        // 全域（8 秒）を覆っていないこと。
+        XCTAssertFalse(model.isMosaicActive(atComposition: 0.0), "先頭まで覆ってしまっている")
+        XCTAssertFalse(model.isMosaicActive(atComposition: 7.5), "末尾まで覆ってしまっている")
+        // 足した区間そのものは ON。
+        for t in stride(from: playheadTime, to: end, by: 0.1) {
+            XCTAssertTrue(model.isMosaicActive(atComposition: t), "足した区間なのに OFF の時刻がある t=\(t)")
+        }
+    }
+
+    // MARK: - 新規編集はレイヤー 0 本で始まる
+
+    /// 動画を開いただけでは**モザイクのレイヤー（適用区間）を出さない**こと。
+    ///
+    /// 以前は開いた瞬間に全域の区間が 1 本乗っていた。効果を何も足していないのに
+    /// レイヤーがあるのは編集アプリの流儀に反する
+    /// （ユーザー報告「新規編集でモザイクをレイヤーに出さないで」）。
+    func test_newProject_startsWithNoApplyRangeLayer() async throws {
+        let url = try await makeTestVideo(seconds: 1.0)
+        defer { try? FileManager.default.removeItem(at: url) }
+        // **既定のモデルを使う**（`makeModel()` は「掛けると決めた後」を再現するヘルパで、
+        // 読み込み完了時に区間を確保してしまう）。ここで見たいのは掛ける前の姿。
+        let model = MosaicEditorModel(mode: .video, recents: RecentItemsStore())
+        model.load(videoURL: url)
+        try await waitUntilLoaded(model)
+        XCTAssertFalse(model.faceMosaicOn, "動画モードの既定が ON になっている")
+
+        XCTAssertTrue(model.timeline.applyRanges.isEmpty,
+                      "動画を開いただけでモザイクのレイヤーが乗っている")
+        XCTAssertFalse(model.isMosaicActive(atComposition: 0.5))
+        XCTAssertTrue(model.timeline.validate())
+    }
+
+    /// **掛ける操作をした瞬間にレイヤーが現れること。**
+    ///
+    /// レイヤーを出さない代償として、区間 0 本 = 全区間 OFF のままだと
+    /// 「顔モザイクを ON にしたのに何も掛からない」になる。掛ける操作の入口
+    /// （`toggleDockEffect` → `ensureApplyRangesExist`）が繋がっているかを固定する。
+    /// **ここが切れると素顔が書き出しに残るので、レイヤーを出さない変更の対**である。
+    func test_turningFaceMosaicOn_createsTheLayer() async throws {
+        let url = try await makeTestVideo(seconds: 1.0)
+        defer { try? FileManager.default.removeItem(at: url) }
+        // 既定（顔モザイク OFF）から始める。`makeModel()` は既に ON なので、
+        // これで `toggleDockEffect` を呼ぶと**切る**方向になり、入口を通らない。
+        let model = MosaicEditorModel(mode: .video, recents: RecentItemsStore())
+        model.load(videoURL: url)
+        try await waitUntilLoaded(model)
+        XCTAssertTrue(model.timeline.applyRanges.isEmpty)
+
+        model.toggleDockEffect(.face)
+        XCTAssertTrue(model.faceMosaicOn, "ON になっていない（テストが切る方向に回っている）")
+
+        XCTAssertEqual(model.timeline.applyRanges.count, 1,
+                       "顔モザイクを ON にしてもレイヤーが現れない（＝どこにも掛からない）")
+        for t in stride(from: 0.0, to: model.mapping.totalDuration, by: 0.05) {
+            XCTAssertTrue(model.isMosaicActive(atComposition: t), "ON にしたのに OFF の時刻がある t=\(t)")
+        }
+    }
+
+    /// **まだ何も掛けていない編集**に素材を足しても、レイヤーは現れないこと。
+    /// ここで足すと「新規では出さない」を素材追加で破ることになる
+    /// （しかも足した素材にだけ掛かる、という読めない状態になる）。
+    func test_appendVideoClip_doesNotCreateLayerWhenNothingIsApplied() async throws {
+        let base = try await makeTestVideo(seconds: 1.0)
+        let added = try await makeTestVideo(seconds: 2.0)
+        defer {
+            try? FileManager.default.removeItem(at: base)
+            try? FileManager.default.removeItem(at: added)
+        }
+        // 掛ける前の姿を見るので既定のモデル（`makeModel()` は掛けた後を再現する）。
+        let model = MosaicEditorModel(mode: .video, recents: RecentItemsStore())
+        model.load(videoURL: base)
+        try await waitUntilLoaded(model)
+
+        await model.appendVideoClip(url: added)
+        await model.awaitPendingTimelineRebuild()
+
+        XCTAssertEqual(model.clips.count, 2, "素材が追加されていない")
+        XCTAssertTrue(model.timeline.applyRanges.isEmpty,
+                      "何も掛けていない編集に素材を足しただけでレイヤーが生えている")
+        XCTAssertTrue(model.timeline.validate())
+    }
+
+    /// **既にモザイクを使っている編集**へ素材を足したら、新クリップにも区間が付くこと
+    /// （既存クリップの区間は変わらない）。ここが抜けると追加素材だけ素通しになる。
     func test_appendVideoClip_addsFullCoverApplyRangeForNewClip() async throws {
         let base = try await makeTestVideo(seconds: 1.0)
         let added = try await makeTestVideo(seconds: 2.0)
@@ -1506,10 +1945,14 @@ final class TimelineEditingModelTests: XCTestCase {
             try? FileManager.default.removeItem(at: base)
             try? FileManager.default.removeItem(at: added)
         }
+        // `makeModel()` +`waitUntilLoaded` が「モザイクを掛けている編集」を再現する
+        // （＝レイヤーが 1 本ある状態。ヘルパの doc 参照）。
         let model = makeModel()
         model.load(videoURL: base)
         try await waitUntilLoaded(model)
+        model.ensureApplyRangesExist()
         let baseRanges = model.timeline.applyRanges
+        XCTAssertEqual(baseRanges.count, 1)
 
         await model.appendVideoClip(url: added)
         await model.awaitPendingTimelineRebuild()
@@ -1648,6 +2091,8 @@ final class TimelineEditingModelTests: XCTestCase {
         let model = makeModel()
         model.load(videoURL: base)
         try await waitUntilLoaded(model)
+        // 追加素材にも区間が付く前提（＝既にモザイクを掛けている編集）にする。
+        model.ensureApplyRangesExist()
         let firstSource = try XCTUnwrap(model.clips.first).sourceID
         // 元素材の顔（左上）を選択済みにしておく
         let existingFace = fakeFace(cx: 0.25, cy: 0.25)
@@ -3405,6 +3850,10 @@ final class PhotoClipDurationAndVolumeTests: XCTestCase {
         model.setClipsForTesting([TimelineClip(sourceID: model.currentSourceID,
                                                sourceStart: 0, sourceEnd: 5)])
         model.commitEdit()
+        // **「モザイクを掛けている編集」にしてから素材を足す。** 新規は区間 0 本
+        // （レイヤーを出さない）で始まり、素材追加は既に区間がある編集にしか
+        // 区間を足さないので、これが無いと追加した写真にも区間が付かない。
+        model.ensureApplyRangesExist()
 
         await model.appendPhotoClip(image: solidImage(width: 320, height: 240))
         await model.awaitPendingTimelineRebuild()
@@ -3450,6 +3899,8 @@ final class PhotoClipDurationAndVolumeTests: XCTestCase {
         model.setClipsForTesting([TimelineClip(sourceID: model.currentSourceID,
                                                sourceStart: 0, sourceEnd: 5)])
         model.commitEdit()
+        // 上と同じ理由で、先に「掛けている編集」にしておく。
+        model.ensureApplyRangesExist()
         await model.appendPhotoClip(image: solidImage(width: 320, height: 240))
         await model.awaitPendingTimelineRebuild()
 

@@ -355,6 +355,62 @@ public enum MosaicApplyGate {
         return merged(result)
     }
 
+    /// 掴んだセグメント（`rangeID` × `clipID`）を、同一クリップ内で合成時刻換算 `delta` 秒だけ動かす。
+    ///
+    /// **`ranges(replacingRangeID:...)` への薄いラッパ。** 判定の二重実装を避けるため、
+    /// このセグメントの現在の合成時刻区間を求め、`delta` 分だけ平行移動し、クリップの
+    /// 合成区間 [span.start, span.end) でクランプ（分裂させず平行移動のままクランプ）してから
+    /// `ranges(replacingRangeID:...)` に渡すだけで実装する。素材時刻への写像・丸め・
+    /// マージは全て `ranges(replacingRangeID:...)` が担う（写像してから丸める、の契約はそちらで
+    /// 保たれる）。
+    ///
+    /// - クリップを跨ぐ移動はしない。移動先がクリップの合成区間からはみ出す場合は
+    ///   境界へクランプする（`clipID` アンカーが変わる分裂を避けるため。仕様として
+    ///   「移動はクリップ内に閉じる」）。
+    /// - `delta == 0`（または非有限）は `existing` をそのまま返す（undo 履歴を汚さない）。
+    /// - 写真クリップ由来の区間（`photoSourceIDs` に載っている素材）は移動 no-op
+    ///   （区間は常にクリップ全体を覆うため動かす意味がない）。
+    /// - 次の場合も `existing` をそのまま返す（他の編集操作と同じ「失敗時は無変更」契約）:
+    ///   `rangeID` / `clipID` が不在、両者の素材が食い違う、当該クリップの使用範囲と
+    ///   区間が交差しない。
+    public static func ranges(movingRangeID id: UUID,
+                              clipID: UUID,
+                              byCompositionDelta delta: Double,
+                              mapping: TimelineMapping,
+                              existing: [MosaicApplyRange],
+                              photoSourceIDs: Set<UUID> = []) -> [MosaicApplyRange] {
+        guard delta.isFinite, delta != 0,
+              let index = existing.firstIndex(where: { $0.id == id }),
+              let span = mapping.clipSpans.first(where: { $0.clip.id == clipID }),
+              existing[index].clipID == clipID,
+              !photoSourceIDs.contains(span.clip.sourceID)
+        else { return existing }
+        let range = existing[index]
+        let clip = span.clip
+        // 当該クリップが使っている素材区間（= 掴んだセグメントの実体）を合成時刻へ写す。
+        let occupiedStart = max(range.sourceStart, clip.sourceStart)
+        let occupiedEnd = min(range.sourceEnd, clip.sourceEnd)
+        guard occupiedStart < occupiedEnd else { return existing }
+        let compositionStart = span.start + (occupiedStart - clip.sourceStart) / clip.rate
+        let compositionEnd = span.start + (occupiedEnd - clip.sourceStart) / clip.rate
+        var newStart = compositionStart + delta
+        var newEnd = compositionEnd + delta
+        // クリップを跨がないよう、長さを保ったまま平行移動でクランプする（分裂させない）。
+        if newStart < span.start {
+            let adjust = span.start - newStart
+            newStart += adjust
+            newEnd += adjust
+        }
+        if newEnd > span.end {
+            let adjust = newEnd - span.end
+            newStart -= adjust
+            newEnd -= adjust
+        }
+        return ranges(replacingRangeID: id, clipID: clipID,
+                      compositionInterval: CompositionInterval(start: newStart, end: newEnd),
+                      mapping: mapping, existing: existing, photoSourceIDs: photoSourceIDs)
+    }
+
     /// 指定した id の区間を取り除く。見つからない場合は変更なし。
     public static func removingRange(id: UUID, from ranges: [MosaicApplyRange]) -> [MosaicApplyRange] {
         ranges.filter { $0.id != id }

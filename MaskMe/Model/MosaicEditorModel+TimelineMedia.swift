@@ -63,7 +63,12 @@ extension MosaicEditorModel {
             let clip = TimelineClip(sourceID: sourceID, sourceStart: 0,
                                     sourceEnd: min(requested, encoded.duration))
             applyTimelineEdit {
-                $0.appending(clip: clip, source: TimelineSource(id: sourceID, kind: .photo))
+                $0.appending(clip: clip, source: TimelineSource(id: sourceID, kind: .photo),
+                             // **モザイクを使っている編集にだけ区間を足す。**
+                             // 区間 0 本 = まだ何も掛けていない編集なので、素材を足した
+                             // だけでレイヤーが生えては「新規ではレイヤーを出さない」を
+                             // 素材追加で破ることになる（しかも足した素材にだけ掛かる）。
+                             coveringWithApplyRange: !$0.applyRanges.isEmpty)
             }
         } catch {
             errorMessage = "写真の追加に失敗しました"
@@ -207,7 +212,10 @@ extension MosaicEditorModel {
         await seedVideoDetection(asset: asset, sourceID: sourceID)
         let clip = TimelineClip(sourceID: sourceID, sourceStart: 0, sourceEnd: rawSeconds)
         applyTimelineEdit {
-            $0.appending(clip: clip, source: TimelineSource(id: sourceID, kind: .video))
+            // 区間を足すのは「既にモザイクを使っている編集」のときだけ
+            // （`appendPhotoClip` と同じ理由。あちらの doc 参照）。
+            $0.appending(clip: clip, source: TimelineSource(id: sourceID, kind: .video),
+                         coveringWithApplyRange: !$0.applyRanges.isEmpty)
         }
     }
 

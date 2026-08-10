@@ -18,6 +18,7 @@ struct TimelineClipBandView: View {
 
     @ObservedObject var model: MosaicEditorModel
     @ObservedObject var thumbnails: TimelineThumbnailStore
+    @ObservedObject var waveforms: TimelineWaveformStore
     let geometry: TimelineGeometry
     let layouts: [TimelineClipLayout]
     /// 吸着候補（`TimelineSnap.candidates`）の材料。
@@ -62,7 +63,7 @@ struct TimelineClipBandView: View {
 
     var body: some View {
         ZStack(alignment: .topLeading) {
-            Color.white.opacity(0.06)
+            TimelinePalette.clipBandBackground
                 .frame(height: TimelineMetrics.clipHeight)
                 // 帯の空白タップで選択解除（目盛り帯には付けない。あちらは
                 // `DragGesture(minimumDistance: 0)` がタップも拾うスクラブ帯なので誤爆する）。
@@ -117,7 +118,15 @@ struct TimelineClipBandView: View {
 
         ZStack(alignment: .topLeading) {
             thumbnailStrip(layout, band: band, width: width)
-            badges(layout)
+            // バッジと尺をサムネイルの上に読ませるための下敷き。**下端だけ**に敷く
+            // （全面に敷くとコマの内容が沈む）。素のサムネの上に白文字を置くと、
+            // 明るいコマで文字が消える。
+            LinearGradient(colors: [.clear, .black.opacity(0.55)],
+                           startPoint: .center, endPoint: .bottom)
+                .frame(width: max(width, 2), height: TimelineMetrics.clipHeight)
+                .allowsHitTesting(false)
+            waveformOverlay(layout, band: band, width: width)
+            badges(layout, width: width, duration: band.end - band.start)
         }
         .frame(width: max(width, 2), height: TimelineMetrics.clipHeight, alignment: .topLeading)
         .clipShape(RoundedRectangle(cornerRadius: TimelineMetrics.cornerRadius))
@@ -126,17 +135,31 @@ struct TimelineClipBandView: View {
         // 選択されているのか属性が付いているのかが読めなかった。
         .overlay(
             RoundedRectangle(cornerRadius: TimelineMetrics.cornerRadius)
-                .strokeBorder(isSelected ? Color.white : Color.white.opacity(0.25),
-                              lineWidth: isSelected ? 2 : 0.5)
+                .strokeBorder(isSelected ? TimelinePalette.selection : TimelinePalette.clipOutline,
+                              lineWidth: isSelected ? 2 : 1)
         )
         .overlay(alignment: .leading) { if isSelected { trimHandle(.start, layout) } }
         .overlay(alignment: .trailing) { if isSelected { trimHandle(.end, layout) } }
-        .opacity(isReordering ? 0.75 : 1)
+        // 並べ替え中の 1 本だけを持ち上げる。透かすだけだと、掴んだ帯が
+        // 下の帯と重なった瞬間にどちらを動かしているのか分からなくなる。
+        .shadow(color: .black.opacity(isReordering ? 0.6 : 0.35),
+                radius: isReordering ? 8 : 2, y: isReordering ? 4 : 1)
+        .opacity(isReordering ? 0.85 : 1)
+        .scaleEffect(isReordering ? 1.03 : 1)
+        .animation(.easeOut(duration: 0.12), value: isReordering)
+        // **当たり判定と印は `.offset` より前に置くこと。** 後ろだと当たり判定が元の位置に
+        // 取り残され、2 本目以降が「見えているのに触れない」（`TimelineClipSelectionUITests`）。
+        .contentShape(Rectangle())
+        .onTapGesture { selectedClipID = layout.clipID }
+        .overlay {
+            Color.clear
+                .allowsHitTesting(false)
+                .accessibilityIdentifier("timeline.clip")
+                .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
+        }
         .offset(x: geometry.x(forTime: band.start)
                 + geometry.x(forTime: reorderTranslation(layout) ?? 0))
         .zIndex(isReordering ? 2 : 0)
-        .contentShape(Rectangle())
-        .onTapGesture { selectedClipID = layout.clipID }
     }
 
     /// サムネイル列。**キャッシュ済みの画像だけを描く**（body から生成要求は出さない。
@@ -177,7 +200,7 @@ struct TimelineClipBandView: View {
     /// 常に 0 のままで、帯には現行 `sourceStart` から**先**のコマが並ぶのに、確定後に
     /// 実際に入るのはそれより**前**の素材だった（`.end` 側だけ `sourceDuration` で
     /// 先読みする非対称な対策が入っていた）。
-    private func previewClip(_ clip: TimelineClip, layout: TimelineClipLayout) -> TimelineClip {
+    func previewClip(_ clip: TimelineClip, layout: TimelineClipLayout) -> TimelineClip {
         var result = clip
         var bounds = (sourceStart: clip.sourceStart, sourceEnd: clip.sourceEnd)
         if let preview = trimPreview, preview.clipID == layout.clipID {
@@ -221,33 +244,6 @@ struct TimelineClipBandView: View {
         .frame(width: width, height: TimelineMetrics.clipHeight)
     }
 
-    @ViewBuilder
-    private func badges(_ layout: TimelineClipLayout) -> some View {
-        let clip = model.timeline.clips.first { $0.id == layout.clipID }
-        VStack(alignment: .leading, spacing: 2) {
-            Spacer(minLength: 0)
-            HStack(spacing: 3) {
-                if model.timeline.sourceKind(of: layout.sourceID) == .photo {
-                    badgeLabel("写真")
-                }
-                if let clip, abs(clip.rate - 1) > 1e-6 {
-                    badgeLabel(String(format: "%.2gx", clip.rate))
-                }
-                Spacer(minLength: 0)
-            }
-        }
-        .padding(3)
-    }
-
-    private func badgeLabel(_ text: String) -> some View {
-        Text(text)
-            .font(.system(size: 9, weight: .semibold))
-            .foregroundStyle(.white)
-            .padding(.horizontal, 3)
-            .padding(.vertical, 1)
-            .background(Color.black.opacity(0.6), in: RoundedRectangle(cornerRadius: 3))
-    }
-
     // MARK: - トリム
 
     /// 端の縦グリップ（＝トリムハンドル）。**見た目は `handleWidth`、当たり判定は 44pt**。
@@ -257,24 +253,33 @@ struct TimelineClipBandView: View {
     /// 親に `.clipped()` が無いので、はみ出したぶんもヒットテストに載る。
     private func trimHandle(_ edge: TimelineTrimEdge, _ layout: TimelineClipLayout) -> some View {
         RoundedRectangle(cornerRadius: 3)
-            .fill(Color.white)
+            .fill(TimelinePalette.selection)
             .frame(width: TimelineMetrics.handleWidth, height: TimelineMetrics.clipHeight)
             .overlay(
                 HStack(spacing: 3) {
                     ForEach(0..<2, id: \.self) { _ in
                         Capsule()
-                            .fill(Color.black.opacity(0.45))
-                            .frame(width: 2, height: 18)
+                            .fill(Color.black.opacity(0.55))
+                            .frame(width: 2, height: 20)
                     }
                 }
             )
+            .shadow(color: .black.opacity(0.45), radius: 2)
             .contentShape(Rectangle())
-            .overlay(
+            // **当たり判定は自分のクリップの内側へだけ広げる。**
+            //
+            // 中央揃え（既定）にすると 44pt の判定がつまみ（20pt）の左右へ 12pt ずつ
+            // はみ出し、**隣のクリップの上に乗る**。親に `.clipped()` が無いので
+            // そのままヒットテストに載り、境界付近をタップしても隣のクリップの
+            // `.onTapGesture` へ届かない ＝「分割したあと隣のクリップを選べない」に
+            // なる（実機で確認）。つまみは自分の帯の端にあるので、内側へ寄せれば
+            // 掴みやすさは変わらないまま越境だけが消える。
+            .overlay(alignment: edge == .start ? .leading : .trailing) {
                 Color.clear
                     .frame(width: TimelineMetrics.minimumTapTarget,
                            height: TimelineMetrics.clipHeight)
                     .contentShape(Rectangle())
-            )
+            }
             .highPriorityGesture(
                 DragGesture(minimumDistance: 1)
                     .updating($trimDraft) { value, draft, _ in
@@ -418,12 +423,22 @@ struct TimelineClipBandView: View {
     private var insertionIndicator: some View {
         if let x = insertionX {
             Rectangle()
-                .fill(Color.yellow)
+                .fill(TimelinePalette.structure)
                 .frame(width: 2, height: TimelineMetrics.clipHeight)
+                // 上下端の小さな爪。線だけだと、掴んだ帯の縁と見分けが付かない。
+                .overlay(alignment: .top) { insertionCap }
+                .overlay(alignment: .bottom) { insertionCap }
+                .shadow(color: .black.opacity(0.5), radius: 2)
                 .offset(x: x - 1)
                 .allowsHitTesting(false)
                 .zIndex(3)
         }
+    }
+
+    private var insertionCap: some View {
+        Circle()
+            .fill(TimelinePalette.structure)
+            .frame(width: 6, height: 6)
     }
 
     private var insertionX: Double? {

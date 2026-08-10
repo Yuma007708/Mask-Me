@@ -966,16 +966,24 @@ public final class MosaicEditorModel: ObservableObject {
             timeline = restore.timeline
         } else {
             sources = [currentSourceID: asset]
-            // **適用区間の自動生成はここ（新しいクリップが生まれる瞬間）だけ**（不変条件 I5）。
-            // 新仕様では区間 0 本 = 全区間 OFF なので、生成しないと新規プロジェクトが
-            // 「どこにもモザイクが乗らない」状態で始まる。
+            // **適用区間は作らない（レイヤーは空で始める）。**
+            //
+            // 以前はここで全域の区間を 1 本自動生成しており、動画を開いただけで
+            // タイムラインにモザイクのレイヤーが 1 本乗っている状態だった。
+            // 効果を何も足していないのにレイヤーがあるのは編集アプリの流儀に反する
+            // （ユーザー報告「新規編集でモザイクをレイヤーに出さないで」）。
+            //
+            // 区間 0 本 = 全区間 OFF なので、このままでは何も掛からない。**掛ける
+            // 操作の入口が `ensureApplyRangesExist()` で区間を作る**（顔モザイクを ON、
+            // 矩形を置く、等。`MosaicEditorModel+Dock` / `+ObjectMask` の呼び出し）。
+            // 「効果を足した瞬間にレイヤーが現れる」が新しい契約で、
+            // 顔探しを「掛けると決めてから」に寄せた読み込み手順とも揃う。
+            //
             // restore 分岐では**何もしない**: 旧データの変換は `TimelineState.init(from:)` で
             // 完了済みであり、ここで再生成すると「意図的に全削除した下書き」が復活する。
             let clip = TimelineClip(sourceID: currentSourceID, sourceStart: 0, sourceEnd: seconds)
             // 初期クリップは常に動画素材（写真モードはこの経路を通らない）。
-            timeline = TimelineState(clips: [clip],
-                                     applyRanges: MosaicApplyGate.fullCoverRanges(
-                                        for: [clip], photoSourceIDs: []))
+            timeline = TimelineState(clips: [clip], applyRanges: [])
         }
         // 直後の resetHistory() が「生成済みの状態」を履歴の基準にするので、
         // undo の起点も自動生成後の状態になる（自動生成が undo を汚さない）。

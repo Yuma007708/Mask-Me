@@ -103,4 +103,43 @@ final class TimelineSelectionTests: XCTestCase {
         selection.prune(against: TimelineState())
         XCTAssertTrue(selection.isEmpty)
     }
+
+    // MARK: - Step 4: 種を持つ選択（`TimelineLayerSelection`）
+
+    /// `selectLayer` 経由でもクリップの選択が外れる（`selectRange` shim と同じ相互排他）。
+    func test_selectLayer_clearsClip() {
+        var selection = TimelineSelection()
+        let clip = UUID()
+        selection.selectClip(clip)
+        selection.selectLayer(TimelineLayerSelection(kind: .mosaic, id: UUID()))
+        XCTAssertNil(selection.clipID, "レイヤーを選んだのにクリップの選択が残っている")
+    }
+
+    /// クリップを選ぶと `selectLayer` で選んだレイヤーの選択が外れる。
+    func test_selectClip_clearsLayer() {
+        var selection = TimelineSelection()
+        selection.selectLayer(TimelineLayerSelection(kind: .mosaic, id: UUID()))
+        selection.selectClip(UUID())
+        XCTAssertNil(selection.layer, "クリップを選んだのにレイヤーの選択が残っている")
+    }
+
+    /// `selectLayer` で選んだアイテムが消えると `prune` で落ちる。
+    func test_prune_dropsMissingLayerSelectedDirectly() {
+        var selection = TimelineSelection()
+        let clip = UUID(), alive = UUID(), dead = UUID()
+        selection.selectLayer(TimelineLayerSelection(kind: .mosaic, id: dead))
+        selection.prune(against: state(clipIDs: [clip], rangeIDs: [alive]))
+        XCTAssertNil(selection.layer, "消えたレイヤーを指したまま残っている")
+    }
+
+    /// すべての `TimelineLayerKind` について、存在しない id は `prune` で落ちること。
+    func test_prune_dropsMissingID_forEveryLayerKind() {
+        for kind in TimelineLayerKind.allCases {
+            var selection = TimelineSelection()
+            let clip = UUID()
+            selection.selectLayer(TimelineLayerSelection(kind: kind, id: UUID()))
+            selection.prune(against: state(clipIDs: [clip]))
+            XCTAssertNil(selection.layer, "kind=\(kind) で消えたレイヤーが刈られていない")
+        }
+    }
 }

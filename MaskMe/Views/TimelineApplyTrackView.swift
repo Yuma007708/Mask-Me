@@ -2,10 +2,11 @@ import MosaicCore
 import SwiftUI
 import UIKit
 
-// このファイルは適用区間トラックに加えて、**タイムライン UI 共通の語彙**
+// トラック本体（帯の描画・選択・端ドラッグ）は `TimelineLayerTrackView.swift` へ
+// 切り出した。このファイルには**タイムライン UI 共通の語彙**
 // （`TimelineMetrics` / `TimelineInteraction` / `TimelineTrimPreview` /
 // `TimelineTrimPreviewRelay` / `TimelineSnapHaptics`）と、クリップ帯の直上に積む
-// `TimelineJointLaneView` を置いている。いずれもクリップ帯トラックと適用区間トラックの
+// `TimelineJointLaneView` だけが残る。いずれもクリップ帯トラックとレイヤートラックの
 // 両方が使う（あるいは `TimelineClipBandView.swift` が file_length に張り付いたため
 // 逃がした）型で、本来は専用の .swift へ分けたいが、新規ファイルの追加には
 // `xcodegen generate`（= CocoaPods 統合の再構築）が要るため後続作業に回している。
@@ -17,9 +18,20 @@ enum TimelineMetrics {
     static let clipHeight: CGFloat = 60
     /// モザイク適用区間トラックの高さ。18pt では端ハンドル（8×18）が HIG の最小タップ目標
     /// 44×44pt を大きく下回っていた。28pt へ広げたうえで、ハンドルの**当たり判定だけ**を
-    /// 44×44 へ拡張して補う（`TimelineApplyTrackView.edgeHandle`）。
+    /// 44×44 へ拡張して補う（`TimelineLayerTrackView.edgeHandle`）。
     static let applyTrackHeight: CGFloat = 28
     static let trackSpacing: CGFloat = 4
+    /// レイヤー段 1 本の高さ。モザイク段（＝旧・適用区間トラック）と揃える
+    /// （揃えないと、同じ「上に載る段」なのに音声だけ厚い、という見え方になる）。
+    static let layerRowHeight: CGFloat = applyTrackHeight
+    /// レイヤー段の左端に置く固定アイコン列の幅。
+    static let layerRailWidth: CGFloat = 30
+    /// レイヤー段が見えている高さ。**2 段ぶん**。
+    ///
+    /// ここを段数ぶんに広げてはいけない。段は今後も増える（音声・テキスト・
+    /// キャプション…）ので、広げるとそのぶん必ずプレビューが縮む。
+    /// 見えるのは 2 段までにして、残りは縦スクロールで辿る（VLLO と同じ）。
+    static let layerViewportHeight: CGFloat = layerRowHeight * 2 + trackSpacing
     /// トリムハンドルの**見た目の幅**。適用区間の端ハンドルとも共通（操作感を揃えるため）。
     ///
     /// **当たり判定はこの幅ではなく `minimumTapTarget`（44pt）**。見た目を 44 まで太らせると
@@ -32,6 +44,17 @@ enum TimelineMetrics {
     /// 端ハンドルはトリムを優先させたいぶんだけ除ければよく、ハンドルの見た目の幅とは
     /// 変更理由が別なので独立した定数にしてある。
     static let reorderInset: CGFloat = 14
+    /// モザイク区間の本体ドラッグで「横（移動）」と「縦（段の送り）」を排他的に確定する
+    /// しきい値（px、累積 translation）。
+    ///
+    /// 段の高さ（`layerRowHeight` = 28pt）しかない領域で指は純粋な水平移動を作れないため、
+    /// 最初の動きだけで方向を 1 回に決め、以後は変えない。値は
+    /// **祖先の段送りジェスチャ（`layerScrollGesture`, `minimumDistance: 4`）より大きく**、
+    /// **この移動ジェスチャ自身の `DragGesture(minimumDistance: 1)`（祖先より先に認識を
+    /// 取るため `edgeHandle` と同じ値にしてある）より十分大きい** 6pt にした。
+    /// 4pt 以下だと祖先の段送りが実際に動き出す量より先に確定してしまい体感とずれ、
+    /// 1pt に近いと指の震え・タップの微小なブレだけで方向が決まってしまう。
+    static let applyMoveAxisLockThreshold: CGFloat = 6
     /// サムネイル 1 枚が占める幅。
     static let thumbnailSlotWidth: CGFloat = 44
     /// 継ぎ目ボタンの一辺。レーンの高さ（`jointLaneHeight(hasJoints:)`）と必ず揃えること
@@ -61,13 +84,16 @@ enum TimelineMetrics {
     ///
     /// **継ぎ目レーンとクリップ帯は `spacing: 0` の内側 VStack で 1 段として積む**
     /// （継ぎ目ボタンは帯の継ぎ目に付くので離さない）。したがって段間の余白は
-    /// 目盛り／[継ぎ目+帯]／適用区間の 2 箇所ぶんのままになる。
+    /// 目盛り／[継ぎ目+帯]／レイヤー段の 2 箇所ぶんのままになる。
+    ///
+    /// **レイヤー段は段数によらず `layerViewportHeight` で固定**（はみ出しは縦スクロール）。
+    /// 段が増えるたびにここが伸びると、そのぶんプレビューが縮んでいく。
     ///
     /// 継ぎ目レーンが可変（`jointLaneHeight(hasJoints:)`）なので、**プレイヘッドの縦線と
     /// スクロール容器へ渡す高さは必ずこの関数から採る**（別々に計算すると線が
     /// トラックからはみ出す／足りなくなる）。
     static func stackHeight(hasJoints: Bool) -> CGFloat {
-        rulerHeight + jointLaneHeight(hasJoints: hasJoints) + clipHeight + applyTrackHeight
+        rulerHeight + jointLaneHeight(hasJoints: hasJoints) + clipHeight + layerViewportHeight
             + trackSpacing * 2
     }
 }
@@ -76,7 +102,7 @@ enum TimelineMetrics {
 ///
 /// **ジェスチャ中はモデルを一切変更しない**。進行中の下書きは各トラックの
 /// `@GestureState`（`TimelineClipBandView.TrimDraft` / `ReorderDraft` /
-/// `TimelineApplyTrackView.ApplyDraft`）が持ち、描画専用に使う。
+/// `TimelineLayerTrackView.ApplyDraft`）が持ち、描画専用に使う。
 /// `@GestureState` はジェスチャがキャンセルされると**自動で初期値に戻る**ため、
 /// 「中断で下書きが取り残されて帯が伸びたまま」という状態が原理的に作れない
 /// （`@State` に持たせていた S9 初版は、横スクロールでの中断だけ回収経路が無かった）。
@@ -93,6 +119,11 @@ enum TimelineInteraction: Equatable {
     /// `clipID` はどのセグメントを掴んでいるかの識別（1 本の区間は複数クリップに
     /// またがって複数セグメントに見えるため）。確定もこのセグメント単位で行う。
     case applyEdge(rangeID: UUID, clipID: UUID, start: Double, end: Double)
+    /// モザイク適用区間の本体ドラッグ（平行移動）。`deltaSeconds` は合成時刻の移動量で、
+    /// `MosaicEditorModel.moveMosaicApplyRange(id:clipID:byCompositionDelta:)`
+    /// （`TimelineState.movingApplyRange`）へそのまま渡す。
+    /// `start` / `end` はドラッグ表示と同じ最終位置（確定後の選択引き直し用の目安）。
+    case applyMove(rangeID: UUID, clipID: UUID, deltaSeconds: Double, start: Double, end: Double)
 }
 
 /// クリップ帯のトリム下書きから導いた**表示専用**パラメータ（クランプ済み）。
@@ -112,7 +143,7 @@ struct TimelineTrimPreview: Equatable {
 /// クリップ帯のトリム下書き（表示専用の派生値）を**兄弟トラックへ中継**する箱。
 ///
 /// トリムの `@GestureState` は `TimelineClipBandView`（子）にあるため、そのままでは
-/// 兄弟の `TimelineApplyTrackView` へ流せない。かといって親（`VideoTimelineView`）の
+/// 兄弟の `TimelineLayerTrackView` へ流せない。かといって親（`VideoTimelineView`）の
 /// `@State` に持たせると、ドラッグ中 60Hz で**親の body が再評価**され、子のジェスチャが
 /// 作り直されて `@GestureState` が落ちる経路に乗る。
 ///
@@ -170,220 +201,6 @@ final class TimelineSnapHaptics {
     }
 }
 
-/// モザイク適用区間トラック（クリップ帯の下）。
-///
-/// **座標系**: UI 操作はすべて**合成時刻**で行い、保存は
-/// `MosaicApplyGate` / `TimelineState.addingApplyRange` が素材時刻アンカーへ写す。
-/// 表示は逆写像 `TimelineBandLayout.applySpans(ranges:mapping:)` の結果を描くだけで、
-/// この View は素材時刻を一切扱わない。
-///
-/// **1 区間は最大 1 セグメントにしか写らない**（不変条件 I2）。適用区間は S11 で
-/// `clipID` アンカーになり、`clipID` は一意だからである（旧仕様では同じ素材を使う
-/// クリップの数だけ同じ `rangeID` のセグメントが現れた）。確定は掴んだセグメント単位で
-/// 行い、差し替えは素材時刻で走る（クリップ使用範囲外の素材区間はコア層が温存する。
-/// `TimelineState.replacingApplyRange(id:clipID:compositionInterval:)` 参照）。
-///
-/// **写真クリップのセグメントには端ハンドルを出さない**
-/// （`TimelineApplySpan.isEdgeAdjustable == false`）。写真の素材時刻は常に 0 へ丸められ、
-/// 区間が必ずクリップ全体になるため端ドラッグが構造的に no-op になる。ハンドルを出すと
-/// 「掴んで動かせるのに指を離すと必ず元へ戻る」という無言の失敗になる。
-struct TimelineApplyTrackView: View {
-    /// 端ドラッグの下書き（ジェスチャ中だけ非 nil）。
-    /// `@GestureState` なのでキャンセルで自動的に初期値へ戻る。
-    struct ApplyDraft: Equatable {
-        let rangeID: UUID
-        let clipID: UUID
-        let start: Double
-        let end: Double
-    }
-
-    let geometry: TimelineGeometry
-    let spans: [TimelineApplySpan]
-    let totalDuration: Double
-    /// 吸着候補（`TimelineSnap.candidates`）の材料。
-    ///
-    /// **既定値を持たせないこと。** 省略できると「渡し忘れても動くが吸着だけ効かない」
-    /// という無言の劣化になる（S12 初版は既定値のまま未配線で、クリップ帯の端・
-    /// プレイヘッドへの吸着とトリム中のリップル追随が丸ごと効いていなかった）。
-    let layouts: [TimelineClipLayout]
-    let playheadTime: Double
-    /// クリップ帯のトリム下書きへの追随（リップル）。**表示専用**。
-    @ObservedObject var trimPreviewRelay: TimelineTrimPreviewRelay
-    @Binding var selectedRangeID: UUID?
-    let onCommit: (TimelineInteraction) -> Void
-
-    @GestureState private var draft: ApplyDraft?
-    /// 吸着ハプティクスの前回値保持（`TimelineSnapHaptics` の doc 参照）。
-    @State private var haptics = TimelineSnapHaptics()
-
-    /// 端ドラッグで潰さない最小の合成尺（秒）。
-    private static let minimumSpan: Double = 0.1
-
-    var body: some View {
-        ZStack(alignment: .topLeading) {
-            Rectangle()
-                .fill(Color.white.opacity(0.06))
-                .frame(width: max(geometry.width(forDuration: totalDuration), 1),
-                       height: TimelineMetrics.applyTrackHeight)
-            if displaySpans.isEmpty { emptyHint }
-            ForEach(displaySpans) { span in
-                spanView(span)
-            }
-        }
-        .frame(height: TimelineMetrics.applyTrackHeight, alignment: .topLeading)
-    }
-
-    /// 区間が 1 つも無いときに、この段が何の段かを示す。
-    ///
-    /// 薄い帯だけだと**空の段は存在しないのと同じ**に見え、「モザイクを掛ける
-    /// 区間をここに置ける」ことが読めない。ビューポート幅に依存させず左端へ置く
-    /// （この段は横スクロールする中身の一部なので、追えば必ず見つかる）。
-    private var emptyHint: some View {
-        Label("モザイク", systemImage: "squareshape.split.3x3")
-            .font(.system(size: 10, weight: .medium))
-            .foregroundStyle(.white.opacity(0.35))
-            .padding(.horizontal, 8)
-            .frame(height: TimelineMetrics.applyTrackHeight)
-            .allowsHitTesting(false)
-    }
-
-    /// 表示用スパン。クリップ帯のトリム下書き中は帯と同じ量だけ平行移動させる
-    /// （忘れると帯だけ動いて区間が置いていかれる）。
-    private var displaySpans: [TimelineApplySpan] {
-        guard let trimPreview = trimPreviewRelay.preview else { return spans }
-        return TimelineBandLayout.previewApplySpans(
-            spans: spans, layouts: layouts, trimmingClipID: trimPreview.clipID,
-            edge: trimPreview.edge, effectiveDeltaSeconds: trimPreview.effectiveDeltaSeconds)
-    }
-
-    @ViewBuilder
-    private func spanView(_ span: TimelineApplySpan) -> some View {
-        let bounds = displayBounds(span)
-        let width = geometry.width(forDuration: bounds.end - bounds.start)
-        let isSelected = selectedRangeID == span.rangeID
-
-        RoundedRectangle(cornerRadius: 3)
-            .fill(Color.accentColor.opacity(isSelected ? 0.85 : 0.5))
-            .overlay(
-                RoundedRectangle(cornerRadius: 3)
-                    .strokeBorder(isSelected ? Color.white : Color.clear, lineWidth: 1)
-            )
-            .frame(width: max(width, 3), height: TimelineMetrics.applyTrackHeight)
-            .overlay(alignment: .leading) { chipLabel(width: width, isSelected: isSelected) }
-            .overlay(alignment: .leading) {
-                if isSelected, span.isEdgeAdjustable { edgeHandle(span, edge: .start) }
-            }
-            .overlay(alignment: .trailing) {
-                if isSelected, span.isEdgeAdjustable { edgeHandle(span, edge: .end) }
-            }
-            .offset(x: geometry.x(forTime: bounds.start))
-            .contentShape(Rectangle())
-            .onTapGesture { selectedRangeID = span.rangeID }
-            .accessibilityIdentifier("timeline.applySpan")
-            .accessibilityLabel("モザイク区間")
-            .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
-    }
-
-    /// チップの中に置く名前。**幅で削る。**
-    ///
-    /// 狭い区間で文字がはみ出すと、隣の区間の上に文字だけが乗って区切りが読めなくなる。
-    /// アイコンすら入らない幅では何も出さない（`3pt` まで潰せる区間がある）。
-    /// 選択中は左端ハンドル（`handleWidth`）の下に潜るので、そのぶん右へ寄せる。
-    @ViewBuilder
-    private func chipLabel(width: CGFloat, isSelected: Bool) -> some View {
-        let leading = (isSelected ? TimelineMetrics.handleWidth : 0) + 4
-        if width >= leading + 52 {
-            Label("モザイク", systemImage: "squareshape.split.3x3")
-                .font(.system(size: 9, weight: .semibold))
-                .foregroundStyle(.white)
-                .padding(.leading, leading)
-                .allowsHitTesting(false)
-        } else if width >= leading + 16 {
-            Image(systemName: "squareshape.split.3x3")
-                .font(.system(size: 9, weight: .semibold))
-                .foregroundStyle(.white)
-                .padding(.leading, leading)
-                .allowsHitTesting(false)
-        }
-    }
-
-    /// 端ハンドル。見た目は `handleWidth`×28 のまま、**当たり判定だけ**を HIG の 44×44 へ広げる
-    /// （トラック高 28pt + 上下 8pt ずつ）。
-    ///
-    /// 親に `.clipped()` / `.clipShape` が無いことが前提（無いことは確認済み。
-    /// ヒットテストが frame の外へ本当に届くかは**実機確認事項**で、効かなければ
-    /// 28pt 化のぶんだけでも現状比 +56% になる）。
-    private func edgeHandle(_ span: TimelineApplySpan, edge: TimelineTrimEdge) -> some View {
-        Rectangle()
-            .fill(Color.white)
-            .frame(width: TimelineMetrics.handleWidth, height: TimelineMetrics.applyTrackHeight)
-            .contentShape(Rectangle())
-            .overlay(
-                Color.clear
-                    .frame(width: TimelineMetrics.minimumTapTarget,
-                           height: TimelineMetrics.minimumTapTarget)
-                    .contentShape(Rectangle())
-            )
-            .highPriorityGesture(
-                DragGesture(minimumDistance: 1)
-                    .updating($draft) { value, draft, _ in
-                        if draft == nil { haptics.begin() }
-                        let next = snappedDraft(span, edge: edge,
-                                                translation: Double(value.translation.width))
-                        haptics.report(snappedTo: next.snappedTo)
-                        draft = next.draft
-                    }
-                    .onEnded { value in
-                        haptics.end()
-                        let committed = snappedDraft(span, edge: edge,
-                                                     translation: Double(value.translation.width)).draft
-                        onCommit(.applyEdge(rangeID: committed.rangeID, clipID: committed.clipID,
-                                            start: committed.start, end: committed.end))
-                    }
-            )
-    }
-
-    /// ドラッグ量から確定候補の合成時刻区間を作る。
-    ///
-    /// **順序は「吸着 → クランプ」**（逆にすると吸着結果がクランプで壊れる。
-    /// `TimelineSnap` の doc 参照）。適用区間の端はもともと絶対時刻なので素直に挟める。
-    /// 許容量は **px 由来**にしてズーム段によらず指の感覚を一定にする。
-    /// 候補からは掴んでいる区間（`rangeID`）だけを外す（クリップ帯の端は候補に残す。
-    /// 適用区間をクリップ境界へ合わせるのが最も多い操作なので）。
-    private func snappedDraft(_ span: TimelineApplySpan, edge: TimelineTrimEdge,
-                              translation: Double) -> (draft: ApplyDraft, snappedTo: Double?) {
-        let delta = geometry.time(forX: translation)
-        let candidates = TimelineSnap.candidates(layouts: layouts, applySpans: spans,
-                                                 playheadTime: playheadTime,
-                                                 totalDuration: totalDuration,
-                                                 excluding: [span.rangeID])
-        let tolerance = geometry.duration(forWidth: TimelineSnap.defaultTolerancePixels)
-        switch edge {
-        case .start:
-            let snapped = TimelineSnap.snapped(time: span.start + delta,
-                                               candidates: candidates, tolerance: tolerance)
-            let upper = span.end - Self.minimumSpan
-            let start = min(max(snapped.time, 0), max(0, upper))
-            return (ApplyDraft(rangeID: span.rangeID, clipID: span.clipID,
-                               start: start, end: span.end), snapped.snappedTo)
-        case .end:
-            let snapped = TimelineSnap.snapped(time: span.end + delta,
-                                               candidates: candidates, tolerance: tolerance)
-            let lower = span.start + Self.minimumSpan
-            let end = max(min(snapped.time, totalDuration), lower)
-            return (ApplyDraft(rangeID: span.rangeID, clipID: span.clipID,
-                               start: span.start, end: end), snapped.snappedTo)
-        }
-    }
-
-    private func displayBounds(_ span: TimelineApplySpan) -> (start: Double, end: Double) {
-        guard let draft, draft.rangeID == span.rangeID, draft.clipID == span.clipID else {
-            return (span.start, span.end)
-        }
-        return (draft.start, draft.end)
-    }
-}
-
 /// 継ぎ目（トランジション）ボタン専用のレーン。クリップ帯の**直上**に置く。
 ///
 /// **クリップ帯の中にボタンを置いてはいけない。** 継ぎ目ボタン（`jointButtonSize` 角）は
@@ -429,7 +246,7 @@ struct TimelineJointLaneView: View {
                 .frame(width: size, height: size)
                 .background(
                     RoundedRectangle(cornerRadius: 5)
-                        .fill(joint.kind == nil ? Color.white.opacity(0.85) : Color.yellow)
+                        .fill(joint.kind == nil ? Color.white.opacity(0.85) : TimelinePalette.structure)
                 )
         }
         .buttonStyle(.plain)

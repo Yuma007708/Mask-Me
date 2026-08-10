@@ -368,6 +368,25 @@ final class MosaicApplyRangeTests: XCTestCase {
                                               mapping: mapping, existing: existing), existing)
     }
 
+    // MARK: - セグメントの移動（E1）
+
+    /// **rate ≠ 1 のクリップでは、移動も写像してから丸めること。**
+    /// rate=2.0 の 8 秒素材（合成 4 秒）で素材 [2,4)（合成 [1,2)）を合成 0.5 秒だけ動かすと、
+    /// 素材アンカーは「合成時刻での移動量 0.5 × rate 2.0 = 1.0」秒分ずれる（[3,5)）。
+    /// 合成時刻のまま動かしてから素材へ丸める誤実装だと、rate 換算のずれが出ない。
+    func test_movingApplyRange_rate2Clip_mapsBeforeRounding() {
+        let fast = TimelineClip(sourceID: sourceA, sourceStart: 0, sourceEnd: 8, rate: 2.0) // 合成 4 秒
+        let mapping = TimelineMapping(clips: [fast])
+        let existing = [range(fast, 2, 4)] // 合成 [1,2)
+        let id = existing[0].id
+
+        let moved = MosaicApplyGate.ranges(movingRangeID: id, clipID: fast.id,
+                                           byCompositionDelta: 0.5, mapping: mapping, existing: existing)
+        XCTAssertEqual(moved.count, 1)
+        XCTAssertEqual(moved[0].sourceStart, 3.0, accuracy: 1e-9)
+        XCTAssertEqual(moved[0].sourceEnd, 5.0, accuracy: 1e-9)
+    }
+
     // MARK: - 削除
 
     /// removingRange は指定 id の区間だけを取り除き、未知の id では変更しないこと。

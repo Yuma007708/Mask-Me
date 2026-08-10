@@ -53,4 +53,23 @@ extension TimelineState {
         result.applyRanges = newRanges
         return result
     }
+
+    /// 掴んだセグメント（`id` の適用区間 × `clipID` のクリップ）を、同一クリップ内で
+    /// 合成時刻換算 `delta` 秒だけ動かす（区間の「移動」。端ドラッグではなく本体ドラッグ）。
+    ///
+    /// **`MosaicApplyGate.ranges(movingRangeID:...)` への薄いラッパ**（`replacingApplyRange`
+    /// と対称）。クリップを跨ぐ移動はせず境界でクランプし、`delta == 0` や写真クリップは
+    /// no-op（詳細は `MosaicApplyGate.ranges(movingRangeID:...)` の doc を参照）。
+    public func movingApplyRange(id: UUID,
+                                 clipID: UUID,
+                                 byCompositionDelta delta: Double) -> TimelineState {
+        let newRanges = MosaicApplyGate.ranges(movingRangeID: id, clipID: clipID,
+                                               byCompositionDelta: delta,
+                                               mapping: mapping, existing: applyRanges,
+                                               photoSourceIDs: photoSourceIDs)
+        guard newRanges != applyRanges else { return self }
+        var result = self
+        result.applyRanges = newRanges
+        return result
+    }
 }

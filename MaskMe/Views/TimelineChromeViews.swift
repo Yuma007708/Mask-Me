@@ -1,6 +1,54 @@
 import MosaicCore
 import SwiftUI
 
+/// タイムラインの見た目を決める色・文字の唯一の置き場。
+///
+/// **色を直接書かないこと。** 以前は同じ「白の薄い地」が段ごとに 0.04 / 0.06 と
+/// 微妙に違い、アクセントは `accentColor`（モザイク区間）・`yellow`（継ぎ目）・
+/// `orange`（キーフレーム）の 3 系統に散っていた。どの色が何を意味するのかが
+/// 読めず、結果として「作りが雑」に見える。ここへ集約して意味ごとに色を決める。
+///
+/// 意味の割り当て:
+/// - **アクセント**（`mosaic`）= モザイクが掛かること。この 1 系統だけが彩度を持つ。
+/// - **構造**（`structure`）= 継ぎ目・キーフレームなど「編集の目印」。琥珀 1 色に統一。
+/// - **選択**（`selection`）= 白。枠とハンドルだけに使う。属性の色と混ぜない。
+enum TimelinePalette {
+    /// 段の地。**上から下へ少しずつ明るくする**（目盛り→クリップ帯→モザイク区間）。
+    /// 全段を同じ濃さにすると 3 本の段が 1 枚の板に見えて構造が読めない。
+    static let rulerBackground = Color.white.opacity(0.03)
+    static let clipBandBackground = Color.white.opacity(0.07)
+    static let applyTrackBackground = Color.white.opacity(0.05)
+
+    /// モザイク（適用区間）。選択で濃くなる。
+    static func mosaicFill(isSelected: Bool) -> Color {
+        Color.accentColor.opacity(isSelected ? 0.9 : 0.55)
+    }
+
+    /// 編集の目印（継ぎ目ボタン・キーフレーム）。
+    static let structure = Color(red: 1.0, green: 0.78, blue: 0.35)
+
+    static let selection = Color.white
+    /// 非選択クリップの輪郭。段の地より明るく、選択枠よりはるかに暗い。
+    static let clipOutline = Color.white.opacity(0.22)
+
+    /// 目盛りの主線（ラベルが付く）と副線（付かない）。
+    static let tickMajor = Color.white.opacity(0.55)
+    static let tickMinor = Color.white.opacity(0.18)
+
+    /// 文字。**3 段しか使わない**（ラベル / バッジ / 補助）。
+    static let labelFont = Font.system(size: 9, weight: .semibold).monospacedDigit()
+    static let badgeFont = Font.system(size: 9, weight: .semibold)
+    static let hintFont = Font.system(size: 10, weight: .medium)
+
+    static let primaryText = Color.white.opacity(0.9)
+    static let secondaryText = Color.white.opacity(0.45)
+
+    /// 音声波形。**アクセント（モザイク）にも構造（目印）にも寄せない。**
+    /// 波形は「素材にもともと入っているもの」で、編集の状態を表さないため、
+    /// 色を持たせると意味のない主張になる。
+    static let waveform = Color.white.opacity(0.55)
+}
+
 /// 編集ツールバーの 1 項目。
 struct TimelineToolItem: Identifiable {
     let title: String
@@ -83,8 +131,14 @@ struct TimelineRulerTrackView: View {
     var body: some View {
         ZStack(alignment: .topLeading) {
             Rectangle()
-                .fill(Color.white.opacity(0.04))
+                .fill(TimelinePalette.rulerBackground)
                 .frame(width: contentWidth, height: TimelineMetrics.rulerHeight)
+            // 副目盛り（主目盛りの中間）。ラベルは付けない。
+            // **これが無いと、主目盛りの間隔が 5s・10s と粗くなる長尺で
+            // 「いま何秒あたりか」を読む手がかりが線 1 本ぶんも無くなる。**
+            ForEach(minorTickIndices, id: \.self) { index in
+                minorTick(Double(index) * interval + interval / 2)
+            }
             ForEach(tickIndices, id: \.self) { index in
                 tick(index)
             }
@@ -103,22 +157,47 @@ struct TimelineRulerTrackView: View {
         return Array(0...max(0, count))
     }
 
+    /// 副目盛りは主目盛りの**間**にだけ立てる（最後の主目盛りの先は総尺を超えうるので除く）。
+    private var minorTickIndices: [Int] {
+        guard tickIndices.count > 1 else { return [] }
+        return Array(tickIndices.dropLast())
+    }
+
+    private func minorTick(_ time: Double) -> some View {
+        Rectangle()
+            .fill(TimelinePalette.tickMinor)
+            .frame(width: 1, height: 4)
+            .offset(x: geometry.x(forTime: time))
+    }
+
     private func tick(_ index: Int) -> some View {
         let time = Double(index) * interval
-        return HStack(spacing: 2) {
+        return HStack(spacing: 3) {
             Rectangle()
-                .fill(Color.white.opacity(0.4))
-                .frame(width: 1, height: 6)
-            Text(Self.timeLabel(time))
-                .font(.system(size: 8).monospacedDigit())
-                .foregroundStyle(.white.opacity(0.6))
+                .fill(TimelinePalette.tickMajor)
+                .frame(width: 1, height: 7)
+            Text(Self.timeLabel(time, interval: interval))
+                .font(TimelinePalette.labelFont)
+                .foregroundStyle(TimelinePalette.primaryText)
         }
         .offset(x: geometry.x(forTime: time))
     }
 
-    static func timeLabel(_ seconds: Double) -> String {
+    /// 目盛りのラベル。
+    ///
+    /// **`interval` を受け取るのは、秒未満の間隔（ズーム最大では 0.5s）で
+    /// 隣り合うラベルが同じ文字になるため。** 0.5s 刻みで `0:00 0:00 0:01 0:01 …`
+    /// と並ぶと、目盛りが 2 本に 1 本しか意味を持たない（＝読めない）。
+    static func timeLabel(_ seconds: Double, interval: Double = 1) -> String {
         guard seconds.isFinite, seconds >= 0 else { return "0:00" }
-        let whole = Int(seconds)
+        if interval.isFinite, interval > 0, interval < 1 {
+            let whole = Int(seconds)
+            let fraction = Int(((seconds - Double(whole)) * 10).rounded())
+            // 繰り上がり（9.96 → 10.0）でも "0:09.10" にならないよう秒へ戻す。
+            let carried = whole + fraction / 10
+            return String(format: "%d:%02d.%d", carried / 60, carried % 60, fraction % 10)
+        }
+        let whole = Int(seconds.rounded())
         return String(format: "%d:%02d", whole / 60, whole % 60)
     }
 }
@@ -174,17 +253,22 @@ struct TimelinePlayheadView: View {
 
     var body: some View {
         Rectangle()
-            .fill(Color.white)
+            .fill(TimelinePalette.selection)
             .frame(width: 2, height: stackHeight)
             // 中央固定のプレイヘッドは動かないので、「ここが再生位置」と読ませる
             // 目印を上端に付ける（線だけだと目盛りの一本と区別しにくい）。
+            //
+            // 目印は**丸い頭**にしてある。三角は目盛りの主線＋ラベルと同じ「上向きの
+            // 細い形」の中に紛れるが、円は目盛り帯の中で唯一の曲線になるので、
+            // 走査したときに一発で見つかる。
             .overlay(alignment: .top) {
-                Image(systemName: "arrowtriangle.down.fill")
-                    .font(.system(size: 9))
-                    .foregroundStyle(.white)
-                    .offset(y: -4)
+                Circle()
+                    .fill(TimelinePalette.selection)
+                    .frame(width: 9, height: 9)
+                    .overlay(Circle().strokeBorder(.black.opacity(0.35), lineWidth: 0.5))
+                    .offset(y: -3)
             }
-            .shadow(color: .black.opacity(0.6), radius: 2)
+            .shadow(color: .black.opacity(0.75), radius: 2.5)
             .allowsHitTesting(false)
     }
 }
@@ -199,9 +283,13 @@ struct TimelineEmptyBandView: View {
             .fill(Color.black.opacity(0.4))
             .frame(width: contentWidth, height: TimelineMetrics.clipHeight)
             .overlay(
+                RoundedRectangle(cornerRadius: TimelineMetrics.cornerRadius)
+                    .strokeBorder(TimelinePalette.clipOutline, style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
+            )
+            .overlay(
                 Text(text)
-                    .font(.caption2)
-                    .foregroundStyle(.white.opacity(0.6))
+                    .font(TimelinePalette.hintFont)
+                    .foregroundStyle(TimelinePalette.secondaryText)
             )
     }
 }

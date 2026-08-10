@@ -20,10 +20,17 @@ public struct TimelineState: Codable, Equatable, Sendable {
     public var transitions: [UUID: TransitionSpec]
     /// モザイク適用範囲（`clipID` + 素材時刻アンカー）。
     ///
-    /// **空なら適用なし（全区間 OFF）**。S11 で意味が反転した（旧: 空 = 全区間適用）。新規プロジェクト・素材追加では
-    /// `MosaicApplyGate.fullCoverRanges(for:photoSourceIDs:)` が「クリップ全体を覆う区間」を 1 本ずつ自動生成するため、区間 0 本に
-    /// 到達する経路は**ユーザーの削除操作だけ**である（不変条件 I5: 自動生成は「新しいクリップが生まれる瞬間」以外で
-    /// 走らせないこと）。
+    /// **空なら適用なし（全区間 OFF）**。S11 で意味が反転した（旧: 空 = 全区間適用）。
+    ///
+    /// **新規プロジェクトは区間 0 本で始まる**（動画を開いただけではモザイクのレイヤーを出さない。
+    /// ユーザー報告「新規編集でモザイクをレイヤーに出さないで」）。区間が生まれるのは
+    /// **モザイクを掛ける操作の入口**（`MosaicEditorModel.ensureApplyRangesExist()`。顔モザイクを ON にする、
+    /// 矩形を置く、等）と、**既に区間がある編集への素材追加**（`appending(clip:source:coveringWithApplyRange:)`）
+    /// の 2 系統だけである（不変条件 I5: 自動生成は「新しいクリップが生まれる瞬間」と
+    /// 「掛ける操作の入口」以外で走らせないこと）。
+    ///
+    /// したがって区間 0 本は「まだ何も掛けていない」か「ユーザーが全部消した」のどちらかで、
+    /// **どちらも掛けない意図として同じに扱ってよい**。
     public var applyRanges: [MosaicApplyRange]
     /// 素材メタ情報（キーは素材ID = `TimelineClip.sourceID`）。エントリが無い素材は
     /// 動画（`TimelineSource.Kind.video`）として扱う（kind 導入前のデータとの互換）。

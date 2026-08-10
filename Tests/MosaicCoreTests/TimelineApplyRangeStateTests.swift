@@ -170,6 +170,94 @@ final class TimelineApplyRangeStateTests: XCTestCase {
         XCTAssertEqual(video.applyRanges[0].sourceStart, 1, accuracy: 1e-12)
     }
 
+    // MARK: - モザイク適用区間の移動（E1）
+
+    /// セグメントの移動でも、**クリップ使用範囲外の素材区間が消えない**こと
+    /// （`replacingRangeID` への薄いラッパである証拠。`test_replacingApplyRange_keepsSourceRangeOutsideClips`
+    /// と同じ構成）。
+    func test_movingApplyRange_keepsSourceRangeOutsideClips() {
+        let clipA = TimelineClip(sourceID: sourceA, sourceStart: 0, sourceEnd: 2)
+        let clipB = TimelineClip(sourceID: sourceA, sourceStart: 3, sourceEnd: 5)
+        var state = TimelineState(clips: [clipA, clipB])
+        state.applyRanges = [MosaicApplyRange(clipID: clipB.id, sourceID: sourceA,
+                                              sourceStart: 1, sourceEnd: 4)]
+        let id = state.applyRanges[0].id
+
+        // B の使用範囲内の占有部分（合成 [2,3) = 素材 [3,4)）を合成 0.5 秒だけ動かす。
+        let moved = state.movingApplyRange(id: id, clipID: clipB.id, byCompositionDelta: 0.5)
+
+        XCTAssertEqual(moved.applyRanges.count, 2, "使用範囲外の素材区間が別区間として残る")
+        let sorted = moved.applyRanges.sorted { $0.sourceStart < $1.sourceStart }
+        XCTAssertEqual(sorted[0].sourceStart, 1.0, accuracy: 1e-9)
+        XCTAssertEqual(sorted[0].sourceEnd, 3.0, accuracy: 1e-9,
+                       "クリップ B の使用範囲外 [1,3) が残る")
+        XCTAssertEqual(sorted[1].sourceStart, 3.5, accuracy: 1e-9)
+        XCTAssertEqual(sorted[1].sourceEnd, 4.5, accuracy: 1e-9)
+        XCTAssertTrue(sorted.allSatisfy { $0.clipID == clipB.id })
+        XCTAssertTrue(moved.validate())
+    }
+
+    /// 移動前後で素材区間の長さ（＝適用範囲の尺）が保たれること。
+    func test_movingApplyRange_preservesDuration() {
+        let clip = TimelineClip(sourceID: sourceA, sourceStart: 0, sourceEnd: 10)
+        let state = TimelineState(clips: [clip]).addingApplyRange(fromCompositionTime: 2, to: 4)
+        let id = state.applyRanges[0].id
+        let originalDuration = state.applyRanges[0].sourceEnd - state.applyRanges[0].sourceStart
+
+        let moved = state.movingApplyRange(id: id, clipID: clip.id, byCompositionDelta: 3)
+        XCTAssertEqual(moved.applyRanges.count, 1)
+        let movedDuration = moved.applyRanges[0].sourceEnd - moved.applyRanges[0].sourceStart
+        XCTAssertEqual(movedDuration, originalDuration, accuracy: 1e-9)
+        XCTAssertEqual(moved.applyRanges[0].sourceStart, 5.0, accuracy: 1e-9)
+        XCTAssertEqual(moved.applyRanges[0].sourceEnd, 7.0, accuracy: 1e-9)
+        XCTAssertTrue(moved.validate())
+    }
+
+    /// 隣のクリップへ跨ぐ移動入力は、境界へクランプされ**分裂しない**こと
+    /// （`clipID` アンカーが変わって 1 本の区間が複数 clipID に分裂するのを防ぐ）。
+    func test_movingApplyRange_acrossClipBoundary_isClampedNotSplit() {
+        let clipA = TimelineClip(sourceID: sourceA, sourceStart: 0, sourceEnd: 5)
+        let clipB = TimelineClip(sourceID: sourceB, sourceStart: 0, sourceEnd: 5)
+        let state = TimelineState(clips: [clipA, clipB]).addingApplyRange(fromCompositionTime: 3, to: 4)
+        XCTAssertEqual(state.applyRanges.count, 1, "前提が崩れている")
+        let id = state.applyRanges[0].id
+
+        // clipA の合成区間は [0,5)。5 秒動かすと clipB 側まではみ出すが、
+        // clipID は clipA のまま境界 [4,5) にクランプされる。
+        let moved = state.movingApplyRange(id: id, clipID: clipA.id, byCompositionDelta: 5)
+        XCTAssertEqual(moved.applyRanges.count, 1, "区間が分裂している")
+        XCTAssertEqual(moved.applyRanges[0].clipID, clipA.id, "別クリップへ乗り移っている")
+        XCTAssertEqual(moved.applyRanges[0].sourceStart, 4.0, accuracy: 1e-9)
+        XCTAssertEqual(moved.applyRanges[0].sourceEnd, 5.0, accuracy: 1e-9)
+        XCTAssertTrue(moved.validate())
+    }
+
+    /// 移動量 0（またはドラッグ破損由来の非有限値）は `existing` をそのまま返すこと
+    /// （id 再発行だけで undo 履歴が汚れるのを防ぐ、既存の契約と同じ）。
+    func test_movingApplyRange_zeroDragIsNoOp() {
+        let clipA = TimelineClip(sourceID: sourceA, sourceStart: 0, sourceEnd: 4)
+        var state = TimelineState(clips: [clipA])
+        state.applyRanges = [MosaicApplyRange(clipID: clipA.id, sourceID: sourceA,
+                                              sourceStart: 1, sourceEnd: 2)]
+        let id = state.applyRanges[0].id
+
+        let same = state.movingApplyRange(id: id, clipID: clipA.id, byCompositionDelta: 0)
+        XCTAssertEqual(same, state, "動かしていないのに状態が変わっている（undo 履歴が汚れる）")
+        XCTAssertEqual(state.movingApplyRange(id: id, clipID: clipA.id, byCompositionDelta: .nan), state)
+    }
+
+    /// 写真クリップ由来の区間は移動 no-op（区間は常にクリップ全体を覆うため動かす意味がない）。
+    func test_movingApplyRange_photoClip_isNoOp() {
+        let photo = TimelineClip(sourceID: sourceA, sourceStart: 0, sourceEnd: 3)
+        var state = TimelineState(clips: [photo])
+        state.sources = [sourceA: TimelineSource(id: sourceA, kind: .photo)]
+        state = state.addingApplyRange(fromCompositionTime: 1, to: 2)
+        let id = state.applyRanges[0].id
+
+        let moved = state.movingApplyRange(id: id, clipID: photo.id, byCompositionDelta: 1)
+        XCTAssertEqual(moved, state, "写真クリップの区間が移動している")
+    }
+
     // MARK: - S9: 分割対象の明示（活性判定と対象の一致）
 
     /// トランジションの重なり区間では、`splitting(clipID:atDisplayTime:)` が

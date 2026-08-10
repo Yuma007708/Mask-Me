@@ -81,7 +81,7 @@ public extension TimelineBandLayout {
             guard let index = indices[span.clipID], index >= grabbed.index else { return span }
             guard index == grabbed.index else { return span.shifted(by: shift) }
             return TimelineApplySpan(
-                rangeID: span.rangeID, clipID: span.clipID,
+                rangeID: span.rangeID, clipID: span.clipID, kind: span.kind,
                 start: min(max(span.start + inner, grabbed.bandStart), previewEnd),
                 end: min(max(span.end + inner, grabbed.bandStart), previewEnd),
                 isEdgeAdjustable: span.isEdgeAdjustable)
@@ -91,7 +91,7 @@ public extension TimelineBandLayout {
 
 private extension TimelineApplySpan {
     func shifted(by shift: Double) -> TimelineApplySpan {
-        TimelineApplySpan(rangeID: rangeID, clipID: clipID,
+        TimelineApplySpan(rangeID: rangeID, clipID: clipID, kind: kind,
                           start: start + shift, end: end + shift,
                           isEdgeAdjustable: isEdgeAdjustable)
     }

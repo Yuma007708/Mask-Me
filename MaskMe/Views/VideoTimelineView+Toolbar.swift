@@ -37,7 +37,7 @@ extension VideoTimelineView {
     /// 削除の対象は**いま選んでいるもの**（クリップでも加工レイヤーでも同じボタン）。
     /// 対象ごとにボタンを分けると、選択のたびに並びが動く。
     private var addOrRemoveItem: TimelineToolItem {
-        guard selectedRangeID != nil || selectedClipID != nil else { return addMediaItem }
+        guard selectedLayer != nil || selectedClipID != nil else { return addMediaItem }
         return TimelineToolItem(title: "削除", systemImage: "trash",
                                 isEnabled: canRemoveSelection) {
             removeSelection()
@@ -132,15 +132,22 @@ extension VideoTimelineView {
     /// 削除の活性判定。**最後の 1 本のクリップは消せない**（空のタイムラインを作らない）。
     /// 加工レイヤーの削除にはその制約が無い。
     private var canRemoveSelection: Bool {
-        if selectedRangeID != nil { return true }
+        if selectedLayer != nil { return true }
         return selectedClip != nil && model.timeline.clips.count > 1
     }
 
     /// 選択しているものを消す。**選択解除は書かない**
     /// （`model.timeline` の didSet が消えたものを刈る。二重管理にしない）。
+    ///
+    /// **種ごとの `switch` で全 case を網羅し、`default` は書かない**
+    /// （`TimelineSelection.prune` と同じ理由。E2 で音声の種が増えたとき、
+    /// ここを書き忘れると削除ボタンが黙って何もしない操作に化ける）。
     private func removeSelection() {
-        if let id = selectedRangeID {
-            model.removeMosaicApplyRange(id: id)
+        if let layer = selectedLayer {
+            switch layer.kind {
+            case .mosaic:
+                model.removeMosaicApplyRange(id: layer.id)
+            }
         } else if let id = selectedClipID {
             model.removeClip(id: id)
         }

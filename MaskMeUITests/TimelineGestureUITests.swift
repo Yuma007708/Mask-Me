@@ -22,6 +22,8 @@ final class TimelineGestureUITests: XCTestCase {
         static let clipBand = "timeline.clipBand"
         static let jointLane = "timeline.jointLane"
         static let applyTrack = "timeline.applyTrack"
+        /// レイヤー段の器（モザイク・音声・テキストを縦に積む領域）。
+        static let layerStack = "timeline.layerStack"
     }
 
     /// 払う距離（px）。既定ズーム 40px/秒 なので約 3 秒ぶん動く。
@@ -142,12 +144,17 @@ final class TimelineGestureUITests: XCTestCase {
 
     // MARK: - 払ってもシークしない段
 
-    /// モザイク適用区間トラックは操作面から外してある（当て板が効いていること）。
-    func test_swipeOnApplyTrack_doesNotSeek() {
+    /// レイヤー段（エフェクト・音声・テキスト）は操作面から外してある
+    /// （当て板が効いていること）。
+    ///
+    /// **空の段でも同じ**でなければならない。新規編集はモザイク区間 0 本で始まる
+    /// ので、種の素材で見えているのは「+ エフェクトを追加」の空段である。
+    /// 当て板を中身のある帯にだけ付けると、空段を払った瞬間だけシークする。
+    func test_swipeOnLayerStack_doesNotSeek() {
         let before = currentTime()
-        swipeLeft(on: Track.applyTrack)
+        swipeLeft(on: Track.layerStack)
         XCTAssertLessThan(abs(currentTime() - before), Self.stillThreshold,
-                          "適用区間トラックを払って再生位置が動いた（当て板が効いていない）")
+                          "レイヤー段を払って再生位置が動いた（当て板が効いていない）")
     }
 
     /// 継ぎ目が無いあいだ、継ぎ目レーンは**高さ 0 に畳まれている**
@@ -155,7 +162,7 @@ final class TimelineGestureUITests: XCTestCase {
     /// 空いていた＝ユーザー報告「時間とクリップの間のスペースを埋めたい」）。
     ///
     /// 種の素材は 1 本なので継ぎ目は存在しない。レーンが生えている場合の
-    /// 「払ってもシークしない」は適用区間トラック側（`blocksTimelinePan` の当て板は
+    /// 「払ってもシークしない」はレイヤー段側（`blocksTimelinePan` の当て板は
     /// 両者で共通）で担保する。
     func test_jointLaneIsCollapsedWithoutJoints() {
         let lane = app.otherElements[Track.jointLane]
