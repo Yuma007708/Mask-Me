@@ -46,10 +46,10 @@ public struct FaceTarget: Identifiable {
     /// 顔一覧では 1 つのチップにまとまり、選択も一緒に切り替わる（`PersonGrouping`）。
     /// nil の顔は決してまとめない（別人を巻き添えで選択解除しないため）。
     ///
-    /// 再検出（`replaceDetectedFaces`）はターゲットを作り直すため、この ID は一旦 nil に戻る。
-    /// **重心マッチで引き継がない**のは、それがまさに置き換えたい弱い照合だから。
-    /// 台帳（`PersonRegistry`）には手本が残っているので、次に署名が取れた時点で
-    /// 同じ人物 ID が付き直し、まとまりは自動的に復元される。
+    /// ターゲットを作り直す経路（かつての「再検出」ボタン。撤去済み）を足すと、この ID は
+    /// 一旦 nil に戻る。そこで**重心マッチで引き継いではならない**——それがまさに
+    /// 置き換えたい弱い照合だから。台帳（`PersonRegistry`）には手本が残っているので、
+    /// 次に署名が取れた時点で同じ人物 ID が付き直し、まとまりは自動的に復元される。
     public var personID: UUID?
 
     public init(id: UUID, landmarks: FaceLandmarkSet, thumbnail: UIImage, isSelected: Bool,

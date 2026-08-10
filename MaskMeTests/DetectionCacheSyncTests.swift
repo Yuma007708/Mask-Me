@@ -1,3 +1,4 @@
+import AVFoundation
 import XCTest
 import MosaicCore
 @testable import MaskMe
@@ -13,6 +14,13 @@ import MosaicCore
 final class DetectionCacheSyncTests: XCTestCase {
     private func makeModel() -> MosaicEditorModel {
         MosaicEditorModel(mode: .video, recents: RecentItemsStore())
+    }
+
+    /// `AVAsset` は抽象クラスなので `AVAsset()` は実行時クラッシュする
+    /// （`AVURLAsset` 等の具象サブクラスが要る）。実素材へアクセスしないテストでは
+    /// これをダミーとして使い回す。
+    private func dummyAsset() -> AVAsset {
+        AVURLAsset(url: URL(fileURLWithPath: "/dev/null"))
     }
 
     private func fakeFace(cx: Double, cy: Double, size: Double = 0.2) -> FaceLandmarkSet {
@@ -261,5 +269,525 @@ final class DetectionCacheSyncTests: XCTestCase {
         // 読み出し側も同じクランプで、終端ちょうどの lookup が最終クリップの顔を引けること
         XCTAssertFalse(model.lookupFaces(at: 8.0).isEmpty,
                        "終端ちょうどの lookup がクランプされず空になっている")
+    }
+
+    // MARK: - 矩形サーチ（`detectInRegion` / `resolveRegion`）のキャッシュ「マージ」書き込み
+    //
+    // 動画モードで範囲指定して見つけた顔は、`detectedFaces` に足すだけでは画面にもエクスポートにも
+    // 反映されない（描画は検出キャッシュしか見ない）。`mergeDetection` がその書き込み口。
+
+    /// **マージは同じバケットの既存の顔を消さない。** `cacheStore.store` を素で呼ぶ実装に
+    /// 戻すと、範囲サーチが見つけた 1 人のために同じバケットにいた別人の顔が消えてしまう
+    /// （プライバシーアプリとしては露出が増える方向の回帰）。
+    func test_mergeDetection_preservesExistingFaceInSameBucket() {
+        let model = makeModel()
+        let source = model.currentSourceID
+        model.cacheStore.store([fakeFace(cx: 0.2, cy: 0.2)], sourceID: source, time: 3.0)
+
+        model.mergeDetection([fakeFace(cx: 0.8, cy: 0.8)], sourceID: source, sourceTime: 3.0)
+
+        XCTAssertEqual(model.cacheStore.faces(sourceID: source, time: 3.0)?.count, 2,
+                       "マージが既存の顔を消してしまっている（store を素で呼ぶ実装に戻すと1件になる）")
+    }
+
+    /// 重複判定（`FaceLandmarkSet.hasCounterpart`、IoU > 0.3）で同一人物とみなせる顔は
+    /// 追記しないこと。同じ顔を毎回積み増すと、そのバケットが本来 1 人のところ
+    /// 複数人として描画・選択候補に出てしまう。
+    func test_mergeDetection_doesNotDuplicateSameFace() {
+        let model = makeModel()
+        let source = model.currentSourceID
+        model.cacheStore.store([fakeFace(cx: 0.5, cy: 0.5)], sourceID: source, time: 2.0)
+
+        // ほぼ同じ位置（IoU > 0.3）の「見つけた顔」
+        model.mergeDetection([fakeFace(cx: 0.51, cy: 0.5)], sourceID: source, sourceTime: 2.0)
+
+        XCTAssertEqual(model.cacheStore.faces(sourceID: source, time: 2.0)?.count, 1,
+                       "同一人物とみなせる顔を二重に追加している")
+    }
+
+    /// 写真モード（`sourceID` が nil）は書き込まない。写真は素材ID・検出キャッシュの
+    /// 概念自体が無いため（`FaceTarget.sourceID` の doc 参照）。
+    func test_mergeDetection_noOpForNilSourceID() {
+        let model = makeModel()
+        model.mergeDetection([fakeFace(cx: 0.5, cy: 0.5)], sourceID: nil, sourceTime: 0)
+        XCTAssertEqual(model.cacheStore.count, 0, "写真モード（sourceID nil）で書き込んでしまっている")
+    }
+
+    /// `resolveRegion` がキャッシュへ書くのは**ヒットした実測時刻**でなければならない
+    /// （`findFaceInVideo` の 1fps サーチは要求時刻と実際にコピーできたフレーム時刻が
+    /// ずれることがある）。`mergeDetection` は渡された時刻をそのまま使うことを確認する
+    /// （呼び出し側が実測時刻ではなく要求時刻を渡す退行が起きても、この境界で検出できる）。
+    func test_mergeDetection_writesToPassedSourceTimeNotSomeOtherTime() {
+        let model = makeModel()
+        let source = model.currentSourceID
+        let actualHitTime = 4.2 // 例: 4.0 を要求してコピーできたのは 4.2 だった、を模す
+
+        model.mergeDetection([fakeFace(cx: 0.5, cy: 0.5)], sourceID: source, sourceTime: actualHitTime)
+
+        XCTAssertNotNil(model.cacheStore.faces(sourceID: source, time: actualHitTime),
+                        "渡された実測時刻のバケットに書けていない")
+        XCTAssertNil(model.cacheStore.faces(sourceID: source, time: 4.0),
+                    "実測時刻ではなく別時刻（要求時刻相当）に書いてしまっている")
+    }
+
+    /// 丸め順序の契約は `mergeDetection` にも及ぶ: 呼び出し側（`detectInRegion`）は
+    /// `resolveSourceLocation(atComposition:)` で**素材時刻へ写像した後の生の値**を渡し、
+    /// バケットへの丸めは `DetectionCacheKey.init` に任せる。合成時刻で先に丸めてから
+    /// 写像する誤実装は rate≠1 のクリップでバケットがずれる
+    /// （`test_liveWrite_withRate_bucketsAfterMappingNotBefore` と同型）。
+    func test_mergeDetection_withRate_bucketsAfterMappingNotBefore() {
+        let model = makeModel()
+        let source = model.currentSourceID
+        // 2x クリップ: 合成 [0,2) ← 素材 [0,4)
+        model.setClipsForTesting([
+            TimelineClip(sourceID: source, sourceStart: 0, sourceEnd: 4, rate: 2.0)
+        ])
+
+        // detectInRegion と同じ手順: 合成時刻を resolveSourceLocation で素材時刻へ写像
+        // してから mergeDetection へ渡す（ここで丸めない）。
+        let resolved = model.resolveSourceLocation(atComposition: 1.03)
+        XCTAssertEqual(resolved.time, 2.06, accuracy: 1e-9)
+        model.mergeDetection([fakeFace(cx: 0.5, cy: 0.4)],
+                             sourceID: resolved.sourceID, sourceTime: resolved.time)
+
+        XCTAssertNotNil(model.cacheStore.faces(sourceID: source, time: 2.06),
+                        "写像後の素材時刻バケット（31/15）に書けていない")
+        XCTAssertNil(model.cacheStore.faces(sourceID: source, time: 2.0),
+                    "合成時刻で先に丸めてから写像している（rate≠1 でバケットずれ）")
+    }
+
+    // MARK: - 範囲指定は「まず矩形で確実に隠す」（顔が見つかっても見つからなくても）
+
+    /// `appendObjectMask` は呼ぶたびに矩形マスクをちょうど 1 個だけ追加し、
+    /// 第2段（顔追跡への差し替え）が後から見分けられるよう `isRegionPlaceholder` を
+    /// 立てること。`detectInRegion` / `resolveRegion` はこの関数を「見つかった」
+    /// 「見つからなかった」のどちらの結末でも呼ぶ（二重には呼ばない）契約になっている。
+    func test_appendObjectMask_addsExactlyOnePlaceholderMaskPerCall() {
+        let model = makeModel()
+
+        model.appendObjectMask(compositionRect: CGRect(x: 0.1, y: 0.1, width: 0.2, height: 0.2))
+        XCTAssertEqual(model.objectMasks.count, 1)
+        XCTAssertEqual(model.objectMasks.first?.isRegionPlaceholder, true,
+                       "矩形サーチが置いたマスクに暫定マーカーが立っていない")
+
+        model.appendObjectMask(compositionRect: CGRect(x: 0.5, y: 0.5, width: 0.1, height: 0.1))
+        XCTAssertEqual(model.objectMasks.count, 2, "2回目の呼び出しでマスクが1個だけ増えていない")
+    }
+
+    /// 範囲指定で何も見つからない結末（素材が何も読み込まれていない状態）でも、
+    /// `detectInRegion` が矩形マスクをちょうど 1 個だけ追加すること。
+    /// `sourceImage` も `videoAsset` も nil の状態は「矩形内クロップも動画サーチも
+    /// 失敗する」経路を MediaPipe 無しで決定的に再現できる
+    /// （`detectInRegion` → `resolveRegion` → 非動画フォールバック）。
+    func test_detectInRegion_addsExactlyOneObjectMask_whenNothingIsLoaded() async {
+        let model = makeModel()
+        XCTAssertTrue(model.objectMasks.isEmpty)
+
+        await model.detectInRegion(CGRect(x: 0.1, y: 0.1, width: 0.2, height: 0.2))
+
+        XCTAssertEqual(model.objectMasks.count, 1,
+                       "見つからなかった結末で矩形マスクがちょうど1個増えていない")
+        XCTAssertEqual(model.objectMasks.first?.isRegionPlaceholder, true)
+    }
+
+    // MARK: - `detectInRegion` の参照フレーム選択（先頭フレーム固定バグの回帰）
+    //
+    // `seekTo` はスクラブ時に `sourceTexture` のみ更新し `sourceImage` は更新しない
+    // （`loadFirstFrame` で入った先頭フレームのまま）。`detectInRegion` が
+    // `sourceImage` を無条件に検出入力へ使う実装に戻すと、動画をスクラブしてから
+    // 矩形サーチしたとき、常に先頭フレーム（素材時刻 0）を検出・クロップしてしまい、
+    // 見つかった顔の座標を現在の再生位置のバケットへ誤って書き込む
+    // （`mergeDetection` 経由のキャッシュ汚染）。
+    //
+    // 実素材・MediaPipe なしではピクセル出力までは検証できないため、
+    // `detectInRegion` が「検出入力に使うつもりの素材内時刻」として記録する
+    // 内部フック `lastDetectInRegionReferenceSourceTime` で、再生位置に追随して
+    // いること（＝先頭フレーム固定=0 に張り付いていないこと）を確認する。
+    func test_detectInRegion_referenceFrameTime_followsPlaybackPositionNotFirstFrame() async {
+        let model = makeModel()
+        // 素材 10 秒ぶんの単一クリップ。`setClipsForTesting` 後は `videoDuration` が
+        // `mapping.totalDuration`（=10）に追随する。
+        let clip = TimelineClip(sourceID: model.currentSourceID, sourceStart: 0, sourceEnd: 10)
+        model.setClipsForTesting([clip])
+
+        // `playbackPosition` は 0...1 の正規化位置（`compositionTime(forPosition:)`
+        // の doc 参照）。0.6 → 合成時刻 6.0 秒。
+        model.playbackPosition = 0.6
+        await model.detectInRegion(CGRect(x: 0.1, y: 0.1, width: 0.2, height: 0.2))
+
+        XCTAssertEqual(model.lastDetectInRegionReferenceSourceTime ?? -1, 6.0, accuracy: 1e-9,
+                       "スクラブ後の再生位置ではなく先頭フレーム（0）を検出入力にしている")
+    }
+
+    /// 再生位置を変えるたびに参照フレームの時刻も追随して変わること
+    /// （1回だけ現在時刻を捕まえて以降固定、という半端な実装の回帰）。
+    func test_detectInRegion_referenceFrameTime_updatesAcrossMultipleSeeks() async {
+        let model = makeModel()
+        let clip = TimelineClip(sourceID: model.currentSourceID, sourceStart: 0, sourceEnd: 10)
+        model.setClipsForTesting([clip])
+
+        model.playbackPosition = 0.2
+        await model.detectInRegion(CGRect(x: 0.1, y: 0.1, width: 0.2, height: 0.2))
+        XCTAssertEqual(model.lastDetectInRegionReferenceSourceTime ?? -1, 2.0, accuracy: 1e-9)
+
+        model.playbackPosition = 0.8
+        await model.detectInRegion(CGRect(x: 0.1, y: 0.1, width: 0.2, height: 0.2))
+        XCTAssertEqual(model.lastDetectInRegionReferenceSourceTime ?? -1, 8.0, accuracy: 1e-9,
+                       "2回目のシーク後も1回目の時刻に張り付いている")
+    }
+
+    /// 写真モードは `sourceImage` の概念しかないため、参照フレームフックは常に nil
+    /// （動画モード専用の写像を持ち込まないこと）。
+    func test_detectInRegion_referenceFrameTime_isNilInPhotoMode() async {
+        let model = MosaicEditorModel(mode: .photo, recents: RecentItemsStore())
+
+        await model.detectInRegion(CGRect(x: 0.1, y: 0.1, width: 0.2, height: 0.2))
+
+        XCTAssertNil(model.lastDetectInRegionReferenceSourceTime,
+                     "写真モードで素材時刻の写像フックに値が入ってしまっている")
+    }
+
+    // MARK: - 第2段: 範囲指定シードの前後走査（`MosaicEditorModel+RegionSeeding.swift`）
+    //
+    // `RegionSeedTracker`（MosaicCore）は公開イニシャライザを持つが `Step` / `Outcome` は
+    // 持たないため（MosaicCore モジュール外からは構築できない）、実際の `nextStep()` /
+    // `accept(candidates:similarities:)` を回して本物の `Step` / `Outcome` を得てから
+    // `recordRegionSeedFinding` へ渡す。
+
+    /// テスト用の走査 1 歩ぶんを組み立てる。`RegionSeedTracker` を 1 歩だけ進め、
+    /// 渡した `candidates` で `accept` した結果と、書き戻しに使う `RegionFaceSeeder.StepResult`
+    /// を返す。
+    private func makeRegionSeedStep(
+        seedFace: FaceLandmarkSet, seedTime: Double, range: ClosedRange<Double>,
+        candidates: [FaceLandmarkSet]
+    ) -> (result: RegionFaceSeeder.StepResult, outcome: RegionSeedTracker.Outcome)? {
+        var tracker = RegionSeedTracker(seedTime: seedTime, seedBox: seedFace.boundingBox,
+                                        range: range, direction: .forward)
+        guard let step = tracker.nextStep() else { return nil }
+        let outcome = tracker.accept(candidates: candidates, similarities: nil)
+        let result = RegionFaceSeeder.StepResult(candidates: candidates, roi: step.roi,
+                                                 sourceTime: step.sourceTime,
+                                                 isFullFrame: step.isFullFrame, frame: UIImage())
+        return (result, outcome)
+    }
+
+    /// 3 回連続でミスさせ、4 回目（全画面フォールバック）の `Step` / `Outcome` を得る。
+    private func makeFullFrameMissStep(
+        seedFace: FaceLandmarkSet, seedTime: Double, range: ClosedRange<Double>
+    ) -> (result: RegionFaceSeeder.StepResult, outcome: RegionSeedTracker.Outcome)? {
+        var tracker = RegionSeedTracker(seedTime: seedTime, seedBox: seedFace.boundingBox,
+                                        range: range, direction: .forward)
+        var lastStep: RegionSeedTracker.Step?
+        var lastOutcome: RegionSeedTracker.Outcome?
+        for _ in 0..<4 {
+            guard let step = tracker.nextStep() else { return nil }
+            lastStep = step
+            lastOutcome = tracker.accept(candidates: [], similarities: nil)
+        }
+        guard let step = lastStep, let outcome = lastOutcome, step.isFullFrame else { return nil }
+        let result = RegionFaceSeeder.StepResult(candidates: [], roi: step.roi,
+                                                 sourceTime: step.sourceTime,
+                                                 isFullFrame: step.isFullFrame, frame: UIImage())
+        return (result, outcome)
+    }
+
+    /// **最重要**: ROI ミス（顔なし・全画面フォールバックではない）に空エントリを書くと、
+    /// `shouldDetectPreviewFrame` の `hasEntry` 判定でそのバケットのライブ検出が永久に
+    /// スキップされ、全編の一部が素通しのまま固定される。`recordRegionSeedFinding` はこの
+    /// ケースで一切書き込んではならない。
+    func test_regionSeed_doesNotWriteEmptyEntryOnROIMiss() {
+        let model = makeModel()
+        let source = model.currentSourceID
+        model.sources[source] = dummyAsset()
+        let seedFace = fakeFace(cx: 0.5, cy: 0.5)
+        guard let (result, outcome) = makeRegionSeedStep(seedFace: seedFace, seedTime: 2.0,
+                                                          range: 0...10, candidates: []) else {
+            return XCTFail("シードから1ステップも進められなかった（テストの前提が崩れている）")
+        }
+        XCTAssertFalse(result.isFullFrame, "テスト前提が崩れている: 1歩目なのに全画面フォールバックになっている")
+        let seed = MosaicEditorModel.RegionSeed(sourceID: source, asset: dummyAsset(), sourceRange: 0...10, clipID: UUID(),
+                                                seedTime: 2.0, seedLandmarks: seedFace,
+                                                targetID: UUID(), personID: nil)
+        let state = MosaicEditorModel.RegionSeedScanState(generation: model.regionSeedGeneration)
+
+        model.recordRegionSeedFinding(result, seed: seed, outcome: outcome, signatures: nil, state: state)
+
+        XCTAssertEqual(model.cacheStore.count, 0,
+                       "ROI ミスで空エントリを書いてしまっている（該当バケットのライブ検出が永久停止する）")
+    }
+
+    /// 規則の単純化（親の裁定）: 連続ミス3回目の**全画面**フォールバックで顔ゼロであっても、
+    /// そのバケットのライブ検出を永久停止させる空エントリは一切書かない。全画面を見た上での
+    /// ミスであっても「検出の退行は誤モザイクより重い」という原則の方を優先する。
+    func test_regionSeed_doesNotWriteEmptyEntryEvenOnFullFrameMiss() {
+        let model = makeModel()
+        let source = model.currentSourceID
+        model.sources[source] = dummyAsset()
+        let seedFace = fakeFace(cx: 0.5, cy: 0.5)
+        guard let (result, outcome) = makeFullFrameMissStep(seedFace: seedFace, seedTime: 2.0, range: 0...10) else {
+            return XCTFail("全画面フォールバックのステップまで到達できなかった（テストの前提が崩れている）")
+        }
+        XCTAssertTrue(result.isFullFrame, "テスト前提が崩れている: 4歩目なのに全画面フォールバックになっていない")
+        let seed = MosaicEditorModel.RegionSeed(sourceID: source, asset: dummyAsset(), sourceRange: 0...10, clipID: UUID(),
+                                                seedTime: 2.0, seedLandmarks: seedFace,
+                                                targetID: UUID(), personID: nil)
+        let state = MosaicEditorModel.RegionSeedScanState(generation: model.regionSeedGeneration)
+
+        model.recordRegionSeedFinding(result, seed: seed, outcome: outcome, signatures: nil, state: state)
+
+        XCTAssertEqual(model.cacheStore.count, 0,
+                       "全画面フォールバックの顔なしで空エントリを書いてしまっている（該当バケットのライブ検出が永久停止する）")
+    }
+
+    /// `recordRegionSeedFinding` は `mergeDetection` 経由なので、同バケットの既存の顔を消さない。
+    func test_regionSeed_mergeDetectionPreservesExistingFaceInSameBucket() {
+        let model = makeModel()
+        let source = model.currentSourceID
+        model.sources[source] = dummyAsset()
+        let seedFace = fakeFace(cx: 0.5, cy: 0.5)
+        let newFace = fakeFace(cx: 0.8, cy: 0.8)
+        guard let (result, outcome) = makeRegionSeedStep(seedFace: seedFace, seedTime: 3.0,
+                                                          range: 0...10, candidates: [newFace]) else {
+            return XCTFail("シードから1ステップも進められなかった（テストの前提が崩れている）")
+        }
+        // 既存の顔は「書き込み先と同じバケット」へ置く。シード時刻（3.0）ではなく
+        // ステップの実時刻（`result.sourceTime`＝3.0 から 1 歩進んだ時刻）で置かないと、
+        // 別バケットを見ることになりマージの検査にならない。
+        model.cacheStore.store([fakeFace(cx: 0.2, cy: 0.2)], sourceID: source, time: result.sourceTime)
+        let seed = MosaicEditorModel.RegionSeed(sourceID: source, asset: dummyAsset(), sourceRange: 0...10, clipID: UUID(),
+                                                seedTime: 3.0, seedLandmarks: seedFace,
+                                                targetID: UUID(), personID: nil)
+        let state = MosaicEditorModel.RegionSeedScanState(generation: model.regionSeedGeneration)
+
+        model.recordRegionSeedFinding(result, seed: seed, outcome: outcome, signatures: nil, state: state)
+
+        XCTAssertEqual(model.cacheStore.faces(sourceID: source, time: result.sourceTime)?.count, 2,
+                       "マージが既存の顔を消してしまっている（素の store を呼ぶ実装に戻すと1件になる）")
+    }
+
+    /// `liveFlowCache` はオプティカルフロー専用。シード走査由来の書き込みは一切触れないこと。
+    func test_regionSeed_doesNotTouchLiveFlowCache() {
+        let model = makeModel()
+        let source = model.currentSourceID
+        model.sources[source] = dummyAsset()
+        let seedFace = fakeFace(cx: 0.5, cy: 0.5)
+        let newFace = fakeFace(cx: 0.8, cy: 0.8)
+        guard let (result, outcome) = makeRegionSeedStep(seedFace: seedFace, seedTime: 3.0,
+                                                          range: 0...10, candidates: [newFace]) else {
+            return XCTFail("シードから1ステップも進められなかった（テストの前提が崩れている）")
+        }
+        let seed = MosaicEditorModel.RegionSeed(sourceID: source, asset: dummyAsset(), sourceRange: 0...10, clipID: UUID(),
+                                                seedTime: 3.0, seedLandmarks: seedFace,
+                                                targetID: UUID(), personID: nil)
+        let state = MosaicEditorModel.RegionSeedScanState(generation: model.regionSeedGeneration)
+
+        model.recordRegionSeedFinding(result, seed: seed, outcome: outcome, signatures: nil, state: state)
+
+        XCTAssertTrue(model.liveFlowCache.isEmpty,
+                      "シード走査の書き込みが liveFlowCache に触れている（実検出ではないため禁止）")
+    }
+
+    /// 世代が進んだ（`cancelRegionSeeding` 相当）後の書き込みは、生きた走査の結果でも
+    /// 捨てられること。
+    func test_regionSeed_discardsWriteAfterGenerationAdvances() {
+        let model = makeModel()
+        let source = model.currentSourceID
+        model.sources[source] = dummyAsset()
+        let seedFace = fakeFace(cx: 0.5, cy: 0.5)
+        let newFace = fakeFace(cx: 0.6, cy: 0.6)
+        guard let (result, outcome) = makeRegionSeedStep(seedFace: seedFace, seedTime: 4.0,
+                                                          range: 0...10, candidates: [newFace]) else {
+            return XCTFail("シードから1ステップも進められなかった（テストの前提が崩れている）")
+        }
+        let seed = MosaicEditorModel.RegionSeed(sourceID: source, asset: dummyAsset(), sourceRange: 0...10, clipID: UUID(),
+                                                seedTime: 4.0, seedLandmarks: seedFace,
+                                                targetID: UUID(), personID: nil)
+        let state = MosaicEditorModel.RegionSeedScanState(generation: model.regionSeedGeneration)
+        model.regionSeedGeneration += 1 // cancelRegionSeeding 相当
+
+        model.recordRegionSeedFinding(result, seed: seed, outcome: outcome, signatures: nil, state: state)
+
+        XCTAssertEqual(model.cacheStore.count, 0, "世代が進んだ後の書き込みが捨てられていない")
+    }
+
+    /// `sources` から素材が消えた（クリップの入れ替え等）後の書き込みも捨てられること。
+    func test_regionSeed_discardsWriteWhenSourceRemoved() {
+        let model = makeModel()
+        let source = UUID() // 意図的に `sources` へ登録しない
+        let seedFace = fakeFace(cx: 0.5, cy: 0.5)
+        let newFace = fakeFace(cx: 0.6, cy: 0.6)
+        guard let (result, outcome) = makeRegionSeedStep(seedFace: seedFace, seedTime: 1.0,
+                                                          range: 0...10, candidates: [newFace]) else {
+            return XCTFail("シードから1ステップも進められなかった（テストの前提が崩れている）")
+        }
+        let seed = MosaicEditorModel.RegionSeed(sourceID: source, asset: dummyAsset(), sourceRange: 0...10, clipID: UUID(),
+                                                seedTime: 1.0, seedLandmarks: seedFace,
+                                                targetID: UUID(), personID: nil)
+        let state = MosaicEditorModel.RegionSeedScanState(generation: model.regionSeedGeneration)
+
+        model.recordRegionSeedFinding(result, seed: seed, outcome: outcome, signatures: nil, state: state)
+
+        XCTAssertEqual(model.cacheStore.count, 0, "素材が消えた後の書き込みが捨てられていない")
+    }
+
+    /// キュー上限は 8 件の FIFO。溢れたら最も古いものから捨てる（新しいユーザー操作を優先）。
+    func test_regionSeed_queueDropsOldestBeyondLimit() {
+        let model = makeModel()
+        let targetIDs = (0..<9).map { _ in UUID() }
+        for targetID in targetIDs {
+            model.enqueueRegionSeed(MosaicEditorModel.RegionSeed(
+                sourceID: model.currentSourceID, asset: dummyAsset(), sourceRange: 0...1, clipID: UUID(),
+                seedTime: 0, seedLandmarks: fakeFace(cx: 0.5, cy: 0.5),
+                targetID: targetID, personID: nil))
+        }
+
+        XCTAssertEqual(model.regionSeedQueue.count, 8, "キューが上限8件にトリムされていない")
+        XCTAssertFalse(model.regionSeedQueue.contains { $0.targetID == targetIDs[0] },
+                       "最も古いシードが捨てられていない")
+        XCTAssertEqual(model.regionSeedQueue.last?.targetID, targetIDs[8],
+                       "最新のシードが残っていない")
+    }
+
+    /// `awaitRegionSeeding()` は `while` の無限待ちではなく回数上限（8）で必ず戻ること
+    /// （`awaitObjectTracking()` と同じ形。書き出しボタンが固まる事故を防ぐ）。
+    func test_regionSeed_awaitRegionSeedingReturnsWithoutHanging() async {
+        let model = makeModel()
+        // `sources` に登録していない素材IDなので `processRegionSeed` は即 return する。
+        for _ in 0..<3 {
+            model.enqueueRegionSeed(MosaicEditorModel.RegionSeed(
+                sourceID: UUID(), asset: dummyAsset(), sourceRange: 0...1, clipID: UUID(), seedTime: 0,
+                seedLandmarks: fakeFace(cx: 0.5, cy: 0.5), targetID: UUID(), personID: nil))
+        }
+
+        await model.awaitRegionSeeding()
+
+        XCTAssertNil(model.regionSeedTask, "待ち終えたのにタスクが残っている（固まる兆候）")
+    }
+
+    /// 回帰: `cancelRegionSeeding()` 直後に新しいシードを積んで新タスクを起動したとき、
+    /// cancel された旧タスクが遅れて自分の `while` を抜けても新タスクの参照
+    /// （`regionSeedTask`）を消してはいけない。消えると `awaitRegionSeeding()` が
+    /// 新タスクを待たずに即座に返り、書き出しが走査完了前に進んでしまう
+    /// （さらに次の `enqueueRegionSeed` で 3 本目が起動し、デコーダの二重使用にもなる）。
+    func test_regionSeed_cancelThenEnqueue_doesNotLoseNewTaskReference() async {
+        let model = makeModel()
+        let source = model.currentSourceID
+        model.sources[source] = dummyAsset()
+        // `runDirection` の協調的譲りループ（`shouldYieldTrackingDecoder`）へ旧タスクを
+        // 足止めする。`isPlaying` を立てるだけで実デコードなしに 200ms スリープへ入る。
+        model.isPlaying = true
+        let seedFace = fakeFace(cx: 0.5, cy: 0.5)
+        model.enqueueRegionSeed(MosaicEditorModel.RegionSeed(
+            sourceID: source, asset: dummyAsset(), sourceRange: 0...10, clipID: UUID(), seedTime: 2.0,
+            seedLandmarks: seedFace, targetID: UUID(), personID: nil))
+        // 旧タスクが起動しスリープループへ入るまで少し待つ。
+        try? await Task.sleep(nanoseconds: 50_000_000)
+
+        model.cancelRegionSeeding()
+        model.enqueueRegionSeed(MosaicEditorModel.RegionSeed(
+            sourceID: source, asset: dummyAsset(), sourceRange: 0...10, clipID: UUID(), seedTime: 2.0,
+            seedLandmarks: seedFace, targetID: UUID(), personID: nil))
+        XCTAssertNotNil(model.regionSeedTask, "新しいシードを積んだ直後にタスクが起動していない")
+
+        // 旧タスクが自分のスリープから抜けて `while` を抜けるまで待つ。旧実装では
+        // ここで無条件の `regionSeedTask = nil` が新タスクの参照を消してしまう。
+        try? await Task.sleep(nanoseconds: 400_000_000)
+
+        XCTAssertNotNil(model.regionSeedTask, "古いタスクの終了処理が新しいタスクの参照を消してしまっている")
+
+        model.isPlaying = false
+        await model.awaitRegionSeeding()
+    }
+
+    // MARK: - 第2段 Step 3: 配線（起動元・待ち合わせ・進捗）
+
+    /// `apply(_:)`（undo）でタイムラインが差し替わるとき、走行中のシード走査が
+    /// 打ち切られてキューが空・進捗が nil に戻ること。
+    func test_apply_undo_cancelsRegionSeeding_queueEmptyAndProgressNil() async {
+        let model = makeModel()
+        let source = model.currentSourceID
+        model.sources[source] = dummyAsset()
+        model.commitEdit()
+        model.objectMosaicOn.toggle()
+        model.commitEdit()
+
+        // `isPlaying` で協調的な譲りループへ足止めし、走査中の状態を作る
+        // （`test_regionSeed_cancelThenEnqueue_doesNotLoseNewTaskReference` と同じ手口）。
+        model.isPlaying = true
+        model.enqueueRegionSeed(MosaicEditorModel.RegionSeed(
+            sourceID: source, asset: dummyAsset(), sourceRange: 0...10, clipID: UUID(), seedTime: 2.0,
+            seedLandmarks: fakeFace(cx: 0.5, cy: 0.5), targetID: UUID(), personID: nil))
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertNotNil(model.regionSeedTask, "テスト前提: シード走査タスクが起動していない")
+
+        model.undo()
+
+        XCTAssertTrue(model.regionSeedQueue.isEmpty, "undo でキューが空になっていない")
+        XCTAssertNil(model.regionSeedProgress, "undo でシード進捗が nil に戻っていない")
+
+        model.isPlaying = false
+        await model.awaitRegionSeeding()
+    }
+
+    /// `load(videoURL:)`（素材入れ替え）は冒頭で `cancelRegionSeeding()` を同期的に
+    /// 呼ぶ。タスク・キュー・進捗が打ち切られ、かつ**配線経由で**進んだ世代により
+    /// 旧世代の書き戻しが捨てられること（世代不一致の判定自体は
+    /// `test_regionSeed_discardsWriteAfterGenerationAdvances` で直接検証済み。
+    /// ここでは配線が実際にそれを引き起こすかを見る）。
+    func test_load_videoURL_cancelsRegionSeeding_atMaterialSwap() {
+        let model = makeModel()
+        let source = model.currentSourceID
+        model.sources[source] = dummyAsset()
+        let seedFace = fakeFace(cx: 0.5, cy: 0.5)
+        let newFace = fakeFace(cx: 0.6, cy: 0.6)
+        guard let (result, outcome) = makeRegionSeedStep(seedFace: seedFace, seedTime: 4.0,
+                                                          range: 0...10, candidates: [newFace]) else {
+            return XCTFail("シードから1ステップも進められなかった（テストの前提が崩れている）")
+        }
+        let state = MosaicEditorModel.RegionSeedScanState(generation: model.regionSeedGeneration)
+        model.enqueueRegionSeed(MosaicEditorModel.RegionSeed(
+            sourceID: source, asset: dummyAsset(), sourceRange: 0...10, clipID: UUID(), seedTime: 2.0,
+            seedLandmarks: seedFace, targetID: UUID(), personID: nil))
+        XCTAssertNotNil(model.regionSeedTask, "テスト前提: シード走査タスクが起動していない")
+
+        model.load(videoURL: URL(fileURLWithPath: "/dev/null"))
+
+        XCTAssertNil(model.regionSeedTask, "素材入れ替えでシード走査タスクが打ち切られていない")
+        XCTAssertTrue(model.regionSeedQueue.isEmpty, "素材入れ替えでキューが空になっていない")
+        XCTAssertNil(model.regionSeedProgress, "素材入れ替えでシード進捗が nil に戻っていない")
+
+        let seed = MosaicEditorModel.RegionSeed(sourceID: source, asset: dummyAsset(), sourceRange: 0...10, clipID: UUID(),
+                                                seedTime: 4.0, seedLandmarks: seedFace,
+                                                targetID: UUID(), personID: nil)
+        model.recordRegionSeedFinding(result, seed: seed, outcome: outcome, signatures: nil, state: state)
+        XCTAssertEqual(model.cacheStore.count, 0,
+                       "load(videoURL:) 配線の cancelRegionSeeding が効いておらず、旧世代の書き戻しが入っている")
+    }
+
+    /// `awaitRegionSeeding()` は走査が実際に走っている（協調的な譲りループで
+    /// 足止めされている）最中に呼んでも固まらず戻ること。あわせて
+    /// `regionSeedProgress` が走査中は非 nil、終了後は nil に戻ることも見る。
+    func test_regionSeed_awaitReturnsDuringActiveScan_andProgressResetsAfter() async {
+        let model = makeModel()
+        let source = model.currentSourceID
+        model.sources[source] = dummyAsset()
+        model.isPlaying = true
+        model.enqueueRegionSeed(MosaicEditorModel.RegionSeed(
+            sourceID: source, asset: dummyAsset(), sourceRange: 0...10, clipID: UUID(), seedTime: 2.0,
+            seedLandmarks: fakeFace(cx: 0.5, cy: 0.5), targetID: UUID(), personID: nil))
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertNotNil(model.regionSeedTask, "テスト前提: シード走査タスクが起動していない")
+        XCTAssertNotNil(model.regionSeedProgress, "走査中なのに regionSeedProgress が nil のまま")
+
+        // 足止めを裏で解除しつつ、awaitRegionSeeding が固まらず戻ることを見る
+        // （`while` の無限待ちではなく回数上限で戻る設計の実地確認）。
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 150_000_000)
+            model.isPlaying = false
+        }
+        await model.awaitRegionSeeding()
+
+        XCTAssertNil(model.regionSeedTask, "awaitRegionSeeding から戻ったのにタスクが残っている")
+        XCTAssertNil(model.regionSeedProgress, "走査終了後も regionSeedProgress が nil に戻っていない")
     }
 }

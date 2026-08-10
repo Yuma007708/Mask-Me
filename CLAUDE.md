@@ -49,9 +49,42 @@ open MaskMe.xcworkspace
 xcodebuild test \
   -workspace MaskMe.xcworkspace \
   -scheme MaskMe \
-  -destination 'platform=iOS Simulator,name=iPhone 17'
+  -destination 'platform=iOS Simulator,name=iPhone 17 Pro' \
+  -only-testing:MaskMeTests
 ```
 
+**普段の反復はこの「速い集合」を使う**（重い実メディア系 7 本を外す。約 16 分 → 約 3 分）:
+
+```bash
+xcodebuild test \
+  -workspace MaskMe.xcworkspace -scheme MaskMe \
+  -destination 'platform=iOS Simulator,name=iPhone 17 Pro' \
+  -only-testing:MaskMeTests \
+  -skip-testing:MaskMeTests/MultiClipExportTests \
+  -skip-testing:MaskMeTests/DiagFaceCoverageTests \
+  -skip-testing:MaskMeTests/RealFaceMosaicTests \
+  -skip-testing:MaskMeTests/FaceIdentityAccuracyTests \
+  -skip-testing:MaskMeTests/ExportSpeedMeasurementTests \
+  -skip-testing:MaskMeTests/DValidLiveModelTests \
+  -skip-testing:MaskMeTests/SampleFalsePositiveTests
+```
+
+外した 7 本が全体 972 秒中 788 秒（81%）を占める。内訳と外してよい根拠:
+
+| スイート | 時間 | 性質 |
+|---|---|---|
+| `MultiClipExportTests` | 173s | 実動画の書き出し |
+| `DiagFaceCoverageTests` | 134s | **診断**（合否の門番ではない） |
+| `RealFaceMosaicTests` | 114s | 実画像の検出精度 |
+| `FaceIdentityAccuracyTests` | 100s | 人物同定の精度 |
+| `ExportSpeedMeasurementTests` | 96s | **速度計測**（合否ではない） |
+| `DValidLiveModelTests` | 90s | 実動画の検出 |
+| `SampleFalsePositiveTests` | 81s | 誤検出率 |
+
+- **コミット前は全部戻して 1 回回す。** とくに**検出・同定・描画・書き出しを触ったら、検出精度の 3 本
+  （`RealFaceMosaicTests` / `FaceIdentityAccuracyTests` / `SampleFalsePositiveTests`）は必ず戻す**。
+  検出の退行は誤モザイクより重い（プライバシーアプリ）ので、ここだけは速さと引き換えにしない。
+- テストを**削除しない**。`-skip-testing` で外すだけにする（いつでも戻せる状態を保つ）。
 - `MaskMeTests/Fixtures/` に実画像・動画・`face_landmarker.task` を配置（未配置は `XCTSkip`）。
 - 実動画 5 本 × backend の網羅検証は `.github/workflows/dvalid.yml` を `workflow_dispatch` で手動起動。
 
@@ -137,6 +170,29 @@ OpticalFlowKit/               # OpenCV 疎 LK フローの動的 framework（シ
 - **テスト件数を報告させる。** 普段の半分程度なら「テストが減った」ではなく
   **MediaPipe が外れたサイン**。件数そのものを数字で出させる
 - Simulator を使う検証を複数同時に走らせない（実機・Simulator の占有で無言で失敗する）
+- **サブエージェントに `git stash` を使わせない。** 停止時に退避したまま放置され、作業ツリーが
+  空に見える（親が `git stash pop` で復元する羽目になる）。切り分けが要るなら別 worktree を使う
+- **サブエージェントに長時間テストの完了判定を任せない。** 「バックグラウンドで走らせたので待ちます」と
+  言ってそこで停止し、結果を持ち帰らない。**親がプロセスとログで自分で確認する**
+- **完了待ちに `pgrep -f "xcodebuild test ..."` を使わない。** 待機シェル自身のコマンドラインが
+  そのパターンに一致し、対象が終わっても永久に空回りする（実績: 1時間以上浪費、空回りのシェルが4本）。
+  `pgrep -x xcodebuild` か、ログに `** TEST` が出るまで待つ形にする
+- テストのログは**毎回新しいファイル**へ書く（前回の実行に追記すると件数の集計が混ざり、
+  古い実行の失敗を今回の失敗と誤読する）
+- **サブエージェントに `.xcodeproj` を手編集させない。** `project.yml` の `sources` は
+  `- path: MaskMe` / `- path: MaskMeTests` の**ディレクトリ glob** なので、新規ファイルは
+  `xcodegen generate` → `pod install` で自動的に取り込まれる。「xcodegen 禁止」だけを伝えると
+  サブエージェントが `project.pbxproj` へ手で `PBXBuildFile` を足しにいく。
+  **新規ファイルを作らせるときは「pbxproj は触らない。親が xcodegen → pod install で入れる」と明記する**
+- **`** TEST FAILED **` なのに失敗 0 件なら、テストの失敗ではなく実行基盤の事故を疑う。**
+  切り分けは**開始件数**（`grep -c "Test Case .* started\."`）:
+  - 0 件 → Simulator の起動失敗（`FBSOpenApplicationServiceErrorDomain` / `Busy`）。
+    直前の実行の後始末が終わっていない。`xcrun simctl list devices booted` が空・
+    `pgrep -x xcodebuild` が idle なのを確かめてから**そのまま再実行**すれば通る
+  - 普段どおりの件数だが `Restarting after unexpected exit, crash, or test timeout` がある
+    → 通し実行中の散発クラッシュ。**単体で再現するか必ず確かめる**
+    （実績: `FaceIdentityAccuracyTests` の診断テストが素材ごとに MediaPipe の GL コンテキストを
+    作り直してリソースを枯らす。単体では緑。再実行で緑）
 
 ### C の進め方
 
@@ -147,6 +203,12 @@ OpticalFlowKit/               # OpenCV 疎 LK フローの動的 framework（シ
 - **落ちないテストは無いのと同じ。** 守っているコードを 1 行壊して実際に落ちるか確かめる
 - **検出の退行は誤モザイクより重い**（プライバシーアプリ）。
   誤検出を下げる修正は、必ず実顔・横顔の検出率を並べて計測してから採用する
+- **親が「ここは安全」と1観点の推論で決めない。** 実績: 第3段の被覆判定で、親が
+  「囲った人物が1人なら、その人が退場した区間は別人にモザイクが乗っているだけで露出しない」と
+  裁定したが、**矩形の外にいる別人**が被覆を埋めるケースを見落としていた（検証で覆った）。
+  安全側の裁定こそ、反例を1つ作ってから確定する
+- **「全緑・367 件」は設計の妥当性を何も保証しない。** 今回、フルテスト緑のまま
+  判定条件に重大な穴が 11 件見つかった。テストは**書いた条件**しか守らない
 
 ## アーキテクチャ規約（崩さないこと）
 
@@ -163,6 +225,26 @@ OpticalFlowKit/               # OpenCV 疎 LK フローの動的 framework（シ
 - オプティカルフロー由来の顔位置は実検出ではないため `detectionCache` に入れず
   `liveFlowCache` に別置きする（エクスポートはキャッシュヒットで検出をスキップするため、
   混ぜると品質汚染になる）。キー整合は `MosaicEditorModel.storePreScanResult` の doc コメント参照。
+- **検出キャッシュへ空エントリ（`cacheStore.store([], ...)`）を書いてよいのは、そのフレームを
+  全画面スキャンして顔が無かったときだけ。** 空エントリは「検出済み・顔なし」の意味で、
+  `shouldDetectPreviewFrame` が `hasEntry` を見てそのバケットのライブ検出を**永久にスキップ**する。
+  ROI を絞った部分検出のミスに空を書くと、そのバケットは二度と救われず素通しのまま固定される。
+  範囲指定シード走査（`MosaicEditorModel+RegionSeeding`）は、全画面フォールバックの結果であっても
+  **空エントリを一切書かない**（検出の退行は誤モザイクより重い、という原則で規則を単純化した）。
+- **部分検出の結果は必ず `mergeDetection` から書く。** 素の `cacheStore.store` は上書きなので、
+  同じバケットにいた他の顔を消す（＝露出が増える方向へ逆流する）。
+- **プレビューで隠れて見えることを、書き出しの安全の根拠にしてはならない。**
+  `lookupFaces`（`MosaicEditorModel+DetectionCache`）は実検出が無いとき
+  `nearestFlowFaces`（`liveFlowCache`＝フロー由来）と `nearestCachedFaces(window: 0.75)` へ
+  フォールバックするが、**エクスポートはこの2つを通らない**（`DetectionBridge` の
+  `bridgeWindow = 8/15 ≒ 0.533` 秒の両側補間のみ）。
+  そのため `selectedLandmarks(at:)` は「画面の見え方」の述語であって「書き出しの安全」の述語ではない。
+  **モザイクを減らす方向の判断（矩形を外す・検出をスキップする）は必ず書き出しと同じ経路で確かめる。**
+  実績: 第3段の被覆判定がこれを取り違え、プレビューでは埋まって見えるが書き出すと素通しになる区間で
+  矩形を外していた。
+- **「覆えているか」を『画面に顔が乗っているか』で測らない。** `selectedLandmarks(at:)` は
+  選択顔を**全部**返すので、対象と無関係な別人が写っているだけで穴が埋まる。
+  特定の人物について覆いを判断するなら、その人物を検出して書き込んだ時刻そのものを根拠にする。
 - カメラ撮影は**モザイク焼き込み済みメディアだけを保存**する設計（原本は残さない。
   レコーダー層は描画済みバッファ以外を受け取らない）。
 

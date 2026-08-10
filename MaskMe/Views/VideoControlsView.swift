@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// 動画プレビュー専用コントロール：タイムライン + 再生行（時刻・情報・再検出・Undo/Redo）。
+/// 動画プレビュー専用コントロール：タイムライン + 再生行（時刻・情報・Undo/Redo）。
 struct VideoControlsView: View {
     @ObservedObject var model: MosaicEditorModel
 
@@ -19,8 +19,13 @@ struct VideoControlsView: View {
 
     /// 再生行。**時刻行と再生行を 1 段に統合**してある（約 20pt の回収）。
     ///
-    /// 一般的な動画編集アプリと同じ `[▶] 現在 / 全体 … [再検出] [↩][↪]` の並び。
+    /// 一般的な動画編集アプリと同じ `[▶] 現在 / 全体 … [↩][↪]` の並び。
     /// 分けていた版は「時刻だけの 17pt の段」が丸ごと余白になっていた。
+    ///
+    /// **「再検出」ボタンは撤去した。** 途中から現れた人は
+    /// `MosaicEditorModel+PersonAdmission` が署名で見分けて自動で顔一覧へ足すので、
+    /// 押す理由が無くなった。押した結果が「その素材の顔を作り直す」＝
+    /// 選択の引き継ぎ次第でモザイクが外れうる操作でもあったので、経路ごと消してある。
     ///
     /// **クリップ構成の要約（"3 クリップ / つなぎ 1"）はここから外した。** 1 段に
     /// 詰めた結果 iPhone の幅では出力解像度と両立せず、かつクリップ本数も継ぎ目も
@@ -69,18 +74,6 @@ struct VideoControlsView: View {
             }
 
             Spacer(minLength: 4)
-
-            Button {
-                Task { await model.redetect(at: model.playbackPosition) }
-            } label: {
-                Label("再検出", systemImage: "face.dashed")
-                    .font(.caption.weight(.medium))
-                    .foregroundStyle(.white)
-                    .lineLimit(1)
-                    .padding(.horizontal, 8)
-                    .frame(height: 34)
-                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
-            }
 
             undoRedoButtons
         }

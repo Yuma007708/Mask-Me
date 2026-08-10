@@ -46,6 +46,9 @@ struct FaceSelectorView: View {
                 if let progress = model.objectTrackingProgress {
                     trackingChip(progress)
                 }
+                if let progress = model.regionSeedProgress {
+                    regionSeedChip(progress)
+                }
                 if showsFaces && model.detectedFaces.isEmpty && model.objectMasks.isEmpty {
                     Text("顔を検出できませんでした")
                         .font(.footnote)
@@ -153,6 +156,24 @@ struct FaceSelectorView: View {
         .accessibilityLabel("矩形を自動追跡しています")
     }
 
+    /// 範囲指定で見つけた顔を前後へ追い続ける走査（第2段）が走っている間だけ出る表示。
+    /// `trackingChip` と同じ理由（進行中であることを見せないと、後から急に
+    /// モザイクが追加/変化したように見える）。
+    private func regionSeedChip(_ progress: Double) -> some View {
+        VStack(spacing: 2) {
+            Image(systemName: "person.crop.rectangle")
+                .font(.system(size: compact ? 15 : 18, weight: .semibold))
+            Text("\(Int(progress * 100))%")
+                .font(.system(size: 10, weight: .semibold))
+                .monospacedDigit()
+        }
+        .foregroundStyle(.orange)
+        .frame(width: chipSize, height: chipSize)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Color.orange.opacity(0.12)))
+        .accessibilityIdentifier("editor.regionSeedProgress")
+        .accessibilityLabel("囲った範囲を追跡中")
+    }
+
     // MARK: - 物体マスクのチップ
 
     /// ✕ は**マスクごと削除**（キーフレーム 1 個だけを消すのではない）。
@@ -162,16 +183,16 @@ struct FaceSelectorView: View {
         } label: {
             ZStack {
                 RoundedRectangle(cornerRadius: 10)
-                    .fill(Color.orange.opacity(0.2))
+                    .fill(Color.blue.opacity(0.2))
                     .frame(width: chipSize, height: chipSize)
                     .overlay(
                         RoundedRectangle(cornerRadius: 10)
-                            .stroke(Color.orange, lineWidth: 2)
+                            .stroke(Color.blue, lineWidth: 2)
                     )
                 VStack(spacing: 2) {
                     Image(systemName: "rectangle.dashed")
                         .font(.system(size: 20))
-                        .foregroundStyle(.orange)
+                        .foregroundStyle(.blue)
                     Image(systemName: "xmark.circle.fill")
                         .font(.system(size: 11))
                         .foregroundStyle(.red)

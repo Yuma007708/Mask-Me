@@ -116,16 +116,34 @@ public struct ObjectMask: Identifiable, Equatable, Sendable {
     /// 編集は `settingKeyframe` / `movingKeyframe` / `removingKeyframe` を通す。
     public private(set) var keyframes: [Keyframe]
 
+    /// **矩形サーチ（範囲指定）第 1 段の暫定マスクか。**
+    ///
+    /// 「範囲を指定したら、顔が見つかっても見つからなくても矩形で確実に隠す」
+    /// という第 1 段の実装は、第 2 段（見つけた顔をそのまま追跡させ、矩形を外す）
+    /// が来るまでの**一時的な**マスクを生む。既存フィールド（`anchor` /
+    /// `keyframes`）は「どこにどう貼るか」の情報しか持たず「なぜ・いつ置いたか」
+    /// を表現できないため、既存フィールドの意味を変えず・下書き互換を壊さない形で
+    /// 「後から特定して外せる」ようにするには新フィールドを 1 個足すのが最小の変更
+    /// だった（`ObjectMask.id` を特別な採番規則にする案は、id の一意性という
+    /// 不変条件の意味をもう一つ背負わせることになるため避けた）。
+    ///
+    /// 既定値 `false` かつ `decodeIfPresent` でデコードするため、このフィールドが
+    /// 存在しない下書き（過去にエクスポートされた JSON）を読んでも失敗しない
+    /// （`ObjectMask` の他の Codable 移行と同じ規約。`Keyframe.angle` 参照）。
+    public var isRegionPlaceholder: Bool
+
     /// キーフレーム列から作る。**正規化の結果が空になったら nil。**
     ///
     /// 正規化は「非有限を捨てる → 素材時刻の昇順 → 同時刻は後勝ちで 1 個に潰す」。
     /// 空のマスクは「どの時刻でも矩形が決まらない」＝存在してはいけない状態なので、
     /// 呼び出し側に必ず判断させる（黙って空を通すと補間側で nil 合体が要る）。
-    public init?(id: UUID = UUID(), anchor: Anchor, keyframes: [Keyframe]) {
+    public init?(id: UUID = UUID(), anchor: Anchor, keyframes: [Keyframe],
+                 isRegionPlaceholder: Bool = false) {
         let normalized = Self.normalized(keyframes)
         guard !normalized.isEmpty else { return nil }
         self.id = id
         self.anchor = anchor
+        self.isRegionPlaceholder = isRegionPlaceholder
         // `.still` は時間軸を持たないので、常に「時刻 0 のキーフレーム 1 個」へ畳む。
         // 検査を `TimelineState.validate()` に委ねてはいけない（呼び出しがテストにしか
         // 無く、本番では誰も落とさない）。型が入口で守る。
@@ -134,9 +152,11 @@ public struct ObjectMask: Identifiable, Equatable, Sendable {
 
     /// キーフレーム 1 個のマスク（旧 `ManualRegion` 相当）。矩形が非有限なら nil。
     public static func single(id: UUID = UUID(), anchor: Anchor,
-                              sourceTime: Double = 0, rect: CGRect) -> ObjectMask? {
+                              sourceTime: Double = 0, rect: CGRect,
+                              isRegionPlaceholder: Bool = false) -> ObjectMask? {
         ObjectMask(id: id, anchor: anchor,
-                   keyframes: [Keyframe(sourceTime: sourceTime, rect: rect)])
+                   keyframes: [Keyframe(sourceTime: sourceTime, rect: rect)],
+                   isRegionPlaceholder: isRegionPlaceholder)
     }
 
     // MARK: - 補間
@@ -357,7 +377,7 @@ public struct ObjectMask: Identifiable, Equatable, Sendable {
 // MARK: - Codable
 
 extension ObjectMask: Codable {
-    private enum CodingKeys: String, CodingKey { case id, anchor, keyframes }
+    private enum CodingKeys: String, CodingKey { case id, anchor, keyframes, isRegionPlaceholder }
 
     /// デコード時も不変条件（昇順・重複なし・非空）を通す。
     ///
@@ -369,7 +389,13 @@ extension ObjectMask: Codable {
         let id = try container.decode(UUID.self, forKey: .id)
         let anchor = try container.decode(Anchor.self, forKey: .anchor)
         let keyframes = try container.decode([Keyframe].self, forKey: .keyframes)
-        guard let mask = ObjectMask(id: id, anchor: anchor, keyframes: keyframes) else {
+        // `isRegionPlaceholder` は後から足したフィールドなので、それが無い下書きも
+        // 読めなければならない（`angle` と同じ移行規約）。無ければ「暫定マスクでは
+        // ない」＝ false として読む。
+        let isRegionPlaceholder = try container.decodeIfPresent(
+            Bool.self, forKey: .isRegionPlaceholder) ?? false
+        guard let mask = ObjectMask(id: id, anchor: anchor, keyframes: keyframes,
+                                   isRegionPlaceholder: isRegionPlaceholder) else {
             throw DecodingError.dataCorruptedError(
                 forKey: .keyframes, in: container,
                 debugDescription: "ObjectMask のキーフレームが空、または全て非有限だった")
@@ -382,5 +408,6 @@ extension ObjectMask: Codable {
         try container.encode(id, forKey: .id)
         try container.encode(anchor, forKey: .anchor)
         try container.encode(keyframes, forKey: .keyframes)
+        try container.encode(isRegionPlaceholder, forKey: .isRegionPlaceholder)
     }
 }

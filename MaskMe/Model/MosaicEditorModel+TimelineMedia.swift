@@ -140,12 +140,18 @@ extension MosaicEditorModel {
     /// 誤った素材キーに落ちる。`storeLiveDetection(_:at:source:signatures:generation:)` と同じ理由）。
     /// **`liveDetectionInFlight` は触らない**——検出側が既に下ろしており、ここで
     /// もう一度触ると進行中の別フレームの検出ガードを誤って解除する。
+    ///
+    /// - Parameter frame: 検出に使ったフレーム（`signatureSource` の原寸ではない）。
+    ///   途中から現れた人物を自動追加する経路（`admitEmergingPersons`）が、
+    ///   確定した顔のサムネイルをこのフレームから作るために使う。
     @MainActor
     func storeLiveSignatures(_ signatures: [FaceSignature?], for faces: [FaceLandmarkSet],
-                             at t: Double, generation: Int) {
+                             at t: Double, frame: UIImage, generation: Int) {
         guard generation == timelineGeneration else { return }
         let (sourceID, sourceTime) = resolveSourceTime(atComposition: t)
         signatureCache.store(signatures, for: faces, sourceID: sourceID, time: sourceTime)
+        admitEmergingPersons(faces: faces, signatures: signatures,
+                             sourceID: sourceID, sourceTime: sourceTime, frame: frame)
     }
 
     /// 写真クリップの検出 seed（素材時刻 t=0 の 1 回だけ）。

@@ -73,11 +73,15 @@ public enum ObjectMaskEditOperations {
         let frontFrames = mask.keyframes.filter { $0.sourceTime < split } + [boundary]
         let backFrames = [ObjectMask.Keyframe(sourceTime: split, rect: boundary.rect)]
             + mask.keyframes.filter { $0.sourceTime > split }
+        // `isRegionPlaceholder` は分割の前後どちらにも引き継ぐ（第2段が矩形サーチ由来の
+        // 暫定マスクを見分けるためのフラグなので、分割で片方だけ落とすと見失う）。
         let frontMask = ObjectMask(id: mask.id,
                                    anchor: .clip(clipID: front.id, sourceID: front.sourceID),
-                                   keyframes: frontFrames)
+                                   keyframes: frontFrames,
+                                   isRegionPlaceholder: mask.isRegionPlaceholder)
         let backMask = ObjectMask(anchor: .clip(clipID: back.id, sourceID: back.sourceID),
-                                  keyframes: backFrames)
+                                  keyframes: backFrames,
+                                  isRegionPlaceholder: mask.isRegionPlaceholder)
         // 生成に失敗する入力は無い（境界キーフレームを必ず 1 個含むため）が、
         // 万一 nil になったら元のマスクを落とさず残す（隠し忘れより隠しすぎへ倒す）。
         guard let frontMask, let backMask else { return [mask] }
@@ -91,9 +95,9 @@ public enum ObjectMaskEditOperations {
         let rect = mask.rect(atSourceTime: 0)
         let frontMask = ObjectMask.single(id: mask.id,
                                           anchor: .clip(clipID: front.id, sourceID: front.sourceID),
-                                          rect: rect)
+                                          rect: rect, isRegionPlaceholder: mask.isRegionPlaceholder)
         let backMask = ObjectMask.single(anchor: .clip(clipID: back.id, sourceID: back.sourceID),
-                                         rect: rect)
+                                         rect: rect, isRegionPlaceholder: mask.isRegionPlaceholder)
         guard let frontMask, let backMask else { return [mask] }
         return [frontMask, backMask]
     }

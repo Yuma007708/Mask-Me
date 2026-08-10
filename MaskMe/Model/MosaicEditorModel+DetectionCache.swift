@@ -289,6 +289,41 @@ extension MosaicEditorModel {
     func sourceScopedCache(for sourceID: UUID) -> [Double: [FaceLandmarkSet]] {
         cacheStore.projectedFaces(sourceID: sourceID)
     }
+
+    // MARK: - 矩形サーチ結果のマージ書き込み
+
+    /// 矩形サーチ（`detectInRegion` / `resolveRegion`）が見つけた顔を検出キャッシュへ
+    /// **追記**する。
+    ///
+    /// **`cacheStore.store` を素で呼んではいけない。** `store` はそのバケットを
+    /// 丸ごと置き換える（上書き）。矩形サーチはユーザーが描いた範囲の中だけを見ており、
+    /// そのバケットには既にライブ検出・初期スキャンが見つけた**別人**の顔が入っている
+    /// ことがある。`store` で置き換えると、その別人の顔がキャッシュから消え、
+    /// 「隠したかった人はモザイクが掛かるが、たまたま同じバケットにいた別の人の
+    /// モザイクが消える」という、プライバシーアプリとしては最悪の方向（露出が増える）
+    /// に逆流する。既存を読んでから合成し直す＝「マージ」でなければならない。
+    ///
+    /// - Parameter sourceID: nil（写真モード・素材ID解決不能）なら何もしない。
+    ///   写真モードは `detectedFaces` 側の絞り込みだけで完結し、検出キャッシュの
+    ///   概念自体が無い（`FaceTarget.sourceID` の doc 参照）。
+    /// - Parameter sourceTime: **素材内時刻**（合成時刻ではない）。呼び出し側で
+    ///   丸めないこと——バケットへの丸めは `DetectionCacheKey.init` に一本化してある
+    ///   （呼び出し側がバラバラに丸めるとプリスキャン/ライブ検出でキーが分裂した
+    ///   過去の回帰と同じ事故になる。`storePreScanResult` の doc 参照）。
+    ///   ここでは丸めの**前**の処理として `TimelineState.clampedSourceTime` だけを通す
+    ///   （写真クリップの素材時刻を 0 へ畳む。動画では実質恒等）。
+    func mergeDetection(_ faces: [FaceLandmarkSet], sourceID: UUID?, sourceTime: Double) {
+        guard let sourceID else { return }
+        let clampedTime = timeline.clampedSourceTime(sourceTime, sourceID: sourceID)
+        let existing = cacheStore.faces(sourceID: sourceID, time: clampedTime) ?? []
+        // 重複判定は「別人と言い切れるか」の逆（＝同一人物とみなせるか）を
+        // bbox IoU で見る既存ロジック（`DetectionBridge` が時系列補間の対応判定に
+        // 使っているのと同じ `FaceLandmarkSet.hasCounterpart`、閾値 0.3）をそのまま
+        // 再利用する。式を二重管理しない（このプロジェクトの規約）。
+        let newOnes = faces.filter { !$0.hasCounterpart(in: existing) }
+        guard !newOnes.isEmpty else { return }
+        cacheStore.store(existing + newOnes, sourceID: sourceID, time: clampedTime)
+    }
 }
 
 #endif

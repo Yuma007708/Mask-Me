@@ -33,6 +33,8 @@ public struct VisibleObjectMask: Identifiable, Equatable {
     public let rect: CGRect
     /// ピクセル空間での傾き（ラジアン）。
     public let angle: Double
+    /// いま追えているか（`ObjectMaskResolver.resolve` の判定。青枠の線種・ラベルに使う）。
+    public let state: ObjectMaskFollowState
 }
 
 @MainActor
@@ -106,19 +108,31 @@ extension MosaicEditorModel {
         guard !clips.isEmpty else {
             return objectMasks.filter(\.anchor.isStill).map {
                 VisibleObjectMask(id: $0.id, rect: $0.rect(atSourceTime: 0),
-                                  angle: $0.angle(atSourceTime: 0))
+                                  angle: $0.angle(atSourceTime: 0), state: .fixed)
             }
         }
         let resolved = resolveSourceLocation(atComposition: time)
         return objectMasks.filter { $0.anchor.clipID == resolved.clipID }.map { mask in
             // チップの枠も軌跡に乗せる（描画だけ追跡位置・枠はキーフレーム位置、では
             // ユーザーが「どこを掴めば直せるのか」を見失う）。
-            let rect = ObjectMaskResolver.rect(of: mask, tracks: objectTracks,
-                                               atSourceTime: resolved.time)
+            // **`resolve` は 1 回だけ呼ぶ**（rect用とstate用に2回呼ぶと、毎フレームの
+            // 線形走査が2倍になる。`ObjectTrack.Segment.rect(at:)` は O(サンプル数)）。
+            // `isTrackingRunning` はクリップ単位で引く——マスク単位の分岐は
+            // `ObjectMaskResolver.resolve` の判定順（2/3）が担当する。
+            //
+            // `objectTrackingTasks` は非 `@Published` だが、その増減は必ず
+            // `scheduleObjectTracking` / `finishTracking`（`MosaicEditorModel+ObjectTracking.swift:49,155`）
+            // という `publishTrackingProgress()` を呼ぶ関数の中で起きるので、状態遷移は
+            // 画面に届く。この呼び出しを消すと枠の状態（解析中 → 追跡なし等）が固まる。
+            let isTrackingRunning = resolved.clipID.map { objectTrackingTasks[$0] != nil } ?? false
+            let resolvedMask = ObjectMaskResolver.resolve(
+                of: mask, tracks: objectTracks, atSourceTime: resolved.time,
+                isTrackingRunning: isTrackingRunning)
             let angle = mask.angle(atSourceTime: resolved.time)
-            return VisibleObjectMask(id: mask.id,
-                                     rect: renderLayout.remap(rect, clipID: resolved.clipID),
-                                     angle: angle)
+            return VisibleObjectMask(
+                id: mask.id,
+                rect: renderLayout.remap(resolvedMask.rect, clipID: resolved.clipID),
+                angle: angle, state: resolvedMask.state)
         }
     }
 
@@ -139,8 +153,13 @@ extension MosaicEditorModel {
     /// 旧 `appendManualRect` の後継。矩形サーチで顔が見つからなかったときの
     /// フォールバック経路であることは変えていない（顔として見つかれば顔追跡に乗り、
     /// 物体モザイクの話ではなくなる）。
-    func appendObjectMask(compositionRect rect: CGRect) {
-        guard let mask = makeObjectMask(compositionRect: rect) else { return }
+    /// - Returns: 追加したマスクの id。作れなかった（写像不能・クリップ未解決）ときは nil。
+    ///   戻り値は第 2 段の範囲指定シード（`RegionSeed.maskID`）が「どの暫定矩形の
+    ///   被覆判定に属するか」を紐づけるために使う（`detectInRegion` / `resolveRegion` の
+    ///   呼び出し箇所を参照）。既存の呼び出し（戻り値を使わない）は無変更で通る。
+    @discardableResult
+    func appendObjectMask(compositionRect rect: CGRect) -> UUID? {
+        guard let mask = makeObjectMask(compositionRect: rect) else { return nil }
         objectMasks.append(mask)
         // **描いた矩形が無言で出ない状態を作らない。** 矩形を描く操作そのものが
         // 「ここを隠す」という意思表示なので、切ってあった ON/OFF を戻し、
@@ -148,16 +167,24 @@ extension MosaicEditorModel {
         objectMosaicOn = true
         ensureApplyRangesExist()
         commitEdit()
+        return mask.id
     }
 
     private func makeObjectMask(compositionRect rect: CGRect) -> ObjectMask? {
-        guard !clips.isEmpty else { return ObjectMask.single(anchor: .still, rect: rect) }
+        // `appendObjectMask` は矩形サーチ（`detectInRegion` / `resolveRegion`）の
+        // 経路からしか呼ばれない（呼び出し元 doc 参照）ので、ここで作るマスクは
+        // 常に第 1 段の暫定マスク。`isRegionPlaceholder: true` を立てておくことで
+        // 第 2 段（顔追跡に差し替えて矩形を外す）が対象を取り違えずに特定できる。
+        guard !clips.isEmpty else {
+            return ObjectMask.single(anchor: .still, rect: rect, isRegionPlaceholder: true)
+        }
         let resolved = resolveSourceLocation(atComposition: compositionTimeForOverlay)
         guard let clipID = resolved.clipID,
               let clip = clips.first(where: { $0.id == clipID }),
               let sourceRect = renderLayout.inverseRemap(rect, clipID: clipID) else { return nil }
         return ObjectMask.single(anchor: .clip(clipID: clipID, sourceID: clip.sourceID),
-                                 sourceTime: resolved.time, rect: sourceRect)
+                                 sourceTime: resolved.time, rect: sourceRect,
+                                 isRegionPlaceholder: true)
     }
 
     /// マスクごと削除する（UI のチップの ✕）。

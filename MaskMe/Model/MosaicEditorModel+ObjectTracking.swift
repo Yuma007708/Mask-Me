@@ -116,6 +116,10 @@ extension MosaicEditorModel {
                 ObjectMaskTracker.Request(mask: $0, clipID: clipID, sourceID: clip.sourceID)
             }
             let range = clip.sourceStart...max(clip.sourceStart.nextUp, clip.sourceEnd)
+            // シード走査と矩形追跡が同時にデコーダを奪い合わないよう、開始時点で
+            // 直列化する（`shouldYieldTrackingDecoder` による途中の譲り合いはあるが、
+            // 開始前に済ませておく方が確実）。
+            await self.awaitRegionSeeding()
             let tracks = await ObjectMaskTracker.track(
                 requests, asset: asset, sourceRange: range,
                 // デコーダの譲り方は `shouldYieldTrackingDecoder` の doc を参照

@@ -7,7 +7,7 @@ import MosaicCore
 /// DValidLivePathTests は検出器〜lookupFaces までを実動画で測るが、実機のモザイク描画は
 /// さらに `detectedFaces` の選択状態と `selectedLandmarks` の重心マッチングを通る。
 /// この層は実機報告「フレームアウト→イン／後ろ向き→正面のあと一切モザイクが掛からない」
-/// の温床だったため（redetect の選択消去・isSelected:false シード・静的位置マッチング）、
+/// の温床だったため（撤去した「再検出」の選択消去・isSelected:false シード・静的位置マッチング）、
 /// フェイク顔でパターン網羅する。検出器そのものはステートレスで DValid 系が担保する。
 @MainActor
 final class LiveScenarioTests: XCTestCase {
@@ -101,44 +101,57 @@ final class LiveScenarioTests: XCTestCase {
                        "正面に戻ってもモザイクが復帰しない")
     }
 
-    // MARK: - 再検出ボタンの選択引き継ぎ（redetect の中核ロジック）
+    // MARK: - 顔一覧を作り直す経路が無いこと（旧「再検出」ボタンの後継）
+    //
+    // かつて `redetect(at:)` が顔一覧をその素材ぶん作り直しており、
+    // 選択は重心 0.5 のマッチで引き継ぐしかなかった（引き継ぎに失敗すると
+    // モザイクが全消えする実機報告の直接原因）。ボタンごと撤去した今、
+    // 守るべき性質は「**ライブ検出は既にある顔を作り直さない**」に変わる。
+    // ここが破れると、ID が変わって人物同定（`personID`）も選択も飛ぶ。
 
-    /// 近い位置で再検出された顔は選択が引き継がれ、他は非選択のままになること。
-    func test_carryOverSelection_keepsNearbySelection() {
+    /// 既に顔一覧がある状態でライブ検出が続いても、`FaceTarget.id` と選択が
+    /// 保たれること（＝作り直し経路の復活を検出する防波堤）。
+    ///
+    /// 変異: `MosaicEditorModel+LiveDetection` の `if detectedFaces.isEmpty {` を
+    /// 外して無条件代入にする → このテストで落ちること。
+    func test_liveDetection_keepsExistingTargetIdentityAndSelection() {
         let model = makeModel()
-        let selectedOld = FaceTarget(id: UUID(), landmarks: fakeFace(cx: 0.3, cy: 0.4),
-                                     thumbnail: UIImage(), isSelected: true)
-        let new = [
-            FaceTarget(id: UUID(), landmarks: fakeFace(cx: 0.32, cy: 0.42),
-                       thumbnail: UIImage(), isSelected: false),
-            FaceTarget(id: UUID(), landmarks: fakeFace(cx: 0.9, cy: 0.9),
-                       thumbnail: UIImage(), isSelected: false)
-        ]
-        let result = model.carryingOverSelection(new, previousSelected: [selectedOld])
-        XCTAssertTrue(result[0].isSelected)
-        XCTAssertFalse(result[1].isSelected)
+        // 1 顔で始まり、自動選択される。
+        feed(model, faces: [fakeFace(cx: 0.3, cy: 0.4)], at: 0)
+        guard let originalID = model.detectedFaces.first?.id else {
+            return XCTFail("初回のライブ検出で顔一覧が作られていない")
+        }
+        XCTAssertTrue(model.detectedFaces[0].isSelected)
+
+        // 以降、位置が動いても・人数が増えても顔一覧は作り直されない。
+        for i in 1...20 {
+            let t = Double(i) * step
+            feed(model, faces: [fakeFace(cx: 0.3 + Double(i) * 0.01, cy: 0.4),
+                                fakeFace(cx: 0.85, cy: 0.85)], at: t)
+        }
+        XCTAssertEqual(model.detectedFaces.first?.id, originalID,
+                       "ライブ検出が既存ターゲットを作り直している（人物IDと選択が飛ぶ）")
+        XCTAssertTrue(model.detectedFaces[0].isSelected,
+                      "既存ターゲットの選択がライブ検出で外れている")
     }
 
-    /// 旧選択と誰もマッチしなくても、全選択にフォールバックして「再検出を押したら
-    /// モザイクが全消えして二度と掛からない」を起こさないこと（実機報告の直接原因）。
-    func test_carryOverSelection_failsClosedWhenNoMatch() {
+    /// 顔が消える／増える／位置が飛ぶフレーム列を通しても、選択されている顔の数が
+    /// **減らない**こと。減る経路があると、その瞬間から素顔が書き出しに残る。
+    func test_liveDetection_neverReducesSelectedFaceCount() {
         let model = makeModel()
-        let selectedOld = FaceTarget(id: UUID(), landmarks: fakeFace(cx: 0.1, cy: 0.1),
-                                     thumbnail: UIImage(), isSelected: true)
-        let new = [FaceTarget(id: UUID(), landmarks: fakeFace(cx: 0.9, cy: 0.9),
-                              thumbnail: UIImage(), isSelected: false)]
-        let result = model.carryingOverSelection(new, previousSelected: [selectedOld])
-        XCTAssertTrue(result.allSatisfy(\.isSelected),
-                      "選択が空になり以降モザイクが一切掛からなくなる")
-    }
+        feed(model, faces: [fakeFace(cx: 0.3, cy: 0.4)], at: 0)
+        let baseline = model.detectedFaces.filter(\.isSelected).count
+        XCTAssertEqual(baseline, 1)
 
-    /// 旧選択が空（全消去状態から押した）でも全選択になること。
-    func test_carryOverSelection_selectsAllWhenNothingWasSelected() {
-        let model = makeModel()
-        let new = [FaceTarget(id: UUID(), landmarks: fakeFace(cx: 0.5, cy: 0.5),
-                              thumbnail: UIImage(), isSelected: false)]
-        let result = model.carryingOverSelection(new, previousSelected: [])
-        XCTAssertTrue(result[0].isSelected)
+        var t = step
+        for _ in 0..<10 { feed(model, faces: [], at: t); t += step }                    // 全滅
+        for _ in 0..<10 { feed(model, faces: [fakeFace(cx: 0.9, cy: 0.1)], at: t); t += step } // 対角へ飛ぶ
+        for _ in 0..<10 {                                                               // 2 人に増える
+            feed(model, faces: [fakeFace(cx: 0.9, cy: 0.1), fakeFace(cx: 0.2, cy: 0.8)], at: t)
+            t += step
+        }
+        XCTAssertGreaterThanOrEqual(model.detectedFaces.filter(\.isSelected).count, baseline,
+                                    "ライブ検出の途中で選択顔が減っている（その区間から素顔が残る）")
     }
 
     // MARK: - 複数顔・部分選択

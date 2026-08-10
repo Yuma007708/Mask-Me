@@ -94,6 +94,13 @@ struct EditorView: View {
         .onDisappear {
             autosaveTask?.cancel()
             UIApplication.shared.isIdleTimerDisabled = false
+            // 画面を閉じるときに走行中の走査を畳む。`objectTrackingTasks` /
+            // `regionSeedTask` は `self` を強く保持したまま実行され続けるため、
+            // ここで打ち切らないと画面を離れてもデコードが走り続ける
+            // （`cancelObjectTracking()` はこれまでどの経路からも呼ばれておらず、
+            // 追跡側もここが畳み忘れの穴だったので合わせて塞ぐ）。
+            model.cancelObjectTracking()
+            model.cancelRegionSeeding()
         }
         .confirmationDialog(
             "編集を破棄して戻りますか？",

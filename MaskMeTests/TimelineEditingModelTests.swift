@@ -2082,13 +2082,15 @@ final class TimelineEditingModelTests: XCTestCase {
                        "保存時に非選択だった顔が復元で選択されている")
     }
 
-    /// `redetect(at:)` が**再検出した素材の顔だけ**を差し替え、他素材の顔と選択を
-    /// 保つこと（複数クリップで踏むと、他素材のモザイクが丸ごと外れる）。
+    /// 複数クリップの顔一覧が、再生中のライブ検出で壊れないこと。
     ///
-    /// 合成テスト動画には実顔が写らないので、再検出そのものは `detectedFaces` を
-    /// 直接注入して代替する（他テストと同じ手法）。ここで固定したいのは
-    /// 「配列を丸ごと差し替えない」ことと、素材スコープの選択引き継ぎ。
-    func test_carryingOverSelection_isScopedToRedetectedSource() async throws {
+    /// かつては「再検出」ボタンが顔一覧をその素材ぶん作り直しており、素材スコープを
+    /// 誤ると**他素材の顔と選択が丸ごと消える**（その区間のモザイクが外れる）。
+    /// ボタンは撤去したので、いま同じ事故を起こしうるのはライブ検出だけになった。
+    /// ライブ検出は顔一覧が空のときしか作らない契約なので、それを固定する。
+    ///
+    /// 合成テスト動画には実顔が写らないため、顔一覧は直接注入する（他テストと同じ手法）。
+    func test_liveDetection_doesNotDisturbOtherSourceFaces() async throws {
         let url = try await makeTestVideo(seconds: 1.0)
         defer { try? FileManager.default.removeItem(at: url) }
         let model = makeModel()
@@ -2103,25 +2105,25 @@ final class TimelineEditingModelTests: XCTestCase {
             FaceTarget(id: UUID(), landmarks: fakeFace(cx: 0.8, cy: 0.8), thumbnail: UIImage(),
                        isSelected: true, sourceID: sourceB)
         ]
+        let idsBefore = model.detectedFaces.map(\.id)
 
-        // A を再検出した相当（A の顔が少し動いた）
-        model.replaceDetectedFaces(
-            [FaceTarget(id: UUID(), landmarks: fakeFace(cx: 0.25, cy: 0.22), thumbnail: UIImage(),
-                        isSelected: false, sourceID: sourceA)],
-            ofSource: sourceA)
+        // A を再生した相当のライブ検出（A の顔が少し動いた）。
+        for i in 0..<10 {
+            model.storeLiveDetection([fakeFace(cx: 0.25 + Double(i) * 0.01, cy: 0.22)],
+                                     at: model.liveBucket(Double(i) / 15.0), source: UIImage())
+        }
 
-        let bFaces = model.detectedFaces.filter { $0.sourceID == sourceB }
-        XCTAssertEqual(bFaces.count, 1, "再検出していない素材の顔が消えている")
-        XCTAssertTrue(bFaces.allSatisfy(\.isSelected), "再検出していない素材の顔の選択が消えている")
-        let aFaces = model.detectedFaces.filter { $0.sourceID == sourceA }
-        XCTAssertEqual(aFaces.count, 1, "再検出した素材の顔が差し替わっていない")
-        XCTAssertTrue(aFaces.allSatisfy(\.isSelected), "再検出前の選択が引き継がれていない")
+        XCTAssertEqual(model.detectedFaces.map(\.id), idsBefore,
+                       "ライブ検出で顔一覧が作り直されている（他素材の顔と選択が飛ぶ）")
+        XCTAssertTrue(model.detectedFaces.allSatisfy(\.isSelected),
+                      "ライブ検出で選択が外れている")
+        XCTAssertEqual(model.detectedFaces.filter { $0.sourceID == sourceB }.count, 1,
+                       "再生していない素材の顔が消えている")
     }
 
-    /// 素材スコープの選択引き継ぎでも、フェイルクローズ（誰も選択されない結果に
-    /// なるならその素材を全選択）は維持されること。他素材が選択済みでも、
-    /// **再検出した素材の中で**判定する（他素材の選択に釣られて 0 個選択にしない）。
-    func test_carryingOverSelection_failsClosedWithinRedetectedSource() async throws {
+    /// 途中から現れた人物の自動追加が、**他素材の顔と選択に触れない**こと。
+    /// 追加は末尾追記で、既存の並び・ID・選択はそのまま残る。
+    func test_personAdmission_appendsWithoutTouchingOtherSourceFaces() async throws {
         let url = try await makeTestVideo(seconds: 1.0)
         defer { try? FileManager.default.removeItem(at: url) }
         let model = makeModel()
@@ -2131,25 +2133,32 @@ final class TimelineEditingModelTests: XCTestCase {
         let sourceB = UUID()
 
         model.detectedFaces = [
-            FaceTarget(id: UUID(), landmarks: fakeFace(cx: 0.1, cy: 0.1), thumbnail: UIImage(),
-                       isSelected: false, sourceID: sourceA),
-            FaceTarget(id: UUID(), landmarks: fakeFace(cx: 0.15, cy: 0.12), thumbnail: UIImage(),
-                       isSelected: true, sourceID: sourceB)
+            FaceTarget(id: UUID(), landmarks: fakeFace(cx: 0.2, cy: 0.2), thumbnail: UIImage(),
+                       isSelected: true, sourceID: sourceA),
+            FaceTarget(id: UUID(), landmarks: fakeFace(cx: 0.8, cy: 0.8), thumbnail: UIImage(),
+                       isSelected: false, sourceID: sourceB)
         ]
+        let idsBefore = model.detectedFaces.map(\.id)
+        let selectionBefore = model.detectedFaces.map(\.isSelected)
 
-        // A の再検出結果は、A の選択顔（0 個）と照合できない → A を全選択
-        model.replaceDetectedFaces(
-            [FaceTarget(id: UUID(), landmarks: fakeFace(cx: 0.9, cy: 0.9), thumbnail: UIImage(),
-                        isSelected: false, sourceID: sourceA)],
-            ofSource: sourceA)
+        // 1 軸だけ立てた署名 = 既知の誰とも直交する未知の人物。
+        var values = [Float](repeating: 0, count: FaceSignature.dimension)
+        values[7] = 1
+        guard let signature = FaceSignature(rawValues: values) else {
+            return XCTFail("署名を作れない")
+        }
+        for t in [0.0, 0.5, 1.0] {
+            model.admitEmergingPersons(faces: [fakeFace(cx: 0.5, cy: 0.5)], signatures: [signature],
+                                       sourceID: sourceA, sourceTime: t, frame: UIImage())
+        }
 
-        let aFaces = model.detectedFaces.filter { $0.sourceID == sourceA }
-        XCTAssertEqual(aFaces.count, 1, "再検出した素材の顔が差し替わっていない")
-        XCTAssertTrue(aFaces.allSatisfy(\.isSelected),
-                      "再検出でその素材の選択が空のまま残っている（以降モザイクが掛からない）")
-        let bFaces = model.detectedFaces.filter { $0.sourceID == sourceB }
-        XCTAssertEqual(bFaces.count, 1, "再検出していない素材の顔が消えている")
-        XCTAssertTrue(bFaces.allSatisfy(\.isSelected), "他素材の選択が巻き込まれている")
+        XCTAssertEqual(model.detectedFaces.count, 3, "自動追加が反映されていない")
+        XCTAssertEqual(Array(model.detectedFaces.prefix(2).map(\.id)), idsBefore,
+                       "既存の顔の並び／ID が自動追加で入れ替わっている")
+        XCTAssertEqual(Array(model.detectedFaces.prefix(2).map(\.isSelected)), selectionBefore,
+                       "既存の顔の選択が自動追加で書き換わっている")
+        XCTAssertEqual(model.detectedFaces.last?.isSelected, true,
+                       "自動追加した顔が未選択で入っている")
     }
 
     // MARK: - S11: 編集 → Undo/Redo → 下書き保存 → 復元の全結合ラウンドトリップ

@@ -144,7 +144,7 @@ extension MosaicEditorModel {
                     for: detection.faces, detection: img, native: { signatureSource?() })
                 Task { @MainActor in
                     self?.storeLiveSignatures(signatures, for: detection.faces,
-                                              at: timeSec, generation: generation)
+                                              at: timeSec, frame: img, generation: generation)
                 }
             }
         }

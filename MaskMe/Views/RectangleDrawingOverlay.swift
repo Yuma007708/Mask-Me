@@ -32,6 +32,8 @@ struct RectangleDrawingOverlay: View {
     private static let rotateHandleGap: CGFloat = 28
     /// つまみの当たり判定（見た目は 18pt）。
     private static let handleTapTarget: CGFloat = 44
+    /// 状態ラベルの中心を画面上端からこれ以上は上げない（見切れ防止）。
+    private static let stateLabelInset: CGFloat = 10
 
     var body: some View {
         GeometryReader { geo in
@@ -64,7 +66,16 @@ struct RectangleDrawingOverlay: View {
                 // **`objectMasks` を直接 `ForEach` しないこと**: 矩形はキーフレーム補間で
                 // 時刻ごとに変わるので、シークしても枠が動かなくなる。
                 ForEach(model.visibleObjectMasks, id: \.id) { mask in
-                    maskOverlay(id: mask.id, rect: mask.rect, angle: mask.angle, in: geo.size)
+                    maskOverlay(id: mask.id, rect: mask.rect, angle: mask.angle,
+                               state: mask.state, in: geo.size)
+                }
+
+                // 追えているかのラベル。**`maskOverlay` の中に入れない。** あそこは
+                // `.frame` → `.rotationEffect` → `.position` の連鎖と `.global` 座標の
+                // ドラッグが噛み合っており、子を足すと当たり判定が動く。枠より上に
+                // 別の `ForEach` として重ねる。
+                ForEach(model.visibleObjectMasks, id: \.id) { mask in
+                    stateLabel(for: mask, in: geo.size)
                 }
             }
         }
@@ -78,18 +89,14 @@ struct RectangleDrawingOverlay: View {
     /// （無意味なキーフレームで undo 履歴が汚れない）。
     /// - Parameter angle: 傾き（ラジアン）。枠もつまみも**まとめて回す**ので、
     ///   傾いた矩形でも「右下のつまみ」は見た目どおり右下にある。
-    private func maskOverlay(id: UUID, rect: CGRect, angle: Double, in size: CGSize) -> some View {
+    private func maskOverlay(id: UUID, rect: CGRect, angle: Double,
+                             state: ObjectMaskFollowState, in size: CGSize) -> some View {
         let base = previewRect(from: rect, in: size)
-        let moved = movingMaskID == id ? moveOffset : .zero
-        let sized = resizingMaskID == id ? resizeDelta : .zero
-        // 大きさの下書きは**ローカル軸**で持っている（`localDelta` を通した後の値）ので、
-        // ここでそのまま矩形へ効かせてよい。位置の下書きは画面座標なので後から足す。
-        let resized = RectangleHandleMath.resizedAroundCenter(base, byLocal: sized)
-        let shown = resized.offsetBy(dx: moved.width, dy: moved.height)
+        let shown = shownRect(for: id, base: base)
         let shownAngle = rotatingMaskID == id ? rotationPreview : angle
 
         return ZStack {
-            frameBody(id: id, base: base, shown: shown, angle: shownAngle, in: size)
+            frameBody(id: id, shown: shown, angle: shownAngle, state: state, in: size)
             handles(id: id, base: base, shown: shown, angle: shownAngle, in: size)
         }
         .frame(width: shown.width, height: shown.height)
@@ -106,17 +113,36 @@ struct RectangleDrawingOverlay: View {
         .accessibilityIdentifier("editor.objectMask")
     }
 
+    /// 移動・大きさ変更の下書きを反映した、いま画面に見せている矩形（画面座標）。
+    ///
+    /// `maskOverlay`（枠本体）と `stateLabel`（ラベル、`maskOverlay` の外の別 `ForEach`）が
+    /// 同じ位置合わせを使うための共通部。ここが 2 箇所に書き写されると、
+    /// ドラッグ中に枠とラベルの位置がずれる。
+    private func shownRect(for id: UUID, base: CGRect) -> CGRect {
+        let moved = movingMaskID == id ? moveOffset : .zero
+        let sized = resizingMaskID == id ? resizeDelta : .zero
+        // 大きさの下書きは**ローカル軸**で持っている（`localDelta` を通した後の値）ので、
+        // ここでそのまま矩形へ効かせてよい。位置の下書きは画面座標なので後から足す。
+        let resized = RectangleHandleMath.resizedAroundCenter(base, byLocal: sized)
+        return resized.offsetBy(dx: moved.width, dy: moved.height)
+    }
+
     /// 枠本体と移動ドラッグ。
     ///
     /// ドラッグの確定で**現在の再生位置にキーフレームが 1 個できる**
     /// （`setObjectMaskKeyframe`）。位置を変えずに指を離したときは
     /// `ObjectMask.settingKeyframe` が同値を返すのでモデルは何もしない
     /// （無意味なキーフレームで undo 履歴が汚れない）。
-    private func frameBody(id: UUID, base: CGRect, shown: CGRect,
-                           angle: Double, in size: CGSize) -> some View {
-        RoundedRectangle(cornerRadius: 4)
-            .stroke(Color.orange, lineWidth: 2)
-            .background(Color.orange.opacity(0.08))
+    ///
+    /// 色は顔検出の青枠（`FacePickOverlay`）に揃える。線種は `state` に従う
+    /// （追跡中・固定＝実線、解析中・追跡なし＝破線。`ObjectMaskStateStyle` 参照）。
+    private func frameBody(id: UUID, shown: CGRect, angle: Double,
+                           state: ObjectMaskFollowState, in size: CGSize) -> some View {
+        let dashed = ObjectMaskStateStyle.isDashed(state)
+        return RoundedRectangle(cornerRadius: 4)
+            .stroke(Color.blue,
+                   style: dashed ? StrokeStyle(lineWidth: 2, dash: [6, 4]) : StrokeStyle(lineWidth: 2))
+            .background(Color.blue.opacity(0.08))
             .contentShape(Rectangle())
             .gesture(
                 // **`.global` で取ること。** 既定の `.local` は `rotationEffect` を
@@ -147,7 +173,7 @@ struct RectangleDrawingOverlay: View {
                 .accessibilityIdentifier("editor.objectMask.remove")
                 .accessibilityLabel("この矩形を消す")
 
-            handleButton(systemImage: "arrow.down.right.circle.fill", tint: .orange)
+            handleButton(systemImage: "arrow.down.right.circle.fill", tint: .blue)
                 .position(x: shown.width, y: shown.height)
                 .gesture(
                     DragGesture(minimumDistance: 1, coordinateSpace: .global)
@@ -169,7 +195,7 @@ struct RectangleDrawingOverlay: View {
                 .accessibilityIdentifier("editor.objectMask.resize")
                 .accessibilityLabel("矩形の大きさを変える")
 
-            handleButton(systemImage: "rotate.right.fill", tint: .orange)
+            handleButton(systemImage: "rotate.right.fill", tint: .blue)
                 .position(x: shown.width / 2, y: shown.height + Self.rotateHandleGap)
                 .gesture(rotationGesture(id: id, shown: shown, angle: angle, in: size))
                 .accessibilityIdentifier("editor.objectMask.rotate")
@@ -283,5 +309,62 @@ struct RectangleDrawingOverlay: View {
 
     private func normalizedRect(from rect: CGRect, in containerSize: CGSize) -> CGRect {
         geometry(in: containerSize).normalizedRect(from: rect)
+    }
+
+    /// 「追えているか」のラベル。**枠より上に、別の `ForEach` として**重ねる
+    /// （`maskOverlay` の中には入れない。理由は `body` のコメント参照）。
+    ///
+    /// - ドラッグ確定直後は必ず `.computing` に落ちる（追跡タスクの張り替えが起きるため）。
+    ///   連続ドラッグでラベルが明滅しないよう、掴んでいる最中は出さない。
+    /// - ラベルは**回転させない**（傾いた矩形でも文字が読めるように）。`shownRect` は
+    ///   回転前の画面座標そのものなので、ここではそのまま使う。
+    private func stateLabel(for mask: VisibleObjectMask, in size: CGSize) -> some View {
+        let isDragging = movingMaskID == mask.id || resizingMaskID == mask.id
+            || rotatingMaskID == mask.id
+        let shown = shownRect(for: mask.id, base: previewRect(from: mask.rect, in: size))
+        return Group {
+            if !isDragging, let text = ObjectMaskStateStyle.label(mask.state) {
+                Text(text)
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(Color.blue, in: Capsule())
+                    // 枠の上辺の**中央**に置く（左上に置くと、ラベルの中心が角に来るので
+                    // 半分が枠の外側へはみ出す）。画面の上端に張り付いた矩形でも見切れない
+                    // よう y は下限で止める。
+                    .position(x: shown.midX, y: max(Self.stateLabelInset, shown.minY - 12))
+                    // **ドラッグを奪わないこと。** これが無いと枠の移動ジェスチャより
+                    // ラベルの当たり判定が優先されてしまう。
+                    .allowsHitTesting(false)
+                    .accessibilityIdentifier("editor.objectMask.state")
+                    .accessibilityLabel(text)
+            }
+        }
+    }
+}
+
+/// 物体マスクの「追えているか」の表示規則を純関数に切り出したもの。
+///
+/// `.fixed`（静止画の固定マスク）はラベル無し・実線。`.tracking`（軌跡が最新でセグメント内）は
+/// 実線 + ラベル。`.computing`（解析中）/ `.untracked`（追跡なし）は破線 + ラベル。
+///
+/// **「追跡なし」に赤やエラー色を使わない。** モザイクはキーフレーム補間で乗り続けているので、
+/// 危険サインに見せると嘘になる（色は常に青、線種と文言だけで区別する）。
+enum ObjectMaskStateStyle {
+    static func label(_ state: ObjectMaskFollowState) -> String? {
+        switch state {
+        case .fixed: return nil
+        case .tracking: return "追跡中"
+        case .computing: return "解析中"
+        case .untracked: return "追跡なし"
+        }
+    }
+
+    static func isDashed(_ state: ObjectMaskFollowState) -> Bool {
+        switch state {
+        case .fixed, .tracking: return false
+        case .computing, .untracked: return true
+        }
     }
 }
