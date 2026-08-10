@@ -248,6 +248,9 @@ struct VideoTimelineView: View {
                     .accessibilityElement(children: .contain)
                     .accessibilityIdentifier("timeline.jointLane")
                 clipBand
+                    // 物体マスクのキーフレーム位置。帯の上に重ねるだけなので
+                    // トラックの高さ（`TimelineMetrics.stackHeight`）は変わらない。
+                    .overlay(alignment: .topLeading) { keyframeMarkers }
                     .accessibilityElement(children: .contain)
                     .accessibilityIdentifier("timeline.clipBand")
             }
@@ -260,6 +263,32 @@ struct VideoTimelineView: View {
                 .accessibilityElement(children: .contain)
                 .accessibilityIdentifier("timeline.applyTrack")
         }
+    }
+
+    /// 物体マスクのキーフレーム位置を示す小さなひし形。
+    ///
+    /// クリップ帯に重ねる（専用トラックを足すとタイムライン全体の高さが変わり、
+    /// プレビューが縮む——`TimelineMetrics.toolbarHeight` の doc と同じ理由）。
+    /// 出すのは**選択中のクリップに属するマスク**のキーフレームだけ。全マスクを
+    /// 常に出すと、クリップが増えたときに帯が点で埋まって何も読めなくなる。
+    ///
+    /// 分割の境界へ挿入したキーフレームは合成時刻へ写せないので出ない
+    /// （`MosaicEditorModel.objectMaskKeyframeMarkers(maskID:)` の doc）。
+    @ViewBuilder
+    private var keyframeMarkers: some View {
+        let times = model.objectMasks
+            .filter { $0.anchor.clipID != nil && $0.anchor.clipID == selectedClipID }
+            .flatMap { model.objectMaskKeyframeMarkers(maskID: $0.id) }
+        ZStack(alignment: .topLeading) {
+            ForEach(times, id: \.id) { marker in
+                Image(systemName: "diamond.fill")
+                    .font(.system(size: 8))
+                    .foregroundStyle(Color.orange)
+                    .offset(x: geometry.x(forTime: marker.compositionTime) - 4, y: 2)
+            }
+        }
+        .allowsHitTesting(false)
+        .accessibilityIdentifier("timeline.objectMaskKeyframes")
     }
 
     @ViewBuilder

@@ -111,8 +111,13 @@ extension MosaicPreviewController {
         let landmarks = landmarksForRendering(at: timeSec, model: model)
         // 手動矩形は顔検出の補助なので顔タブ（faceMosaicOn）の状態に従う。
         // 解像度は（縮小後の）実テクスチャに合わせる（フルサイズだと 720px 縮小時に位置がずれる）。
-        let additionalPaths = model.faceMosaicOn && mosaicActive
-            ? model.manualRegionPaths(for: CGSize(width: tex.width, height: tex.height))
+        // 物体マスクは適用区間ゲートを `objectMaskRects(atComposition:)` の中で
+        // **素材ごとに**掛ける（重なり区間で片側だけ ON にできる）。ここで
+        // `mosaicActive`（合成時刻でまとめた判定）を重ねると、素材アンカーを持つ
+        // マスクまで「映っている素材のどれかが区間内なら全部 ON」に引きずられる。
+        let additionalPaths = model.faceMosaicOn
+            ? model.objectMaskPaths(for: CGSize(width: tex.width, height: tex.height),
+                                    atComposition: timeSec)
             : []
 
         guard let result = renderer.renderToNewTexture(

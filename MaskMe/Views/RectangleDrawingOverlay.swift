@@ -14,6 +14,9 @@ struct RectangleDrawingOverlay: View {
     @State private var dragging: CGRect?
     @State private var startLocation: CGPoint = .zero
     @State private var isDetecting = false
+    /// ドラッグして動かしている最中のマスクと、その移動量（画面座標）。
+    @State private var movingMaskID: UUID?
+    @State private var moveOffset: CGSize = .zero
 
     var body: some View {
         GeometryReader { geo in
@@ -27,27 +30,6 @@ struct RectangleDrawingOverlay: View {
                         .position(x: rect.midX, y: rect.midY)
                 }
 
-                // 既存の手動矩形をオーバーレイ表示
-                ForEach(model.manualRegions) { region in
-                    let r = previewRect(from: region.normalizedRect, in: geo.size)
-                    ZStack(alignment: .topTrailing) {
-                        RoundedRectangle(cornerRadius: 4)
-                            .stroke(Color.orange, lineWidth: 2)
-                            .background(Color.orange.opacity(0.08))
-                            .frame(width: r.width, height: r.height)
-
-                        Button {
-                            model.removeManualRegion(region.id)
-                        } label: {
-                            Image(systemName: "xmark.circle.fill")
-                                .foregroundStyle(.white, .red)
-                                .font(.system(size: 16))
-                        }
-                        .offset(x: 8, y: -8)
-                    }
-                    .position(x: r.midX, y: r.midY)
-                }
-
                 // 検出中インジケーター
                 if isDetecting {
                     ProgressView()
@@ -59,8 +41,64 @@ struct RectangleDrawingOverlay: View {
                 if model.isRectangleToolActive {
                     drawingSurface(in: geo.size)
                 }
+
+                // 既存の物体マスクをオーバーレイ表示。**描画面より上に置く**ので、
+                // 矩形ツール ON でもマスクの上のドラッグは「移動」になる
+                // （空いている所をドラッグすれば従来どおり新規作成）。
+                //
+                // **`objectMasks` を直接 `ForEach` しないこと**: 矩形はキーフレーム補間で
+                // 時刻ごとに変わるので、シークしても枠が動かなくなる。
+                ForEach(model.visibleObjectMasks, id: \.id) { mask in
+                    maskOverlay(id: mask.id, rect: mask.rect, in: geo.size)
+                }
             }
         }
+    }
+
+    /// 既存マスク 1 個の枠・削除ボタン・移動ドラッグ。
+    ///
+    /// ドラッグの確定で**現在の再生位置にキーフレームが 1 個できる**
+    /// （`setObjectMaskKeyframe`）。位置を変えずに指を離したときは
+    /// `ObjectMask.settingKeyframe` が同値を返すのでモデルは何もしない
+    /// （無意味なキーフレームで undo 履歴が汚れない）。
+    private func maskOverlay(id: UUID, rect: CGRect, in size: CGSize) -> some View {
+        let base = previewRect(from: rect, in: size)
+        let offset = movingMaskID == id ? moveOffset : .zero
+        let shown = base.offsetBy(dx: offset.width, dy: offset.height)
+        return ZStack(alignment: .topTrailing) {
+            RoundedRectangle(cornerRadius: 4)
+                .stroke(Color.orange, lineWidth: 2)
+                .background(Color.orange.opacity(0.08))
+                .frame(width: shown.width, height: shown.height)
+                .contentShape(Rectangle())
+                .gesture(
+                    DragGesture(minimumDistance: 4)
+                        .onChanged { value in
+                            movingMaskID = id
+                            moveOffset = value.translation
+                        }
+                        .onEnded { value in
+                            movingMaskID = nil
+                            moveOffset = .zero
+                            let moved = base.offsetBy(dx: value.translation.width,
+                                                      dy: value.translation.height)
+                            model.setObjectMaskKeyframe(id,
+                                                        compositionRect: normalizedRect(from: moved,
+                                                                                        in: size))
+                        }
+                )
+
+            Button {
+                model.removeObjectMask(id)
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .foregroundStyle(.white, .red)
+                    .font(.system(size: 16))
+            }
+            .offset(x: 8, y: -8)
+        }
+        .position(x: shown.midX, y: shown.midY)
+        .accessibilityIdentifier("editor.objectMask")
     }
 
     /// 矩形を描く面（ツール ON のときだけ張る）。

@@ -15,14 +15,39 @@
 }
 @end
 
+@implementation MMFlowTrackerOptions
+
++ (instancetype)faceDefaults {
+    MMFlowTrackerOptions *o = [[MMFlowTrackerOptions alloc] init];
+    o.maxCorners = 60;
+    o.qualityLevel = 0.01;
+    o.minDistance = 5.0;
+    o.minSurvivors = 15;
+    o.minSurvivorRatio = 0.40;
+    o.maxForwardBackwardError = 2.0f;
+    return o;
+}
+
++ (instancetype)objectTrackingDefaults {
+    MMFlowTrackerOptions *o = [[MMFlowTrackerOptions alloc] init];
+    // 点を多く・弱い特徴も拾う: 物体マスクは対象が小さいことが多く、顔向けの
+    // 設定では ROI 内に 15 点も立たず seed 自体が通らない。
+    o.maxCorners = 200;
+    o.qualityLevel = 0.004;
+    o.minDistance = 2.0;
+    // 追跡側は毎フレーム seed し直す運用なので、点の脱落が累積しない。
+    // 生存率のゲートは「このフレームで動きが一貫していたか」だけを見ればよく、
+    // 顔向けの 40% ほど厳しくする必要がない。
+    o.minSurvivors = 6;
+    o.minSurvivorRatio = 0.20;
+    o.maxForwardBackwardError = 2.0f;
+    return o;
+}
+
+@end
+
 namespace {
 constexpr double kMaxLongSide = 640.0;   // 縮小後の長辺上限（コスト上限）
-constexpr int kMaxCorners = 60;
-constexpr double kQualityLevel = 0.01;
-constexpr double kMinDistance = 5.0;
-constexpr float kMaxFBError = 2.0f;      // 前後方向チェックの往復誤差上限（縮小px）
-constexpr int kMinSurvivors = 15;
-constexpr double kMinSurvivorRatio = 0.40;
 
 /// UIImage → 縮小グレースケール cv::Mat。scaleOut に フルフレームpx / 縮小px の係数を返す。
 /// フル解像度の Mat/CGContext は確保しない: 先に縮小後サイズ (dw,dh) を計算し、
@@ -80,6 +105,18 @@ cv::Mat grayMat(UIImage *image, double &scaleOut, double maxLongSide = kMaxLongS
     std::vector<cv::Point2f> _points;   // 前フレームの特徴点（縮小px）
     double _scale;                      // フルフレームpx = 縮小px × _scale
     size_t _seededCount;
+    MMFlowTrackerOptions *_options;
+}
+
+- (instancetype)init {
+    return [self initWithOptions:[MMFlowTrackerOptions faceDefaults]];
+}
+
+- (instancetype)initWithOptions:(MMFlowTrackerOptions *)options {
+    if ((self = [super init])) {
+        _options = options ?: [MMFlowTrackerOptions faceDefaults];
+    }
+    return self;
 }
 
 - (void)reset {
@@ -111,14 +148,14 @@ cv::Mat grayMat(UIImage *image, double &scaleOut, double maxLongSide = kMaxLongS
     mask(roi).setTo(255);
     std::vector<cv::Point2f> corners;
     try {
-        cv::goodFeaturesToTrack(gray, corners, kMaxCorners, kQualityLevel,
-                                kMinDistance, mask);
+        cv::goodFeaturesToTrack(gray, corners, _options.maxCorners, _options.qualityLevel,
+                                _options.minDistance, mask);
     } catch (const cv::Exception &e) {
         NSLog(@"OpticalFlowTracker: cv::Exception in seed(goodFeaturesToTrack): %s", e.what());
         [self reset];
         return NO;
     }
-    if ((int)corners.size() < kMinSurvivors) { [self reset]; return NO; }
+    if ((int)corners.size() < _options.minSurvivors) { [self reset]; return NO; }
     _prevGray = gray;
     _points = corners;
     _scale = scale;
@@ -159,7 +196,7 @@ cv::Mat grayMat(UIImage *image, double &scaleOut, double maxLongSide = kMaxLongS
     for (size_t i = 0; i < _points.size(); i++) {
         if (!stF[i] || !stB[i]) { continue; }
         const float fb = cv::norm(back[i] - _points[i]);
-        if (fb > kMaxFBError) { continue; }
+        if (fb > _options.maxForwardBackwardError) { continue; }
         survivors.push_back(next[i]);
         // フルフレームpx へ戻して出力（相似変換の推定は Swift 側）
         [prevOut addObject:[NSValue valueWithCGPoint:
@@ -167,8 +204,8 @@ cv::Mat grayMat(UIImage *image, double &scaleOut, double maxLongSide = kMaxLongS
         [currOut addObject:[NSValue valueWithCGPoint:
             CGPointMake(next[i].x * scale, next[i].y * scale)]];
     }
-    const bool pass = (int)survivors.size() >= kMinSurvivors &&
-        (double)survivors.size() / (double)_seededCount >= kMinSurvivorRatio;
+    const bool pass = (int)survivors.size() >= _options.minSurvivors &&
+        (double)survivors.size() / (double)_seededCount >= _options.minSurvivorRatio;
     if (!pass) { [self reset]; return nil; }
     // 状態を今フレームへ前進（連続ギャップでも追跡を継続できる）
     _prevGray = gray;

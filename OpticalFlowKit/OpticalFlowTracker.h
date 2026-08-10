@@ -21,6 +21,32 @@ NS_ASSUME_NONNULL_BEGIN
     NS_SWIFT_NAME(init(image:maxLongSide:));
 @end
 
+/// 特徴点の取り方と品質ゲートの調整値。
+///
+/// 既定値は**顔追跡向け**（撮影パイプラインが使ってきた定数そのまま）。
+/// 物体マスクの自動追跡は対象が小さく・テクスチャが弱いことが多く、
+/// 顔向けの厳しいゲート（15 点以上）ではそもそも seed が通らない。
+/// `objectTrackingDefaults` はそこを緩めた別プリセットである。
+@interface MMFlowTrackerOptions : NSObject
+/// goodFeaturesToTrack の上限点数。
+@property (nonatomic) int maxCorners;
+/// コーナー強度のしきい値（小さいほど弱い特徴も拾う）。
+@property (nonatomic) double qualityLevel;
+/// 特徴点どうしの最小距離（縮小px）。
+@property (nonatomic) double minDistance;
+/// 追跡を成立とみなす生存点の下限。
+@property (nonatomic) int minSurvivors;
+/// seed 時の点数に対する生存率の下限。
+@property (nonatomic) double minSurvivorRatio;
+/// 前後方向チェックの往復誤差上限（縮小px）。
+@property (nonatomic) float maxForwardBackwardError;
+
+/// 顔追跡向け（＝これまでの定数。撮影パイプラインの挙動不変）。
++ (instancetype)faceDefaults;
+/// 物体マスクの自動追跡向け（点を多く取り、ゲートを緩める）。
++ (instancetype)objectTrackingDefaults;
+@end
+
 /// OpenCV 疎 Lucas-Kanade によるフレーム間の特徴点追跡。
 /// 検出パイプラインが全滅したフレームで「画素の動き」から顔の運動を推定するための
 /// 対応点ペアを供給する。OpenCV 依存はこのクラスの実装（.mm）に閉じ込める。
@@ -30,6 +56,8 @@ NS_ASSUME_NONNULL_BEGIN
 /// - 前後方向チェック: 逆追跡の往復誤差 < 2px（縮小画像空間）
 /// 処理は輝度のみ・長辺 640px に縮小して行う（CI クラッシュ flaky 対策のコスト上限）。
 @interface OpticalFlowTracker : NSObject
+/// 既定は `MMFlowTrackerOptions.faceDefaults`（撮影パイプラインの挙動不変）。
+- (instancetype)initWithOptions:(MMFlowTrackerOptions *)options;
 - (void)reset;
 /// 検出成功フレームで呼ぶ。faceBox は正規化 [0,1]。特徴点が取れなければ NO。
 - (BOOL)seedWithImage:(UIImage *)image faceBox:(CGRect)faceBox

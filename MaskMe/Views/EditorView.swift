@@ -30,7 +30,9 @@ struct EditorView: View {
         let backgroundMosaicOn: Bool
         let faceBlockSize: Float
         let backgroundBlockSize: Float
-        let manualRects: [CGRect]
+        let objectMasks: [ObjectMask]
+        /// 旧下書きの矩形（移行専用）。復元時にモデルが全クリップへ配る。
+        let legacyManualRects: [CGRect]
         // タイムライン復元（下書き v2）。v1 下書き・写真下書きは nil のままで、
         // 従来どおり「素材全体 1 クリップ」として読み込まれる。
         var timeline: TimelineState?
@@ -336,7 +338,8 @@ struct EditorView: View {
                 backgroundMosaicOn: resume.backgroundMosaicOn,
                 faceBlockSize: resume.faceBlockSize,
                 backgroundBlockSize: resume.backgroundBlockSize,
-                manualRects: resume.manualRects,
+                objectMasks: resume.objectMasks,
+                legacyManualRects: resume.legacyManualRects,
                 // 顔選択の目印は `ResumeContext` を経由せず下書き本体から引く
                 // （復元専用の内部情報で、下書き ID から一意に取れる）。
                 // nil＝新フィールド導入前の下書き → 顔の選択状態には触れない。
@@ -398,7 +401,7 @@ extension EditorView {
                 backgroundMosaicOn: model.backgroundMosaicOn,
                 faceBlockSize: model.faceBlockSize,
                 backgroundBlockSize: model.backgroundBlockSize,
-                manualRects: model.manualRects,
+                objectMasks: model.draftObjectMasks,
                 faceSelections: model.selectedFaceAnchors,
                 personProfiles: model.selectedPersonProfilesForDraft
             )
@@ -417,7 +420,7 @@ extension EditorView {
                 backgroundMosaicOn: model.backgroundMosaicOn,
                 faceBlockSize: model.faceBlockSize,
                 backgroundBlockSize: model.backgroundBlockSize,
-                manualRects: model.manualRects,
+                objectMasks: model.draftObjectMasks,
                 faceSelections: model.selectedFaceAnchors,
                 personProfiles: model.selectedPersonProfilesForDraft,
                 thumbnail: model.previewImage

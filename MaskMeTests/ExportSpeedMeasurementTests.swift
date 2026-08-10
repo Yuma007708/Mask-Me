@@ -68,7 +68,7 @@ final class ExportSpeedMeasurementTests: XCTestCase {
         Task {
             let t0 = CFAbsoluteTimeGetCurrent()
             outURL = try? await exporter.export(
-                asset: asset, selectedFaceTargets: [], manualRegions: [],
+                asset: asset, selectedFaceTargets: [], objectMasks: [],
                 detectionCaches: [sourceID: cache], mapping: mapping,
                 applyRanges: applyRanges, faceEnabled: true,
                 backgroundEnabled: false, backgroundBlock: 28, speed: .fast

@@ -65,8 +65,16 @@ struct EditingDraft: Codable, Identifiable, Equatable {
     let backgroundMosaicOn: Bool
     let faceBlockSize: Float
     let backgroundBlockSize: Float
-    /// Manual mosaic rectangles, in normalized [0,1] coordinates.
-    let manualRects: [CGRect]
+    /// 物体モザイク（矩形マスク）。矩形は**素材フレーム基準**の正規化座標で、
+    /// クリップ id + 素材時刻にアンカーされている。
+    let objectMasks: [ObjectMask]
+    /// **移行専用**の旧フィールド（矩形 1 個・時間軸なし・全フレーム適用）。
+    ///
+    /// 新規保存では常に空。既存の下書きを読んだときだけ値が入り、復元経路
+    /// （`EditorView` / `HomeView`）が `ObjectMaskEditOperations.migrated` で
+    /// `objectMasks` へ移す。**全クリップへ 1 本ずつ配る**こと——先頭クリップだけに
+    /// 付けると、3 クリップ構成の下書きを再開したときクリップ 2・3 のモザイクが消える。
+    let legacyManualRects: [CGRect]
     /// 選択されていた顔の目印（素材ID＋正規化重心）。
     ///
     /// **nil と `[]` は意味が違う**:
@@ -97,7 +105,8 @@ struct EditingDraft: Codable, Identifiable, Equatable {
         backgroundMosaicOn: Bool,
         faceBlockSize: Float,
         backgroundBlockSize: Float,
-        manualRects: [CGRect],
+        objectMasks: [ObjectMask],
+        legacyManualRects: [CGRect] = [],
         faceSelections: [DraftFaceSelection]? = nil,
         personProfiles: [PersonProfile]? = nil,
         thumbnailFileName: String?,
@@ -112,7 +121,8 @@ struct EditingDraft: Codable, Identifiable, Equatable {
         self.backgroundMosaicOn = backgroundMosaicOn
         self.faceBlockSize = faceBlockSize
         self.backgroundBlockSize = backgroundBlockSize
-        self.manualRects = manualRects
+        self.objectMasks = objectMasks
+        self.legacyManualRects = legacyManualRects
         self.faceSelections = faceSelections
         self.personProfiles = personProfiles
         self.thumbnailFileName = thumbnailFileName
@@ -126,7 +136,10 @@ struct EditingDraft: Codable, Identifiable, Equatable {
 
     // 現行スキーマのキー（Encodable はこれで自動合成される）。
     private enum CodingKeys: String, CodingKey {
-        case id, kind, sourceFileName, manualRects, thumbnailFileName, updatedAt
+        case id, kind, sourceFileName, thumbnailFileName, updatedAt
+        // 旧キー名のまま残す（既存の下書き JSON を読めなくしない）。
+        case legacyManualRects = "manualRects"
+        case objectMasks
         case faceMosaicOn, backgroundMosaicOn, faceBlockSize, backgroundBlockSize
         case sources, timeline, faceSelections, personProfiles
     }
@@ -141,7 +154,8 @@ struct EditingDraft: Codable, Identifiable, Equatable {
         id = try c.decode(UUID.self, forKey: .id)
         kind = try c.decode(MediaKind.self, forKey: .kind)
         sourceFileName = try c.decode(String.self, forKey: .sourceFileName)
-        manualRects = try c.decodeIfPresent([CGRect].self, forKey: .manualRects) ?? []
+        objectMasks = try c.decodeIfPresent([ObjectMask].self, forKey: .objectMasks) ?? []
+        legacyManualRects = try c.decodeIfPresent([CGRect].self, forKey: .legacyManualRects) ?? []
         thumbnailFileName = try c.decodeIfPresent(String.self, forKey: .thumbnailFileName)
         updatedAt = try c.decodeIfPresent(Date.self, forKey: .updatedAt) ?? Date()
 

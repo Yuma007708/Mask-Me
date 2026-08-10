@@ -358,6 +358,14 @@ public final class VideoMosaicExporter: @unchecked Sendable {
     /// 対して走るので既に合成フレーム基準＝写像不要）。無変換構成では恒等。
     private var renderLayout: TimelineRenderLayout = .identity
 
+    /// 物体マスクの自動追跡（O2）の軌跡。export 開始時に設定する。
+    ///
+    /// **プレビューと同じ軌跡を渡すこと。** 追跡はオプティカルフローの逐次処理なので、
+    /// 書き出し側で改めて走らせるとプレビューと違う結果になる。事前に計算した軌跡を
+    /// 両者が読むだけ、という規約は `ObjectTrack` の doc を参照
+    /// （`MosaicEditorModel.exportVideo` は書き出し前に追跡の完走を待つ）。
+    private var objectTracks: [UUID: ObjectTrack] = [:]
+
     private func resetPerf() {
         perfDetectSec = 0; perfRenderSec = 0; perfSegSec = 0; perfDecodeSec = 0
         perfDetectCalls = 0; perfFrames = 0
@@ -398,7 +406,10 @@ public final class VideoMosaicExporter: @unchecked Sendable {
     /// 動画をエクスポートして一時 URL を返す。
     /// - Parameters:
     ///   - selectedFaceTargets: モザイク対象として選択された顔。空の場合は全顔に適用。
-    ///   - manualRegions: 手動指定矩形（全フレームに適用）。
+    ///   - objectMasks: 物体モザイク（矩形マスク）。矩形は**素材フレーム基準**なので、
+    ///     フレームの解決済み `location`（clipID・素材時刻）で補間してから
+    ///     `renderLayout` で合成フレーム基準へ写す（`ObjectMaskResolver`）。
+    ///     プレビューと同じ純関数を通すので、境界フレームでも結果が一致する。
     ///   - detectionCaches: 素材IDごとの検出キャッシュ（キーは素材内時刻）。
     ///     フレーム PTS（合成時刻）を `mapping` で素材位置へ写像してから参照する
     ///     （丸め・近傍補間は必ず写像の後。合成時刻のまま丸めると rate≠1 でずれる）。
@@ -409,8 +420,8 @@ public final class VideoMosaicExporter: @unchecked Sendable {
     ///   - photoSourceIDs: 写真素材（静止 mp4）の素材ID集合。写像後の素材時刻を
     ///     0 に clamp して t=0 の検出 seed にヒットさせる（`photoSourceIDs` プロパティ
     ///     の doc 参照。`MosaicEditorModel` は `timeline.photoSourceIDs` を渡す）。
-    ///   - faceEnabled: 顔モザイク全体の ON/OFF。手動矩形も顔検出の補助なので
-    ///     これに従う（false なら顔・手動矩形ともに適用しない）。
+    ///   - faceEnabled: 顔モザイク全体の ON/OFF。物体マスクも顔検出の補助なので
+    ///     これに従う（false なら顔・物体マスクともに適用しない）。
     ///   - videoComposition: 装着する映像合成（S8）。非 nil のときは
     ///     `AVAssetReaderVideoCompositionOutput` で**合成済みフレーム**を読み、
     ///     writer は `renderSize` + identity transform で書く（`preferredTransform` は
@@ -425,7 +436,9 @@ public final class VideoMosaicExporter: @unchecked Sendable {
         selectedFaceTargets: [FaceTarget] = [],
         selectedPersons: [PersonProfile] = [],
         faceSignatures: FaceSignatureLookup = FaceSignatureLookup(samples: [:]),
-        manualRegions: [ManualRegion] = [],
+        objectMasks: [ObjectMask] = [],
+        /// 物体マスクの自動追跡の軌跡（マスク id 引き）。プレビューと**同じもの**を渡す。
+        objectTracks: [UUID: ObjectTrack] = [:],
         detectionCaches: [UUID: [Double: [FaceLandmarkSet]]] = [:],
         mapping: TimelineMapping = TimelineMapping(clips: []),
         photoSourceIDs: Set<UUID> = [],
@@ -475,6 +488,7 @@ public final class VideoMosaicExporter: @unchecked Sendable {
         // ので、両経路のゲート結果が必ず一致する。
         self.applyRanges = MosaicApplyGate.effectiveRanges(applyRanges, mapping: mapping)
         self.renderLayout = renderLayout
+        self.objectTracks = objectTracks
         let videoTracks = try await asset.loadTracks(withMediaType: .video)
         guard let videoTrack = videoTracks.first else {
             throw ExportError.noVideoTrack
@@ -671,7 +685,7 @@ public final class VideoMosaicExporter: @unchecked Sendable {
             duration: effectiveDuration,
             videoSize: naturalSize,
             selectedFaceTargets: selectedFaceTargets,
-            manualRegions: manualRegions,
+            objectMasks: objectMasks,
             detectionCaches: detectionCaches,
             mapping: mapping,
             faceEnabled: faceEnabled,
@@ -713,7 +727,7 @@ public final class VideoMosaicExporter: @unchecked Sendable {
         duration: CMTime,
         videoSize: CGSize,
         selectedFaceTargets: [FaceTarget],
-        manualRegions: [ManualRegion],
+        objectMasks: [ObjectMask],
         detectionCaches: [UUID: [Double: [FaceLandmarkSet]]],
         mapping: TimelineMapping,
         faceEnabled: Bool,
@@ -769,7 +783,7 @@ public final class VideoMosaicExporter: @unchecked Sendable {
                             loop: &loop,
                             detectionInterval: detectionInterval,
                             selectedFaceTargets: selectedFaceTargets,
-                            manualRegions: manualRegions,
+                            objectMasks: objectMasks,
                             detectionCaches: detectionCaches,
                             mapping: mapping,
                             faceEnabled: faceEnabled,
@@ -968,7 +982,7 @@ public final class VideoMosaicExporter: @unchecked Sendable {
         loop: inout FrameLoopState,
         detectionInterval: Int,
         selectedFaceTargets: [FaceTarget],
-        manualRegions: [ManualRegion],
+        objectMasks: [ObjectMask],
         detectionCaches: [UUID: [Double: [FaceLandmarkSet]]],
         mapping: TimelineMapping,
         faceEnabled: Bool,
@@ -1042,12 +1056,11 @@ public final class VideoMosaicExporter: @unchecked Sendable {
                 cachedBackgroundMask: &loop.cachedBackgroundMask)
         }
 
-        // 手動矩形は顔検出の補助なので顔モザイク（faceEnabled）の状態に従う。
-        let additionalPaths = faceEnabled && mosaicActive
-            ? manualRegions.map { region -> FaceMaskBuilder.RegionPath in
-                let path = FaceMaskBuilder.rectPath(from: region.normalizedRect, in: videoSize)
-                return FaceMaskBuilder.RegionPath(path: path, value: 0.4)
-            }
+        // 物体マスクは顔検出の補助なので顔モザイク（faceEnabled）の状態に従う。
+        let additionalPaths = faceEnabled
+            ? objectMaskRects(objectMasks, mapping: mapping, at: timeSec, location: location)
+                .map { FaceMaskBuilder.RegionPath(path: FaceMaskBuilder.rectPath(from: $0, in: videoSize),
+                                                  value: 0.4) }
             : []
 
         let r0 = CFAbsoluteTimeGetCurrent()
@@ -1320,6 +1333,47 @@ public final class VideoMosaicExporter: @unchecked Sendable {
             let placed = renderLayout.remap(cached, clipID: entry.location.clipID)
             return overlap.kind.visibleLandmarks(placed, progress: progress, side: side)
         }
+    }
+
+    /// このフレームに描く物体マスクの矩形（**合成フレーム基準**）。
+    ///
+    /// プレビュー（`MosaicEditorModel.objectMaskRects(atComposition:)`）と同じ順序・
+    /// 同じ純関数（`ObjectMaskResolver` / `TransitionKind.visibleRect`）で解く。
+    /// 揃えないとプレビューと書き出しが食い違い、ユーザーは書き出すまで気づけない。
+    ///
+    /// ゲートは合成時刻でまとめた `mosaicActive` ではなく**素材ごとの判定**を使う。
+    /// マスクは素材アンカー（clipID + 素材時刻）を持つので、顔と同じく素材別に
+    /// ON/OFF できる（重なり区間で片側だけ ON にできる）。
+    private func objectMaskRects(_ masks: [ObjectMask], mapping: TimelineMapping,
+                                 at compositionTime: Double,
+                                 location: TimelineMapping.SourceLocation?) -> [CGRect] {
+        guard !masks.isEmpty else { return [] }
+        let locations = mapping.sourceLocations(at: compositionTime)
+        if locations.count >= 2, let overlap = mapping.overlap(at: compositionTime) {
+            return locations.flatMap { entry -> [CGRect] in
+                guard let side = entry.side, let progress = entry.progress else { return [] }
+                let sourceTime = photoSourceIDs.contains(entry.location.sourceID) ? 0 : entry.location.time
+                guard MosaicApplyGate.isActive(ranges: applyRanges, clipID: entry.location.clipID,
+                                               sourceID: entry.location.sourceID,
+                                               sourceTime: sourceTime) else { return [] }
+                return ObjectMaskResolver.rects(masks, tracks: objectTracks,
+                                                clipID: entry.location.clipID,
+                                                sourceTime: sourceTime, layout: renderLayout)
+                    .compactMap { overlap.kind.visibleRect($0, progress: progress, side: side) }
+            }
+        }
+        // 写像不能（クリップ無し = 素の AVAsset 書き出し）はゲートがフェイルオープンする
+        // 側に倒す（`MosaicApplyGate.isActive` の doc と同じ判断）。
+        guard let location else {
+            return ObjectMaskResolver.rects(masks, tracks: objectTracks,
+                                            clipID: nil, sourceTime: 0, layout: renderLayout)
+        }
+        guard MosaicApplyGate.isActive(ranges: applyRanges, clipID: location.clipID,
+                                       sourceID: location.sourceID,
+                                       sourceTime: location.time) else { return [] }
+        return ObjectMaskResolver.rects(masks, tracks: objectTracks,
+                                        clipID: location.clipID,
+                                        sourceTime: location.time, layout: renderLayout)
     }
 
     /// クリップ境界を跨いだ最初のフレームで時系列状態をリセットする。

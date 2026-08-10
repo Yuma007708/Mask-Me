@@ -64,6 +64,56 @@ final class DValidLiveModelTests: XCTestCase {
         }
     }
 
+    /// **難素材のモザイク被覆率**（暗所・逆光・遮蔽・動きブレ・群衆）。
+    ///
+    /// `test_LiveModelPath_AllSamples` は手元の `s1`〜`s5` が要り、素材が無い環境では
+    /// まるごと skip される。難素材は `MaskMeTests/Fixtures/probe/` に同梱してあるので、
+    /// こちらは **pod install 済みなら必ず走る**。
+    ///
+    /// `DiagFaceCoverageTests`（検出率）とは測るものが違う。あちらは「そのフレームで
+    /// 顔を検出できたか」、こちらは **検出できなかったフレームを前後から埋めた後**の
+    /// 「ユーザーが実際に目にするモザイクが乗っているか」。プライバシーアプリで
+    /// 本当に守るべきはこちらで、**検出率が上がってもモザイクが切れている**という
+    /// 事故はこの計測でしか気づけない。
+    ///
+    /// 逆光（`probe_hard_backlight`）の検出率は 0% だが、それは「顔がシルエットしか
+    /// 写っていない」ためで、被覆率まで 0 なら実害がある。数字を分けて持つ理由がここにある。
+    @MainActor
+    func test_LiveModelPath_HardFixtures() async throws {
+        var measured = false
+        for (name, floor) in Self.hardFixtureCoverageFloor.sorted(by: { $0.key < $1.key }) {
+            guard let url = Bundle(for: Self.self)
+                .url(forResource: name, withExtension: "mov", subdirectory: "Fixtures/probe")
+            else { continue }
+            measured = true
+            let coverage = try await measureModelPath(name: name, url: url)
+            XCTAssertGreaterThanOrEqual(
+                coverage, floor,
+                "\(name): モザイク被覆率が \(floor) → \(String(format: "%.3f", coverage)) に下がっている。"
+                + "検出が落ちたか、穴埋め（bridge / フロー / ホールド）が効かなくなっている")
+        }
+        try XCTSkipIf(!measured, "Fixtures/probe が同梱されていない")
+    }
+
+    /// 難素材ごとの被覆率の下限。**この数字を下げる変更はモザイクの退行**であり、
+    /// 検出率がいくら上がっても採ってはいけない（顔が露わになるフレームが増えるため）。
+    ///
+    /// 2026-07-31 の実測（iPhone 17 Pro Simulator）に、素材ごとのブレぶんの余裕を見た値:
+    /// backlight 0.00 / dark 1.00 / motion 1.00 / occluded 1.00 / beach 1.00 / crowd 0.96。
+    ///
+    /// `probe_hard_backlight` が 0 なのは**現状がそうだから**で、目標ではない。
+    /// 0.72 秒・11 フレームしかない極端な素材だが、逆光でモザイクが一切乗らないのは
+    /// プライバシー上の実害なので、**改善したら下限を引き上げること**。
+    /// 更新するときは理由と計測日を添える。
+    private static let hardFixtureCoverageFloor: [String: Double] = [
+        "probe_hard_backlight": 0.00,
+        "probe_hard_dark": 0.95,
+        "probe_hard_motion": 0.95,
+        "probe_hard_occluded": 0.95,
+        "probe_beach_01": 0.95,
+        "probe_crowd_01": 0.93
+    ]
+
     /// 実機報告「プレビューを途中から始めるとモザイクが掛からない」の再現計測。
     /// 実機と同じ流れを踏む: load(videoURL:) で冒頭シード（初期スキャン + 自動選択）
     /// → 中盤へシーク（notifyLiveSeek で追跡リセット）→ 中盤以降だけをライブ検出
@@ -244,12 +294,16 @@ final class DValidLiveModelTests: XCTestCase {
             t += interval
         }
 
+        // 分母は**引いた時刻の数**で数える。デコードできたフレーム数（`frames`）を分母に
+        // 使うと、末尾の端数ぶんだけ引く回数が 1 多くなり被覆率が 1.0 を超える
+        // （実測で 1.0222 が出ていた）。ゲートの意味が壊れるので分子と同じループで数える。
         var hits = 0
-        for time in stride(from: 0.0, through: duration, by: interval)
-        where !model.selectedLandmarks(at: time).isEmpty {
-            hits += 1
+        var sampled = 0
+        for time in stride(from: 0.0, through: duration, by: interval) {
+            sampled += 1
+            if !model.selectedLandmarks(at: time).isEmpty { hits += 1 }
         }
-        let coverage = frames > 0 ? Double(hits) / Double(frames) : 0
+        let coverage = sampled > 0 ? Double(hits) / Double(sampled) : 0
         let selectedCount = model.detectedFaces.filter(\.isSelected).count
         // どのレバー（ROI 再検出 / フロー橋渡し）が何フレーム救ったかの帰属。
         let stats = (scanner as? MediaPipeFaceLandmarkerAdapter)?.sourceStats

@@ -24,11 +24,14 @@ struct FaceSelectorView: View {
                 ForEach(model.personGroups) { group in
                     personChip(group)
                 }
-                // 手動矩形は顔ではなく「領域」として別表示
-                ForEach(model.manualRegions) { region in
-                    manualRegionChip(region)
+                // 物体マスクは顔ではなく「領域」として別表示
+                ForEach(model.visibleObjectMasks, id: \.id) { mask in
+                    objectMaskChip(mask.id)
                 }
-                if model.detectedFaces.isEmpty && model.manualRegions.isEmpty {
+                if let progress = model.objectTrackingProgress {
+                    trackingChip(progress)
+                }
+                if model.detectedFaces.isEmpty && model.objectMasks.isEmpty {
                     Text("顔を検出できませんでした")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
@@ -113,11 +116,34 @@ struct FaceSelectorView: View {
         }
     }
 
-    // MARK: - Manual region chip
+    // MARK: - 自動追跡の進捗
 
-    private func manualRegionChip(_ region: ManualRegion) -> some View {
+    /// 物体マスクの自動追跡が走っている間だけ出る表示。
+    ///
+    /// 追跡が終わるまではキーフレームの直線補間で描かれており、終わった瞬間に
+    /// モザイクの動きが変わる。**何も出さないと「勝手に位置が変わった」ように見える**ので、
+    /// 進行中であることを見せる（押せるものではないので Button にしない）。
+    private func trackingChip(_ progress: Double) -> some View {
+        VStack(spacing: 2) {
+            Image(systemName: "scope")
+                .font(.system(size: compact ? 15 : 18, weight: .semibold))
+            Text("\(Int(progress * 100))%")
+                .font(.system(size: 10, weight: .semibold))
+                .monospacedDigit()
+        }
+        .foregroundStyle(.orange)
+        .frame(width: chipSize, height: chipSize)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Color.orange.opacity(0.12)))
+        .accessibilityIdentifier("editor.objectTrackingProgress")
+        .accessibilityLabel("矩形を自動追跡しています")
+    }
+
+    // MARK: - 物体マスクのチップ
+
+    /// ✕ は**マスクごと削除**（キーフレーム 1 個だけを消すのではない）。
+    private func objectMaskChip(_ maskID: UUID) -> some View {
         Button {
-            model.removeManualRegion(region.id)
+            model.removeObjectMask(maskID)
         } label: {
             ZStack {
                 RoundedRectangle(cornerRadius: 10)

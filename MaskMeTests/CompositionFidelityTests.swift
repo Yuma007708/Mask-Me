@@ -287,7 +287,7 @@ final class CompositionFidelityTests: XCTestCase {
         let exporter = VideoMosaicExporter(renderer: renderer,
                                            landmarker: NullFaceLandmarker())
         let outURL = try await exporter.export(
-            asset: composition, selectedFaceTargets: [], manualRegions: [],
+            asset: composition, selectedFaceTargets: [], objectMasks: [],
             detectionCaches: [:], faceEnabled: true, backgroundEnabled: false,
             backgroundBlock: 28, speed: .fast) { _ in }
         defer { try? FileManager.default.removeItem(at: outURL) }

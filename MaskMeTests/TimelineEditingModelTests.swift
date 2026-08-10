@@ -608,7 +608,7 @@ final class TimelineEditingModelTests: XCTestCase {
             if restoreParameters {
                 model.applyRestoredParameters(faceMosaicOn: true, backgroundMosaicOn: false,
                                               faceBlockSize: 48, backgroundBlockSize: 28,
-                                              manualRects: [centerRect])
+                                              objectMasks: [], legacyManualRects: [centerRect])
             }
             try await waitUntilLoaded(model)
             await model.awaitPendingTimelineRebuild()
@@ -695,7 +695,7 @@ final class TimelineEditingModelTests: XCTestCase {
                 timeline: model.timeline,
                 faceMosaicOn: true, backgroundMosaicOn: false,
                 faceBlockSize: 28, backgroundBlockSize: 28,
-                manualRects: [], thumbnail: nil)
+                objectMasks: [], thumbnail: nil)
         }
 
         // 1. 素材 X, Y の 2 素材下書きを作成
@@ -708,7 +708,7 @@ final class TimelineEditingModelTests: XCTestCase {
             ]),
             faceMosaicOn: true, backgroundMosaicOn: false,
             faceBlockSize: 28, backgroundBlockSize: 28,
-            manualRects: [], thumbnail: nil))
+            objectMasks: [], thumbnail: nil))
         let sourceURLs = store.sourceURLs(for: draft)
         let copiedY = try XCTUnwrap(sourceURLs[sourceY])
 
@@ -1713,7 +1713,7 @@ final class TimelineEditingModelTests: XCTestCase {
             timeline: model.timeline,
             faceMosaicOn: true, backgroundMosaicOn: false,
             faceBlockSize: 28, backgroundBlockSize: 28,
-            manualRects: [], thumbnail: nil))
+            objectMasks: [], thumbnail: nil))
         XCTAssertEqual(draft.sources.count, 2)
 
         // 再開: 2 クリップ・同じ素材IDで戻ること
@@ -1757,7 +1757,8 @@ final class TimelineEditingModelTests: XCTestCase {
         restored.applyRestoredParameters(
             faceMosaicOn: draft.faceMosaicOn, backgroundMosaicOn: draft.backgroundMosaicOn,
             faceBlockSize: draft.faceBlockSize, backgroundBlockSize: draft.backgroundBlockSize,
-            manualRects: draft.manualRects, faceSelections: draft.faceSelections)
+            objectMasks: draft.objectMasks, legacyManualRects: draft.legacyManualRects,
+            faceSelections: draft.faceSelections)
         try await waitUntilLoaded(restored)
         return restored
     }
@@ -1781,7 +1782,7 @@ final class TimelineEditingModelTests: XCTestCase {
             timeline: model.timeline,
             faceMosaicOn: true, backgroundMosaicOn: false,
             faceBlockSize: 28, backgroundBlockSize: 28,
-            manualRects: [], faceSelections: model.selectedFaceAnchors, thumbnail: nil))
+            objectMasks: [], faceSelections: model.selectedFaceAnchors, thumbnail: nil))
         return (draft, source)
     }
 
@@ -1897,7 +1898,7 @@ final class TimelineEditingModelTests: XCTestCase {
             sessionSourceIDs: model.sessionReferencedSourceIDs,
             timeline: model.timeline,
             faceMosaicOn: true, backgroundMosaicOn: false,
-            faceBlockSize: 28, backgroundBlockSize: 28, manualRects: [],
+            faceBlockSize: 28, backgroundBlockSize: 28, objectMasks: [],
             faceSelections: model.selectedFaceAnchors,
             personProfiles: model.selectedPersonProfilesForDraft, thumbnail: nil))
         XCTAssertEqual(draft.personProfiles?.map(\.id), [alice],
@@ -1918,7 +1919,7 @@ final class TimelineEditingModelTests: XCTestCase {
             faceMosaicOn: reloaded.faceMosaicOn, backgroundMosaicOn: reloaded.backgroundMosaicOn,
             faceBlockSize: reloaded.faceBlockSize,
             backgroundBlockSize: reloaded.backgroundBlockSize,
-            manualRects: reloaded.manualRects, faceSelections: reloaded.faceSelections,
+            objectMasks: reloaded.objectMasks, legacyManualRects: reloaded.legacyManualRects, faceSelections: reloaded.faceSelections,
             personProfiles: reloaded.personProfiles)
         try await waitUntilLoaded(restored)
 
@@ -1961,7 +1962,7 @@ final class TimelineEditingModelTests: XCTestCase {
             timeline: model.timeline,
             faceMosaicOn: true, backgroundMosaicOn: false,
             faceBlockSize: 28, backgroundBlockSize: 28,
-            manualRects: [], thumbnail: nil))
+            objectMasks: [], thumbnail: nil))
         XCTAssertNil(draft.faceSelections, "情報なしが空配列に潰れている")
 
         // 顔 2 つ → 自動選択規則どおり 0 個選択のまま（修正前と同じ挙動）
@@ -2271,15 +2272,26 @@ final class TimelineEditingModelTests: XCTestCase {
         let anchors = model.selectedFaceAnchors
         XCTAssertEqual(anchors.count, 1, "選択中の顔だけがアンカーになっていない")
 
-        let draft = try XCTUnwrap(store.saveVideoDraft(
+        let saved = try XCTUnwrap(store.saveVideoDraft(
             existing: nil,
             sources: model.draftSources,
             sessionSourceIDs: model.sessionReferencedSourceIDs,
             timeline: model.timeline,
             faceMosaicOn: true, backgroundMosaicOn: true,
             faceBlockSize: 44, backgroundBlockSize: 36,
-            manualRects: [CGRect(x: 0.1, y: 0.1, width: 0.2, height: 0.2)],
+            objectMasks: [],
             faceSelections: anchors, thumbnail: nil))
+        // **旧スキーマ**の下書き（矩形 1 個・時間軸なし）を模す。新規保存では
+        // `legacyManualRects` に値が入る経路は無いので、ここで直接組み立てる。
+        let draft = EditingDraft(
+            id: saved.id, kind: .video, sourceFileName: saved.sourceFileName,
+            sources: saved.sources, timeline: saved.timeline,
+            faceMosaicOn: saved.faceMosaicOn, backgroundMosaicOn: saved.backgroundMosaicOn,
+            faceBlockSize: saved.faceBlockSize, backgroundBlockSize: saved.backgroundBlockSize,
+            objectMasks: [],
+            legacyManualRects: [CGRect(x: 0.1, y: 0.1, width: 0.2, height: 0.2)],
+            faceSelections: saved.faceSelections, personProfiles: saved.personProfiles,
+            thumbnailFileName: saved.thumbnailFileName)
         XCTAssertEqual(draft.sources.count, 3, "3 素材ぶんが下書きに登録されていない")
 
         // --- 復元 ---
@@ -2298,7 +2310,12 @@ final class TimelineEditingModelTests: XCTestCase {
         XCTAssertEqual(restored.backgroundBlockSize, 36, accuracy: 1e-6,
                        "背景の粗さが復元されていない")
         XCTAssertTrue(restored.backgroundMosaicOn, "背景モザイクの ON/OFF が復元されていない")
-        XCTAssertEqual(restored.manualRects.count, 1, "手動矩形が復元されていない")
+        // 旧 `manualRects` は**全クリップへ 1 本ずつ**移行される。先頭だけに付けると、
+        // 3 クリップ構成の下書きを再開したときクリップ 2・3 のモザイクが消える。
+        XCTAssertEqual(restored.objectMasks.count, restored.timeline.clips.count,
+                       "旧手動矩形が全クリップへ配られていない")
+        XCTAssertEqual(Set(restored.objectMasks.compactMap(\.anchor.clipID)),
+                       Set(restored.timeline.clips.map(\.id)))
         XCTAssertEqual(restored.videoDuration, fullDuration, accuracy: 0.1,
                        "復元後の合成尺が保存時と違う")
 
@@ -2411,7 +2428,7 @@ final class DraftStoreV2Tests: XCTestCase {
                                                          sourceStart: 0, sourceEnd: 1)]),
             faceMosaicOn: true, backgroundMosaicOn: false,
             faceBlockSize: 28, backgroundBlockSize: 28,
-            manualRects: [], faceSelections: anchors, thumbnail: nil))
+            objectMasks: [], faceSelections: anchors, thumbnail: nil))
 
         let reloaded = try XCTUnwrap(makeStore().videoDrafts.first { $0.id == saved.id })
         XCTAssertEqual(reloaded.faceSelections, anchors,
@@ -2423,7 +2440,7 @@ final class DraftStoreV2Tests: XCTestCase {
             timeline: reloaded.timeline,
             faceMosaicOn: true, backgroundMosaicOn: false,
             faceBlockSize: 28, backgroundBlockSize: 28,
-            manualRects: [], faceSelections: [], thumbnail: nil))
+            objectMasks: [], faceSelections: [], thumbnail: nil))
         let reloadedEmpty = try XCTUnwrap(makeStore().videoDrafts.first { $0.id == empty.id })
         XCTAssertEqual(reloadedEmpty.faceSelections, [],
                        "『0 個選択』が『情報なし』に化けている")
@@ -2466,7 +2483,7 @@ final class DraftStoreV2Tests: XCTestCase {
                                                          sourceStart: 0, sourceEnd: 1)]),
             faceMosaicOn: true, backgroundMosaicOn: false,
             faceBlockSize: 28, backgroundBlockSize: 28,
-            manualRects: [], faceSelections: anchors, personProfiles: [profile], thumbnail: nil))
+            objectMasks: [], faceSelections: anchors, personProfiles: [profile], thumbnail: nil))
 
         let reloaded = try XCTUnwrap(makeStore().videoDrafts.first { $0.id == saved.id })
         XCTAssertEqual(reloaded.faceSelections, anchors, "目印の人物 ID が往復していない")
@@ -2497,7 +2514,7 @@ final class DraftStoreV2Tests: XCTestCase {
             timeline: timeline,
             faceMosaicOn: true, backgroundMosaicOn: false,
             faceBlockSize: 28, backgroundBlockSize: 28,
-            manualRects: [], thumbnail: nil)
+            objectMasks: [], thumbnail: nil)
         XCTAssertNotNil(draft)
 
         let reloaded = makeStore()   // 同じディレクトリを読む別インスタンス
@@ -2532,14 +2549,14 @@ final class DraftStoreV2Tests: XCTestCase {
             timeline: TimelineState(clips: [sharedClip, soloClip]),
             faceMosaicOn: true, backgroundMosaicOn: false,
             faceBlockSize: 28, backgroundBlockSize: 28,
-            manualRects: [], thumbnail: nil)
+            objectMasks: [], thumbnail: nil)
         let draftB = store.saveVideoDraft(
             existing: nil,
             sources: [(id: shared, url: sharedURL)],
             timeline: TimelineState(clips: [sharedClip]),
             faceMosaicOn: true, backgroundMosaicOn: false,
             faceBlockSize: 28, backgroundBlockSize: 28,
-            manualRects: [], thumbnail: nil)
+            objectMasks: [], thumbnail: nil)
         let sharedName = "source-\(shared.uuidString).mov"
         let soloName = "source-\(solo.uuidString).mov"
         XCTAssertTrue(draftsDirContents(of: store).isSuperset(of: [sharedName, soloName]))
@@ -2551,7 +2568,7 @@ final class DraftStoreV2Tests: XCTestCase {
             timeline: TimelineState(clips: [sharedClip]),
             faceMosaicOn: true, backgroundMosaicOn: false,
             faceBlockSize: 28, backgroundBlockSize: 28,
-            manualRects: [], thumbnail: nil)
+            objectMasks: [], thumbnail: nil)
         XCTAssertEqual(updatedA?.id, draftA?.id)
         var contents = draftsDirContents(of: store)
         XCTAssertFalse(contents.contains(soloName), "未参照になった素材コピーが GC されない")
@@ -2586,7 +2603,7 @@ final class DraftStoreV2Tests: XCTestCase {
             timeline: TimelineState(clips: [clipX, clipY]),
             faceMosaicOn: true, backgroundMosaicOn: false,
             faceBlockSize: 28, backgroundBlockSize: 28,
-            manualRects: [], thumbnail: nil))
+            objectMasks: [], thumbnail: nil))
         let copiedX = try XCTUnwrap(store.sourceURLs(for: draft)[sourceX])
         let nameY = "source-\(sourceY.uuidString).mov"
 
@@ -2598,7 +2615,7 @@ final class DraftStoreV2Tests: XCTestCase {
             timeline: TimelineState(clips: [clipX]),
             faceMosaicOn: true, backgroundMosaicOn: false,
             faceBlockSize: 28, backgroundBlockSize: 28,
-            manualRects: [], thumbnail: nil)
+            objectMasks: [], thumbnail: nil)
         XCTAssertTrue(draftsDirContents(of: store).contains(nameY),
                       "セッションが undo 用に参照中の素材コピーが GC された")
 
@@ -2609,7 +2626,7 @@ final class DraftStoreV2Tests: XCTestCase {
             timeline: TimelineState(clips: [clipX]),
             faceMosaicOn: true, backgroundMosaicOn: false,
             faceBlockSize: 28, backgroundBlockSize: 28,
-            manualRects: [], thumbnail: nil)
+            objectMasks: [], thumbnail: nil)
         XCTAssertFalse(draftsDirContents(of: store).contains(nameY),
                        "保護リスト未指定でも未参照コピーが GC されない（既定経路の退行）")
     }
@@ -2629,7 +2646,7 @@ final class DraftStoreV2Tests: XCTestCase {
             ]),
             faceMosaicOn: true, backgroundMosaicOn: false,
             faceBlockSize: 28, backgroundBlockSize: 28,
-            manualRects: [], thumbnail: nil)
+            objectMasks: [], thumbnail: nil)
         XCTAssertNil(draft, "存在しないフォルダ内素材を参照する壊れた下書きが保存された")
         XCTAssertTrue(store.videoDrafts.isEmpty)
     }
@@ -2647,7 +2664,7 @@ final class DraftStoreV2Tests: XCTestCase {
             timeline: TimelineState(clips: [clip]),
             faceMosaicOn: true, backgroundMosaicOn: false,
             faceBlockSize: 28, backgroundBlockSize: 28,
-            manualRects: [], thumbnail: nil))
+            objectMasks: [], thumbnail: nil))
 
         // 再開相当: 下書きフォルダ内のコピーを素材 URL として再保存
         let copiedURL = try XCTUnwrap(store.sourceURLs(for: draft)[sourceID])
@@ -2660,7 +2677,7 @@ final class DraftStoreV2Tests: XCTestCase {
             ]),
             faceMosaicOn: true, backgroundMosaicOn: false,
             faceBlockSize: 28, backgroundBlockSize: 28,
-            manualRects: [], thumbnail: nil))
+            objectMasks: [], thumbnail: nil))
 
         XCTAssertEqual(resaved.sources.first?.fileName, copiedURL.lastPathComponent,
                        "フォルダ内素材が別名で二重コピーされた")

@@ -238,10 +238,18 @@ extension MosaicEditorModel {
     /// 同じ undo/redo スタックに積まれる（S5）。
     /// （`private` にできないのは、素材追加経路（`MosaicEditorModel+TimelineMedia.swift`）が
     /// 同じ入口を通るため。）
+    ///
+    /// **物体マスクの追従はここで行う**（`followClipEdit(from:to:)`）。マスクは
+    /// `TimelineState` に同居しないので、分割・削除の付け替えを誰かが明示的に呼ぶ必要が
+    /// ある。個々の編集 API ではなくこの唯一の入口に置くのは、新しい編集操作を足したときに
+    /// 呼び忘れないため。**`commitEdit` より前**に行うこと（後にすると、undo で戻る
+    /// スナップショットに追従前のマスクが載る）。
     func applyTimelineEdit(_ edit: (TimelineState) -> TimelineState) {
         let newState = edit(timeline)
         guard newState != timeline else { return }
+        let previous = timeline
         replaceTimeline(newState)
+        followClipEdit(from: previous, to: newState)
         commitEdit()
     }
 

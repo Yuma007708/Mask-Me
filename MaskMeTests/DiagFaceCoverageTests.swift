@@ -112,7 +112,7 @@ final class DiagFaceCoverageTests: XCTestCase {
                 targets.append(("\(name)(実顔)", url))
             }
         }
-        for name in ["probe_body_torso_01", "probe_body_yoga_01"] {
+        for name in ["probe_body_torso_01", "probe_body_yoga_01", "probe_body_elbow_01"] {
             let url = URL(fileURLWithPath: "\(sampleDir)/nonfaces/\(name).mov")
             if FileManager.default.fileExists(atPath: url.path) {
                 targets.append(("\(name)(顔なし)", url))
@@ -155,6 +155,15 @@ final class DiagFaceCoverageTests: XCTestCase {
                 t += 1.0 / 15.0
             }
             let s = adapter.verifyStats
+            // 増光経路（暗い crop の追試）に何が乗ったか。実顔がどの暗さで救われ、
+            // 顔なし素材がどの暗さで通ってしまうかを分けて見て、暗さゲートを実測で決める。
+            func luminanceSummary(_ values: [Double]) -> String {
+                guard let low = values.min(), let high = values.max() else { return "0" }
+                return String(format: "%d[%.3f..%.3f]", values.count, low, high)
+            }
+            fputs("[ENHANCE] \(label) pass=\(luminanceSummary(s.enhancedPassLuminance)) "
+                  + "reject=\(luminanceSummary(s.enhancedRejectLuminance)) "
+                  + "gate=\(luminanceSummary(s.enhanceGateLuminance))\n", stderr)
             fputs("""
             [VERIFY] \(label) frames=\(frames) detected=\(hits) \
             examined=\(s.examined) passed=\(s.passed) grace=\(s.savedByGrace) \

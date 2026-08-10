@@ -86,7 +86,8 @@ struct HomeView: View {
             backgroundMosaicOn: draft.backgroundMosaicOn,
             faceBlockSize: draft.faceBlockSize,
             backgroundBlockSize: draft.backgroundBlockSize,
-            manualRects: draft.manualRects,
+            objectMasks: draft.objectMasks,
+            legacyManualRects: draft.legacyManualRects,
             timeline: draft.timeline.clips.isEmpty ? nil : draft.timeline,
             sourceURLs: draftStore.sourceURLs(for: draft),
             primarySourceID: draft.primarySource?.id

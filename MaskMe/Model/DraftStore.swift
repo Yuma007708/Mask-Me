@@ -91,7 +91,7 @@ final class DraftStore: ObservableObject {
         backgroundMosaicOn: Bool,
         faceBlockSize: Float,
         backgroundBlockSize: Float,
-        manualRects: [CGRect],
+        objectMasks: [ObjectMask],
         faceSelections: [DraftFaceSelection]? = nil,
         personProfiles: [PersonProfile]? = nil,
         thumbnail: UIImage?
@@ -113,7 +113,7 @@ final class DraftStore: ObservableObject {
             backgroundMosaicOn: backgroundMosaicOn,
             faceBlockSize: faceBlockSize,
             backgroundBlockSize: backgroundBlockSize,
-            manualRects: manualRects,
+            objectMasks: objectMasks,
             faceSelections: faceSelections,
             personProfiles: personProfiles,
             thumbnailFileName: thumbName
@@ -138,7 +138,7 @@ final class DraftStore: ObservableObject {
         backgroundMosaicOn: Bool,
         faceBlockSize: Float,
         backgroundBlockSize: Float,
-        manualRects: [CGRect],
+        objectMasks: [ObjectMask],
         faceSelections: [DraftFaceSelection]? = nil,
         personProfiles: [PersonProfile]? = nil
     ) {
@@ -155,7 +155,7 @@ final class DraftStore: ObservableObject {
             backgroundMosaicOn: backgroundMosaicOn,
             faceBlockSize: faceBlockSize,
             backgroundBlockSize: backgroundBlockSize,
-            manualRects: manualRects,
+            objectMasks: objectMasks,
             faceSelections: faceSelections,
             personProfiles: personProfiles,
             thumbnailFileName: nil
@@ -198,13 +198,34 @@ final class DraftStore: ObservableObject {
     // MARK: - Persistence
 
     private func load() {
-        if let data = try? Data(contentsOf: videoIndexURL),
-           let decoded = try? JSONDecoder().decode([EditingDraft].self, from: data) {
-            videoDrafts = decoded
+        if let data = try? Data(contentsOf: videoIndexURL) {
+            videoDrafts = Self.decodeDraftsIndividually(data)
         }
         if let data = try? Data(contentsOf: photoIndexURL),
            let decoded = try? JSONDecoder().decode(EditingDraft.self, from: data) {
             photoDraft = decoded
+        }
+    }
+
+    /// 下書き index を **1 件ずつ**デコードする。
+    ///
+    /// `[EditingDraft].self` の一括デコードにしてはいけない。1 件が壊れているだけで
+    /// 配列全体が失敗し、`try?` に握り潰されて**全下書きが消え**、次の保存で
+    /// `[]` が上書きされて永久に復旧できなくなる（`ObjectMask.init(from:)` は
+    /// 不変条件違反で throw する設計なので、この受け皿が全滅では意味が逆転する）。
+    /// 壊れた 1 件だけ捨てて残りを生かす。
+    private static func decodeDraftsIndividually(_ data: Data) -> [EditingDraft] {
+        let decoder = JSONDecoder()
+        guard let elements = try? decoder.decode([AnyDraftElement].self, from: data) else { return [] }
+        return elements.compactMap { $0.draft }
+    }
+
+    /// 配列要素を 1 件ずつ受けるための箱。デコードに失敗しても**その要素だけ** nil になり、
+    /// 配列のデコード自体は成功する（`Decodable` の合成では要素の失敗が配列全体を落とす）。
+    private struct AnyDraftElement: Decodable {
+        let draft: EditingDraft?
+        init(from decoder: Decoder) throws {
+            draft = try? EditingDraft(from: decoder)
         }
     }
 

@@ -39,7 +39,9 @@ public final class MosaicEditorModel: ObservableObject {
         var faceBlockSize: Float
         var backgroundBlockSize: Float
         var selectedFaceIDs: Set<UUID>
-        var manualRects: [CGRect]
+        /// 物体モザイク（矩形マスク）。旧 `manualRects: [CGRect]` の後継で、
+        /// キーフレーム列ごと戻す（undo で位置の履歴が失われない）。
+        var objectMasks: [ObjectMask]
         /// 書き出し範囲。S9 以降ユーザー操作からの書き込み経路は無い
         /// （`MosaicEditorModel.trimRange` の doc 参照）。常に `0...1`。
         var trimRange: ClosedRange<Double>
@@ -59,7 +61,46 @@ public final class MosaicEditorModel: ObservableObject {
     @Published public internal(set) var detectedFaces: [FaceTarget] = [] {
         didSet { applyPendingFaceSelectionAnchorsIfNeeded() }
     }
-    @Published public var manualRegions: [ManualRegion] = []
+    /// 物体モザイク。矩形は**素材フレーム基準**で持つ
+    /// （`MosaicEditorModel+ObjectMask.swift` の doc 参照）。
+    /// 編集は同 extension の `appendObjectMask` / `setObjectMaskKeyframe` /
+    /// `removeObjectMaskKeyframe` / `removeObjectMask` を通す。
+    ///
+    /// **didSet で自動追跡を張り直す。** 編集 API は `appendObjectMask` /
+    /// `setObjectMaskKeyframe` / `removeObjectMaskKeyframe` / `removeObjectMask` /
+    /// undo・redo / 下書き復元 / クリップ編集への追従と 7 経路あり、
+    /// 個別に書くと新しい編集を足したときに必ず漏れる（`scheduleObjectTracking` は
+    /// 追跡が不要なら即 return するので、無条件に呼んでよい）。
+    @Published public internal(set) var objectMasks: [ObjectMask] = [] {
+        didSet { scheduleObjectTracking() }
+    }
+
+    /// 物体モザイクの自動追跡（O2）の結果。マスク id 引き。
+    ///
+    /// **下書きには保存しない**（`ObjectTrack` の doc）。キーフレームから再計算できる
+    /// 派生データであり、復元後に `scheduleObjectTracking()` が同じ軌跡を作り直す。
+    /// 描画は `ObjectMaskResolver` が「キーフレームが一致する軌跡だけ」を採るため、
+    /// 再計算が終わるまではキーフレーム補間のまま（＝軌跡が無くても壊れない）。
+    @Published public internal(set) var objectTracks: [UUID: ObjectTrack] = [:]
+
+    /// 追跡の進捗（0...1）。追跡していないときは nil。UI のバッジ表示用。
+    @Published public internal(set) var objectTrackingProgress: Double?
+
+    /// 走行中の追跡タスク（クリップ id 引き）。`masks` は**そのタスクが追い始めた時点の**
+    /// マスク列で、これが今の状態と一致する間は張り替えない（同じ追跡の二重起動を防ぐ）。
+    var objectTrackingTasks: [UUID: (masks: [ObjectMask], task: Task<Void, Never>)] = [:]
+
+    /// クリップごとの追跡進捗（0...1）。`objectTrackingProgress` の材料。
+    var objectTrackingProgressByClip: [UUID: Double] = [:]
+
+    /// 旧下書き（`EditingDraft.legacyManualRects`）の移行待ち。
+    ///
+    /// v1 の動画下書きはクリップを持たないので、復元の時点では配り先の clipID が
+    /// 決まっていない。`replaceTimeline` がクリップを立てた瞬間に
+    /// `migratePendingManualRectsIfNeeded()` が全クリップへ配る。
+    /// **`clips.isEmpty` だけを見て `.still` と判定してはいけない**（v1 動画下書きが
+    /// 静止画マスクになり、どのクリップにも出なくなる）。
+    var pendingLegacyManualRects: [CGRect] = []
     @Published public internal(set) var isScanning = false
 
     // 動画再生
@@ -169,6 +210,21 @@ public final class MosaicEditorModel: ObservableObject {
     @Published public private(set) var isExportSaving = false
     /// 進行中の exporter（キャンセル要求の宛先）。
     private var activeExporter: VideoMosaicExporter?
+
+    /// 物体マスクの自動追跡が、ハードウェアデコーダを再生（`AVPlayer`）へ明け渡すべきか。
+    ///
+    /// 再生中にデコーダを奪い合うと、実機では数秒後から `copyCGImage` が nil を
+    /// 返し続ける（プリスキャンで実測済みの事故）。ただし**書き出し中は譲らない**:
+    /// `exportVideo` は追跡の完走を待ってから始めるので、ここで再生を理由に待つと
+    /// 「待っている側が待たれている」状態になり、書き出しが永久に返ってこない。
+    var shouldYieldTrackingDecoder: Bool { isPlaying && activeExporter == nil }
+
+    /// 再生中なら止める。書き出しの前段で使う（`exportVideo` の doc 参照）。
+    func pausePlaybackIfNeeded() {
+        guard isPlaying else { return }
+        previewController?.pause()
+        isPlaying = false
+    }
     /// 書き出しセッションのトークン。進捗コールバックは別スレッドから
     /// `Task { @MainActor }` で飛んでくるため、**完了後に遅延到着した通知が
     /// `exportProgress` を書き戻して進捗オーバーレイを復活させ得る**。
@@ -269,6 +325,17 @@ public final class MosaicEditorModel: ObservableObject {
             // `position * videoDuration` の各所（seekTo / redetect / detectInRegion）
             // がずれる（S3 の TODO を解消。変換は compositionTime(forPosition:) に集約）。
             if !timeline.clips.isEmpty { videoDuration = mapping.totalDuration }
+            // v1 下書きの手動矩形は、クリップが立った**この瞬間**に全クリップへ配る
+            // （復元の時点では配り先の clipID がまだ存在しない）。
+            // **`replaceTimeline` ではなくここに置くこと**: 初回のタイムライン設置
+            // （`installInitialTimeline`）は `timeline` へ直接代入しており
+            // `replaceTimeline` を通らないため、そちらに掛けると復元経路で一度も
+            // 発火しない（実測: 旧下書きのモザイクが 1 個も出なくなった）。
+            migratePendingManualRectsIfNeeded()
+            // クリップが立った／消えた／素材が入れ替わった直後に、物体マスクの
+            // 自動追跡を張り直す。復元経路ではここが軌跡を作る唯一の起点になる
+            // （軌跡は下書きに保存しないため。`ObjectTrack` の doc 参照）。
+            scheduleObjectTracking()
         }
     }
     /// タイムライン上のクリップ列（`timeline` への読み取りショートカット）。
@@ -490,7 +557,7 @@ public final class MosaicEditorModel: ObservableObject {
                        thumbnail: generateThumbnail(for: lm, from: normalized),
                        isSelected: autoSelect, personID: personIDs[idx])
         }
-        manualRegions = []
+        objectMasks = []
         sourceTexture = makeTexture(from: normalized)
         updateBackgroundMask(from: normalized)
         renderer?.reset()
@@ -517,7 +584,7 @@ public final class MosaicEditorModel: ObservableObject {
         let asset = AVAsset(url: url)
         videoAsset = asset
 
-        manualRegions = []
+        objectMasks = []
         // 新しい素材を読み込むので顔は一旦空にする。**初期スキャンが非同期になった**
         // （下の Task）ため、ここで空にしないと「前の素材の顔が残ったまま復元が走る」
         // 窓ができる。スキャン結果はこの空の列へ**追記**される（`loadSeedFaces` の doc）。
@@ -915,7 +982,7 @@ public final class MosaicEditorModel: ObservableObject {
     /// `detectedFaces` の他の要素（ライブ検出・初期スキャン）と座標系が揃う。
     private func resolveRegion(_ rect: CGRect, referenceImage: UIImage?) async {
         guard mode == .video, videoAsset != nil else {
-            appendManualRect(rect)
+            appendObjectMask(compositionRect: rect)
             return
         }
         isScanning = true
@@ -944,8 +1011,8 @@ public final class MosaicEditorModel: ObservableObject {
             detectedFaces.append(FaceTarget(id: UUID(), landmarks: hit.landmarks, thumbnail: thumb,
                                             isSelected: true, sourceID: hit.sourceID))
         } else {
-            // どのフレームでも検出できなかった: 固定矩形マスクにフォールバック
-            appendManualRect(rect)
+            // どのフレームでも検出できなかった: 物体マスク（キーフレーム 1 個）へフォールバック
+            appendObjectMask(compositionRect: rect)
         }
     }
 
@@ -1024,18 +1091,6 @@ public final class MosaicEditorModel: ObservableObject {
             t += 1.0
         }
         return nil
-    }
-
-    private func appendManualRect(_ normalizedRect: CGRect) {
-        manualRegions.append(ManualRegion(id: UUID(), normalizedRect: normalizedRect))
-        commitEdit()
-    }
-
-    public func removeManualRegion(_ id: UUID) {
-        manualRegions.removeAll { $0.id == id }
-        renderPreview()
-        previewController?.invalidate()
-        commitEdit()
     }
 
     // MARK: - 動画再生制御
@@ -1187,7 +1242,8 @@ public final class MosaicEditorModel: ObservableObject {
         // 手動矩形は顔検出を補助するものなので、顔タブ（faceMosaicOn）の状態に従う。
         if faceMosaicOn {
             let landmarks = detectedFaces.filter(\.isSelected).map(\.landmarks)
-            let extra = manualRegionPaths(for: CGSize(width: tex.width, height: tex.height))
+            let extra = objectMaskPaths(for: CGSize(width: tex.width, height: tex.height),
+                                        atComposition: compositionTimeForOverlay)
             if let result = renderer.renderToNewTexture(
                 input: current, landmarkSets: landmarks, additionalPaths: extra
             ) {
@@ -1267,14 +1323,6 @@ public final class MosaicEditorModel: ObservableObject {
         return displayFaces(at: time, matching: selected)
     }
 
-    /// 手動矩形を FaceMaskBuilder.RegionPath に変換する。
-    func manualRegionPaths(for size: CGSize) -> [FaceMaskBuilder.RegionPath] {
-        manualRegions.map { region in
-            let path = FaceMaskBuilder.rectPath(from: region.normalizedRect, in: size)
-            return FaceMaskBuilder.RegionPath(path: path, value: 0.4)
-        }
-    }
-
     // MARK: - ライブ検出（再生フレームに相乗り）
     //
     // ふるまい本体（liveBucket / storePreScanResult / recordScannedEmptyForTesting /
@@ -1326,8 +1374,8 @@ public final class MosaicEditorModel: ObservableObject {
     /// 写真下書き保存用の元画像（向き補正済み）。
     public var photoSourceImage: UIImage? { sourceImage }
 
-    /// 現在の手動矩形（正規化座標）。
-    public var manualRects: [CGRect] { manualRegions.map(\.normalizedRect) }
+    /// 下書きへ保存する物体マスク。
+    public var draftObjectMasks: [ObjectMask] { objectMasks }
 
     /// 下書き復元の予約内容（S5）。`queueTimelineRestore` 参照。
     struct TimelineRestoreRequest {
@@ -1429,7 +1477,8 @@ public final class MosaicEditorModel: ObservableObject {
         backgroundMosaicOn: Bool,
         faceBlockSize: Float,
         backgroundBlockSize: Float,
-        manualRects: [CGRect],
+        objectMasks: [ObjectMask],
+        legacyManualRects: [CGRect] = [],
         faceSelections: [DraftFaceSelection]? = nil,
         personProfiles: [PersonProfile]? = nil
     ) {
@@ -1444,7 +1493,8 @@ public final class MosaicEditorModel: ObservableObject {
         self.backgroundMosaicOn = backgroundMosaicOn
         self.faceBlockSize = faceBlockSize
         self.backgroundBlockSize = backgroundBlockSize
-        self.manualRegions = manualRects.map { ManualRegion(id: UUID(), normalizedRect: $0) }
+        self.objectMasks = objectMasks
+        migrateLegacyManualRects(legacyManualRects)
         // 顔選択は resetHistory より**前**に復元する（復元後の状態が履歴の起点になる。
         // ここで直さないと、末尾の resetHistory で undo からも取り戻せなくなる）。
         if let faceSelections {
@@ -1634,7 +1684,7 @@ public final class MosaicEditorModel: ObservableObject {
             faceBlockSize: faceBlockSize,
             backgroundBlockSize: backgroundBlockSize,
             selectedFaceIDs: Set(detectedFaces.filter(\.isSelected).map(\.id)),
-            manualRects: manualRegions.map(\.normalizedRect),
+            objectMasks: objectMasks,
             trimRange: trimRange,
             timeline: timeline
         )
@@ -1648,7 +1698,7 @@ public final class MosaicEditorModel: ObservableObject {
         for index in detectedFaces.indices {
             detectedFaces[index].isSelected = snap.selectedFaceIDs.contains(detectedFaces[index].id)
         }
-        manualRegions = snap.manualRects.map { ManualRegion(id: UUID(), normalizedRect: $0) }
+        objectMasks = snap.objectMasks
         trimRange = snap.trimRange
         // タイムラインの復元。差分があるときだけ `replaceTimeline` が世代トークン付きの
         // 非同期 rebuild を起動する（undo 連打では古い世代の合成結果が
@@ -1744,6 +1794,14 @@ public final class MosaicEditorModel: ObservableObject {
             errorMessage = shortage
             return
         }
+        // 再生を止めてから追跡を待つ。**この順序を崩さないこと**: 追跡は再生中
+        // ハードウェアデコーダを明け渡して待つ設計なので、再生したまま待つと
+        // 「書き出しが追跡を待ち、追跡が再生の終了を待つ」で永久に止まる。
+        pausePlaybackIfNeeded()
+        // 走行中の自動追跡を待つ。待たないと「プレビューは追跡位置・書き出しは
+        // キーフレーム補間」という食い違いが出る（軌跡は下書きに保存しないため、
+        // 復元直後の書き出しでこれが起きやすい）。
+        await awaitObjectTracking()
         exportProgress = 0
         isExportCancelling = false
         isExportSaving = false
@@ -1774,7 +1832,8 @@ public final class MosaicEditorModel: ObservableObject {
                 // 再生側が署名を書き込み続けるため、参照のまま渡すと競合する）。
                 selectedPersons: selectedPersonProfiles(of: targetsForExport),
                 faceSignatures: signatureCache.lookup(),
-                manualRegions: manualRegions,
+                objectMasks: objectMasks,
+                objectTracks: objectTracks,
                 detectionCaches: detectionCaches,
                 mapping: mapping,
                 // 写真素材の素材時刻は exporter 側でも 0 に clamp する

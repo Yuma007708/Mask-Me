@@ -185,6 +185,25 @@ public enum TransitionKind: String, Codable, CaseIterable, Sendable {
         }
     }
 
+    /// 片側クリップの**矩形**（物体モザイク）に、この進行度の視覚変換を適用する。
+    ///
+    /// `visibleLandmarks` の矩形版。重なり区間では画面に 2 クリップが同時に映るので、
+    /// 両側のマスクを描かないと片方の物体が素のまま出る（旧 `ManualRegion` は
+    /// 常に全フレームへ出ていたので、片側に絞ると**退行**になる）。
+    ///
+    /// - 完全に不可視（不透明度 0）の側は nil。
+    /// - 平行移動後に可視領域と少しでも重なれば**矩形は切らずに丸ごと残す**。
+    ///   ワイプ境界で切ると、はみ出したぶんの物体が素で出る。過剰適用へ倒す
+    ///   （`visibleLandmarks` と同じ判断）。
+    /// - 移動量・可視判定ともに `parameters` を使う（数式の単一情報源）。
+    public func visibleRect(_ rect: CGRect, progress: Double, side: TransitionSide) -> CGRect? {
+        let params = parameters(progress: progress, side: side)
+        guard params.opacity > 0 else { return nil }
+        let moved = rect.standardized.offsetBy(dx: params.translation.dx, dy: params.translation.dy)
+        guard moved.intersects(params.visibleRect) else { return nil }
+        return moved
+    }
+
     // MARK: - 2 レイヤ合成（AVVideoComposition のレイヤ順）
 
     /// 重なり区間を「前面 = outgoing / 背面 = incoming」の 2 レイヤで合成するとき、

@@ -508,10 +508,27 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
     /// （フロー橋渡しは検出全滅フレームしか使わないので、実顔素材では寄与が小さい）。
     /// それでも緩い側を採るのは、その版がフロー橋渡しを全面的に弱めるためで、手元の素材に
     /// 出なかった退行が他の素材で出るリスクを読めないから。**誤モザイクより顔の見逃しが重い。**
+    ///
+    /// **増光してようやく再検証を通った顔も種にしない。** 増光は暗部を持ち上げる操作なので、
+    /// 胴体・肘の陰影も「顔らしく」均してしまう。実測（`probe_body_elbow_01`）では増光経路の
+    /// 通過は 45 フレーム中 2 件しかないのに、そこを種にしたフローが 5 フレームへ増幅していた
+    /// （誤検出率 0% → 11%。上限 10% を超える）。crop の明るさで実顔と分けることはできない
+    /// （実顔 0.039..0.220 に対し肘 0.151 とレンジが重なる。`[ENHANCE]` 計測）ので、
+    /// 「増光に頼ったかどうか」そのものを種の信頼度として使う。
+    ///
+    /// **検出そのものは落とさない。** フローは検出器が全滅したフレームを繋ぐ経路なので、
+    /// 種を絞っても暗所の実顔の検出フレーム数は変わらない（実測 45/45 を維持）。
     private func isTrustedFlowSeed(_ face: FaceLandmarkSet) -> Bool {
+        if enhancedPassBoxes.contains(where: { iou($0, face.boundingBox) > verifiedMemoryIoU }) {
+            return false
+        }
         guard priorFailStreak(at: face.boundingBox) > 0 else { return true }
         return isRecentlyVerified(face.boundingBox)
     }
+
+    /// このフレームで**増光してようやく**再検証を通った場所。`isTrustedFlowSeed` が読む。
+    /// 1 フレーム限りの記録で、`verifySuspiciousFaces` の入口で毎回捨てる。
+    private var enhancedPassBoxes: [CGRect] = []
 
     /// その場所が「通過に転じる直前まで」連続で落ちていた回数。通過して記憶に載ったあとも
     /// 参照できるよう、`VerifiedBox` に持ち越した値を優先して読む。
@@ -736,6 +753,16 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
     /// 下限すれすれではない」ことを意味する。補助 bbox 経路の採用条件と同値。
     private let verifyMinConfidence: Float = 0.6
 
+    /// 増光してようやく再検出できた顔に要求する confidence 下限。
+    /// 素の crop より高くしてあるのは、増光が胴体の陰影も「顔らしく」均してしまうため。
+    ///
+    /// **これだけでは肘の誤検出は止まらなかった**（実測: `probe_body_elbow_01` の通過は
+    /// 0.85 を超えるフルメッシュで、この閾値では 11% のまま）。止めたのは
+    /// `isTrustedFlowSeed` 側。ここを残しているのは、増光経路が原理的に信頼度の低い
+    /// 経路であることに変わりはなく、手元の素材に出ていない低 confidence の
+    /// まぐれ通過を素通しにする理由が無いため。
+    private let verifyMinConfidenceEnhanced: Float = 0.85
+
     /// - Parameter verifyAll: `true` なら「疑わしい候補」に限らず全候補を再検証する。
     ///   静止画経路（写真ロード・シードスキャン・再検出ボタン・素材追加）で使う。
     ///   静止画は 1 枚あたりの顔が少なくコストが問題にならないうえ、顔が 1 つなら
@@ -750,15 +777,23 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
                                        verifyAll: Bool = false,
                                        temporalGrace: Bool = false) -> [FaceLandmarkSet] {
         guard let cropLandmarker = landmarkerForCrop else { return faces }
+        // 増光通過の記録はこのフレーム限り（`reseedFlow` が同じフレームの結果に対して読む）。
+        enhancedPassBoxes.removeAll(keepingCapacity: true)
         return faces.filter { face in
             let box = face.boundingBox
             guard verifyAll
                     || face.isSuspectBodyRegion(in: image.size, suspectMidY: verifySuspectCy)
             else { return true }
             verifyStats.examined += 1
+            // 増光してようやく再検出できた場合の crop 平均輝度（診断専用）。
+            // 採否の両方から読むので、`reject` より前に置く。
+            var enhancedLuminance: Double?
             // 検証に落ちたときの共通後処理。直近で検証を通った顔なら猶予で残す。
             func reject(_ reason: VerifyRejectionReason) -> Bool {
                 verifyStats.count(reason)
+                if let luminance = enhancedLuminance {
+                    verifyStats.record(luminance: luminance, as: .reject)
+                }
                 // 棄却の記憶は時系列経路（動画・ライブ）でだけ持つ。静止画は 1 枚ずつ独立で、
                 // 連続棄却という概念が無いうえ、毎フレームの `ageRejectedMemory` が回らないので
                 // 記憶が捨てられず溜まり続ける。
@@ -778,12 +813,11 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
             let roi = expandedClamped(box, factor: verifyCropExpansion)
             guard roi.width > 0, roi.height > 0,
                   let cropped = cropImage(image, normalizedRect: roi),
-                  let mpImage = try? MPImage(uiImage: upscaledIfSmall(cropped)),
-                  let result = try? cropLandmarker.detect(image: mpImage),
-                  let first = result.faceLandmarks.first else {
+                  let redetection = redetectLandmarks(in: cropped, using: cropLandmarker) else {
                 return reject(.noRedetection)
             }
-            let points = first.map { FaceLandmark(x: $0.x, y: $0.y, z: $0.z) }
+            enhancedLuminance = redetection.enhancedLuminance
+            let points = redetection.points.map { FaceLandmark(x: $0.x, y: $0.y, z: $0.z) }
             let meshFraction = Float(min(1.0, Double(points.count) / Double(FaceLandmarkSet.fullMeshCount)))
             let redetected = FaceLandmarkSet(points: points, confidence: meshFraction)
                 .remapped(into: roi)
@@ -797,10 +831,17 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
                                                imageSize: image.size) else {
                 return reject(.geometry)
             }
-            guard vetted.confidence >= verifyMinConfidence else { return reject(.confidence) }
+            // 増光してようやく見つかった顔は、素の crop で見つかった顔より疑わしい
+            // （増光は胴体の陰影も顔らしく均してしまう）。その経路だけ confidence を厳しくする。
+            let minConfidence = enhancedLuminance == nil ? verifyMinConfidence : verifyMinConfidenceEnhanced
+            guard vetted.confidence >= minConfidence else { return reject(.confidence) }
             guard !vetted.isBodyLikeShape(in: image.size) else { return reject(.bodyShape) }
             guard iou(vetted.boundingBox, box) > 0.3 else { return reject(.displaced) }
             verifyStats.passed += 1
+            if let luminance = enhancedLuminance {
+                verifyStats.record(luminance: luminance, as: .pass)
+                enhancedPassBoxes.append(box)
+            }
             let prior = failStreak(at: box)
             verifyStats.passAfterStreaks[prior, default: 0] += 1
             forgetRejected(box)
@@ -833,6 +874,9 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
         case displaced
     }
 
+    /// 診断用の輝度サンプルの種類（`VerifyStats.record(luminance:as:)`）。
+    enum LuminanceKind { case pass, reject, gate }
+
     struct VerifyStats {
         var examined = 0
         var passed = 0
@@ -850,6 +894,36 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
         /// 体誤フィットの「まぐれ通過」はフロー橋渡しの種になって十数フレームへ増幅するので、
         /// 通過そのものを直前の失敗歴で疑えるかを見る。
         var passAfterStreaks: [Int: Int] = [:]
+        /// 増光してようやく再検出できた crop の平均輝度（診断専用）。
+        /// 暗さゲート `verifyEnhanceLuminance` を実測で決めるための材料で、
+        /// 「実顔がどの暗さで救われ、顔なし素材がどの暗さで通ってしまうか」を分けて見る。
+        var enhancedPassLuminance: [Double] = []
+        var enhancedRejectLuminance: [Double] = []
+        /// 素の crop で再検出できず、**暗さゲートを判定した**ときの中央輝度（診断専用）。
+        /// 増光に入ったかどうかに関わらず記録するので、「ゲートで弾かれて増光を
+        /// 試せなかった crop がどのくらいの明るさか」が分かる。
+        var enhanceGateLuminance: [Double] = []
+
+        /// 診断用の輝度サンプルを記録する。**上限つき**。
+        ///
+        /// `resetVerifyStats()` を呼ぶのは診断テストだけで、**アプリ本体では誰も呼ばない**。
+        /// 上限が無いとライブ検出（毎フレーム走る）で配列が際限なく伸び、
+        /// 長い動画を再生し続けるだけでメモリを食う。分布を見るのが目的なので
+        /// 頭 `luminanceSampleLimit` 件で足りる。
+        mutating func record(luminance: Double, as kind: LuminanceKind) {
+            switch kind {
+            case .pass: Self.append(luminance, to: &enhancedPassLuminance)
+            case .reject: Self.append(luminance, to: &enhancedRejectLuminance)
+            case .gate: Self.append(luminance, to: &enhanceGateLuminance)
+            }
+        }
+
+        private static let luminanceSampleLimit = 200
+
+        private static func append(_ value: Double, to array: inout [Double]) {
+            guard array.count < luminanceSampleLimit else { return }
+            array.append(value)
+        }
 
         mutating func count(_ reason: VerifyRejectionReason) {
             switch reason {
@@ -1114,6 +1188,93 @@ public final class MediaPipeFaceLandmarkerAdapter: FaceLandmarking {
         let x0 = max(0, cx - w / 2), y0 = max(0, cy - h / 2)
         let x1 = min(1, cx + w / 2), y1 = min(1, cy + h / 2)
         return CGRect(x: x0, y: y0, width: x1 - x0, height: y1 - y0)
+    }
+
+    /// 再検証の crop をこの平均輝度未満なら「暗所」とみなし、増光して追試する。
+    ///
+    /// **この値では実顔と誤検出を分けられない。** 実測（`[ENHANCE] gate=` 計測、中央輝度）:
+    ///
+    /// | 素材 | 中央輝度 |
+    /// |---|---|
+    /// | 暗所(実顔) | 0.024..0.094 |
+    /// | 肘(顔なし) | 0.028..0.060 |
+    /// | 胴体(顔なし) | 0.153..0.251 |
+    /// | 遮蔽(実顔) | 0.367..0.585 |
+    /// | 逆光(実顔) | 0.414..0.831 |
+    /// | 横顔・群衆(実顔) | 0.600..0.628 |
+    ///
+    /// **顔なし素材の方が暗い**という逆転が起きているので、明るさで足切りしても
+    /// 誤検出は減らない。分離を担うのは `isTrustedFlowSeed`（増光通過をフローの種に
+    /// しない）と `verifyMinConfidenceEnhanced` の 2 つで、この閾値の役目は
+    /// **明るい素材で無駄な増光推論を走らせないコスト上の足切り**だけ。
+    ///
+    /// 0.60 は遮蔽（0.367..0.585）を全部拾い、逆光の暗い側も拾える位置。
+    /// 胴体は 0.32 の頃から 28 回増光を試して一度も顔と誤認していない（`pass=0`）。
+    ///
+    /// **動かしたら `DiagFaceCoverageTests`（実顔の下限）・
+    /// `SampleFalsePositiveTests`（顔なし素材の 10% 上限）・
+    /// `DValidLiveModelTests`（被覆率の下限）を測り直すこと。**
+    private let verifyEnhanceLuminance: CGFloat = 0.60
+
+    /// 再検証用の crop 検出。素のまま 1 回試し、**暗い crop のときだけ**
+    /// 本検出と同じ増光を重ねて追試する。
+    ///
+    /// なぜ要るか: 本検出（`mpDetectImageWithEnhance`）は暗所で `enhance` を段階的に掛けて
+    /// 顔を見つけているのに、この再検証だけ素の crop を 1 回試して諦めていた。
+    /// 「本検出は見つけたのに再検証で消える」（棄却理由 `noRedetection`）が暗所素材に
+    /// 集中するのはこの非対称のため。実測（実機・`probe_hard_dark`）で 45 フレーム中
+    /// 20 フレームがこれで落ちていた。
+    ///
+    /// **明るい crop には掛けない。** 増光は胴体のような誤検出候補も再検証に通りやすくする。
+    /// 顔なし素材は暗所ではないので、暗さで発動条件を絞れば誤検出への影響を避けられる
+    /// （`SampleFalsePositiveTests` の 10% 上限を守るための条件）。
+    /// - Returns: 再検出できたランドマークと、**増光経路で見つけた場合のみ**その crop の
+    ///   平均輝度（素の crop で見つかったときは `nil`）。呼び出し側はこれで
+    ///   「増光に頼ったか」を判定し、confidence の要求を切り替える。
+    private func redetectLandmarks(
+        in cropped: UIImage, using landmarker: FaceLandmarker
+    ) -> (points: [NormalizedLandmark], enhancedLuminance: Double?)? {
+        func detect(_ image: UIImage) -> [NormalizedLandmark]? {
+            guard let mpImage = try? MPImage(uiImage: upscaledIfSmall(image)),
+                  let result = try? landmarker.detect(image: mpImage) else { return nil }
+            return result.faceLandmarks.first
+        }
+        if let first = detect(cropped) { return (first, nil) }
+        let luminance = meanLuminance(of: cropped)
+        verifyStats.record(luminance: Double(luminance), as: .gate)
+        guard luminance < verifyEnhanceLuminance else { return nil }
+        // 本検出と同じ順（軽い増光 → 強い増光）。moderate は暗所にはほぼ効かないので省く。
+        for level in [EnhanceLevel.aggressive, .backlight] {
+            if let boosted = enhance(cropped, level: level), let first = detect(boosted) {
+                return (first, Double(luminance))
+            }
+        }
+        return nil
+    }
+
+    /// 画像**中央 50% 領域**の平均輝度（0...1）。`CIAreaAverage` で 1x1 に畳んで
+    /// 1 画素だけ読む（画素ループを回すと再検証のたびに実時間性が壊れる）。
+    ///
+    /// **全体平均ではなく中央を見る。** 逆光は「背景が明るく、顔だけ暗い」ので、
+    /// 全体平均だと「暗くない」と判定されて増光の追試が発動しない
+    /// （実測: `probe_hard_backlight` は増光経路に一度も入らず、被覆率 0% だった）。
+    /// 再検証の crop は顔の bbox を 1.3 倍しただけなので、中央は必ず顔にあたる。
+    private func meanLuminance(of image: UIImage) -> CGFloat {
+        guard let cg = image.cgImage else { return 1 }
+        let ci = CIImage(cgImage: cg)
+        let full = ci.extent
+        let center = full.insetBy(dx: full.width * 0.25, dy: full.height * 0.25)
+        guard center.width > 0, center.height > 0 else { return 1 }
+        guard let output = CIFilter(name: "CIAreaAverage", parameters: [
+            kCIInputImageKey: ci,
+            kCIInputExtentKey: CIVector(cgRect: center)
+        ])?.outputImage else { return 1 }
+        var pixel = [UInt8](repeating: 0, count: 4)
+        ciContext.render(output, toBitmap: &pixel, rowBytes: 4,
+                         bounds: CGRect(x: 0, y: 0, width: 1, height: 1),
+                         format: .RGBA8, colorSpace: CGColorSpaceCreateDeviceRGB())
+        return (0.299 * CGFloat(pixel[0]) + 0.587 * CGFloat(pixel[1])
+                + 0.114 * CGFloat(pixel[2])) / 255
     }
 
     /// 小さい ROI crop は MediaPipe の検出下限を割りやすいので、短辺が `minSide` px
