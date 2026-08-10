@@ -30,6 +30,12 @@ struct HomeView: View {
     /// `MosaicEditorModel.errorMessage` が無いのでこの画面のアラートで伝える。
     @State private var pickerError: String?
 
+    /// 初回案内（`OnboardingSheet`）を見たか。**判定はこの 1 つだけ**で決める
+    /// （素材の有無や下書きの状態を条件に足すと「消したはずの案内がまた出る」
+    /// 経路が作れてしまう）。
+    @AppStorage("didSeeOnboarding") private var didSeeOnboarding = false
+    @State private var showOnboarding = false
+
     private var showPickerError: Binding<Bool> {
         Binding(get: { pickerError != nil }, set: { if !$0 { pickerError = nil } })
     }
@@ -76,7 +82,25 @@ struct HomeView: View {
                            settings: settingsStore.settings)
             }
         }
-        .onAppear { seedForUITestsIfNeeded() }
+        .sheet(isPresented: $showOnboarding) {
+            OnboardingSheet()
+        }
+        .onAppear {
+            seedForUITestsIfNeeded()
+            showOnboardingIfNeeded()
+        }
+    }
+
+    /// 初回だけ案内を出す。
+    ///
+    /// **UI テストでは出さない。** 種の動画で編集画面へ直行する経路
+    /// （`UITestBootstrap.isSeedingVideo`）に案内が重なると、全 UI テストが
+    /// 最初のシートで止まる。`@AppStorage` は Simulator に残るので
+    /// 「1 回目だけ落ちる」という再現性の低い失敗になり、原因も分かりにくい。
+    private func showOnboardingIfNeeded() {
+        guard !didSeeOnboarding, !UITestBootstrap.isSeedingVideo else { return }
+        didSeeOnboarding = true
+        showOnboarding = true
     }
 
     private var createButton: some View {
