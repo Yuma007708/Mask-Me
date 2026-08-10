@@ -36,28 +36,23 @@ public struct TimelineSelection: Equatable, Sendable {
     /// 何も選んでいないか。
     public var isEmpty: Bool { clipID == nil && layer == nil }
 
-    /// 選択中の加工レイヤー（モザイクの適用区間）の id。
+    /// 指定した種のレイヤーを選んでいるならその id。違う種を選んでいるなら nil。
     ///
-    /// **これは一時的な互換 shim。** 種を持つ選択（`layer`）が本体で、これは
-    /// 種が `.mosaic` のときだけ id を返す。呼び出し側を `layer` を見る形へ
-    /// 移し終えたら削る（`VideoTimelineView.swift` / `TimelineApplyTrackView.swift` が
-    /// まだ `UUID?` の `Binding` で `rangeID` を読み書きしているため、今は残す）。
-    public var rangeID: UUID? {
-        guard case .mosaic = layer?.kind else { return nil }
-        return layer?.id
+    /// **種を落とす形（`rangeID` のような「種を問わず id だけ返す」入口）は置かない。**
+    /// かつて `rangeID` / `selectRange` という shim があり、常に `.mosaic` として
+    /// 書き込んでいた。BGM の段が同じ Binding を使っていたため、**BGM の帯をタップして
+    /// 選ぶと内部では `.mosaic` になり、削除も音量調整も効かなくなっていた**
+    /// （E2-3b で作り込んだ欠陥。E3-3a のレビューで発見）。
+    /// 種を必ず伴う形にして、同じ取り違えを型で防ぐ。
+    public func layerID(of kind: TimelineLayerKind) -> UUID? {
+        guard let layer, layer.kind == kind else { return nil }
+        return layer.id
     }
 
     /// クリップを選ぶ。`nil` は選択解除。**レイヤーの選択は必ず外れる。**
     public mutating func selectClip(_ id: UUID?) {
         clipID = id
         if id != nil { layer = nil }
-    }
-
-    /// モザイクの加工レイヤーを選ぶ。`nil` は選択解除。**クリップの選択は必ず外れる。**
-    ///
-    /// `selectLayer(id.map { TimelineLayerSelection(kind: .mosaic, id: $0) })` の shim。
-    public mutating func selectRange(_ id: UUID?) {
-        selectLayer(id.map { TimelineLayerSelection(kind: .mosaic, id: $0) })
     }
 
     /// レイヤーアイテムを選ぶ。`nil` は選択解除。**クリップの選択は必ず外れる。**
@@ -93,6 +88,8 @@ public struct TimelineSelection: Equatable, Sendable {
                 stillExists = state.applyRanges.contains { $0.id == layer.id }
             case .audio:
                 stillExists = state.audioItems.contains { $0.id == layer.id }
+            case .text:
+                stillExists = state.textItems.contains { $0.id == layer.id }
             }
             if !stillExists { self.layer = nil }
         }

@@ -152,6 +152,8 @@ extension VideoTimelineView {
                 model.removeMosaicApplyRange(id: layer.id)
             case .audio:
                 model.removeAudioItem(id: layer.id)
+            case .text:
+                model.removeTextItem(id: layer.id)
             }
         } else if let id = selectedClipID {
             model.removeClip(id: id)

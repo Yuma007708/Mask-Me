@@ -119,3 +119,45 @@ final class AudioSpanLayoutTests: XCTestCase {
         XCTAssertLessThanOrEqual(moved.end, 8 + 1e-9, "合成尺の外へ出た")
     }
 }
+
+// MARK: - テキストの段（E3-3a）
+
+/// テキストを段のセグメントへ写す `TimelineBandLayout.textSpans` の契約。
+/// `AudioSpanLayoutTests` と同じ構成だが、**重なりを許す**点だけが違う。
+final class TextSpanLayoutTests: XCTestCase {
+    private func item(start: Double, duration: Double, text: String = "hello") -> TextItem {
+        TextItem(text: text, compositionStart: start, duration: duration)
+    }
+
+    /// テキストのセグメントは **`anchorClipID` が必ず nil**（クリップに属さない）。
+    func test_textSpans_haveNoClipAnchor() {
+        let spans = TimelineBandLayout.textSpans(items: [item(start: 1, duration: 2)],
+                                                  totalDuration: 10)
+        XCTAssertEqual(spans.count, 1)
+        XCTAssertNil(spans[0].anchorClipID, "テキストのセグメントがクリップに紐づいている")
+        XCTAssertEqual(spans[0].kind, .text)
+        XCTAssertEqual(spans[0].start, 1, accuracy: 1e-12)
+        XCTAssertEqual(spans[0].end, 3, accuracy: 1e-12)
+        XCTAssertTrue(spans[0].isEdgeAdjustable, "テキストの端が伸縮できない")
+        XCTAssertTrue(spans[0].isMovable)
+    }
+
+    /// **合成尺で切る。** 生の `textItems` をそのまま帯にすると、クリップを消して
+    /// 縮んだタイムラインの外へ帯が伸びる（`AudioSpanLayoutTests` と同じ規則）。
+    func test_textSpans_clipToTotalDuration() {
+        let spans = TimelineBandLayout.textSpans(
+            items: [item(start: 8, duration: 5), item(start: 30, duration: 2)],
+            totalDuration: 10)
+        XCTAssertEqual(spans.count, 1, "尺の外のテキストが帯に出ている")
+        XCTAssertEqual(spans[0].end, 10, accuracy: 1e-12, "帯が合成尺で切れていない")
+    }
+
+    /// **BGM と違い、テキストは重なってよい。** 同じ区間に 2 本置いても両方が
+    /// 帯として現れる（コア層側の `normalizedTextItems` が重なりを解消しないのと対）。
+    func test_textSpans_allowOverlap() {
+        let spans = TimelineBandLayout.textSpans(
+            items: [item(start: 1, duration: 3, text: "a"), item(start: 2, duration: 3, text: "b")],
+            totalDuration: 10)
+        XCTAssertEqual(spans.count, 2, "重なるテキストの帯が片方消えている")
+    }
+}

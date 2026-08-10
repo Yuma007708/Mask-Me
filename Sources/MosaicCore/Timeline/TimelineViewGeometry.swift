@@ -187,6 +187,10 @@ public enum TimelineLayerKind: Equatable, Sendable, CaseIterable {
     /// （`AudioItem` 型の doc）。この違いは `TimelineApplySpan.anchorClipID` が
     /// nil になる形で型に出る。
     case audio
+    /// テキスト（E3）。`.audio` と同じ合成時刻アンカー（`TextItem` 型の doc）。
+    /// **`.audio` と違い重なってよい。** UI 側で移動・伸縮を隣とクランプしないこと
+    /// （`TimelineState.normalizedTextItems` の doc 参照）。
+    case text
 }
 
 /// モザイク適用区間 1 本を、それが属するクリップへ写した合成時刻の区間。

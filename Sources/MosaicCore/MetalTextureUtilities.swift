@@ -201,5 +201,21 @@ extension MosaicRenderer {
         )
         return ok ? output : nil
     }
+
+    /// `textTexture` を `layout` の位置・サイズ・不透明度で重ね、新規テクスチャを返す（E3-2）。
+    /// 描画対象が無い（サイズ 0 / 不透明度 0）ときも `input` と同サイズのコピーを返す
+    /// （呼び出し側がチェーンで `current = ...` と使い回せるよう、常に非 nil を保つ）。
+    @discardableResult
+    public func renderTextToNewTexture(
+        input: MTLTexture,
+        textTexture: MTLTexture,
+        layout: TextQuadLayout
+    ) -> MTLTexture? {
+        guard let output = MetalTextureUtilities.makeOutputTexture(like: input, device: device) else {
+            return nil
+        }
+        renderText(input: input, into: output, textTexture: textTexture, layout: layout, waitForCompletion: true)
+        return output
+    }
 }
 #endif

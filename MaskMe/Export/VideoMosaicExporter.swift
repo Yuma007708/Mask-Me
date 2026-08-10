@@ -283,6 +283,9 @@ public final class VideoMosaicExporter: @unchecked Sendable {
     private let landmarker: FaceLandmarking
     private let ciContext: CIContext
     private var textureCache: CVMetalTextureCache?
+    /// テキストのラスタライズ結果キャッシュ（E3-2）。フレーム処理は単一の
+    /// videoQueue 上で直列に走るため（`perfDetectSec` 等と同じ前提）ロック不要。
+    private let textOverlayCache: TextOverlayCache
 
     // MARK: - 中断（ユーザー操作によるキャンセル）
     //
@@ -385,6 +388,16 @@ public final class VideoMosaicExporter: @unchecked Sendable {
     /// （`MosaicEditorModel.exportVideo` は書き出し前に追跡の完走を待つ）。
     private var objectTracks: [UUID: ObjectTrack] = [:]
 
+    /// 画面に置く文字（E3）。export 開始時に `timeline.textItems` をそのまま設定する。
+    /// クリップ・トリムに追従しないアンカーなので、素材位置の写像は要らない
+    /// （`TextItem` の doc 参照）。
+    private var textItems: [TextItem] = []
+    /// `TextItem.clipped(toTotalDuration:)` / `visibleTextItems` に渡す合成尺。
+    /// **プレビューと同じ `mapping.totalDuration` を使うこと**（`trimRange` の
+    /// PTS シフトとは無関係。トリムは書き出し側の出力尺の話で、テキストの
+    /// アンカーは常にトリム前の合成タイムライン上にある）。
+    private var textTotalDuration: Double = 0
+
     private func resetPerf() {
         perfDetectSec = 0; perfRenderSec = 0; perfSegSec = 0; perfDecodeSec = 0
         perfDetectCalls = 0; perfFrames = 0
@@ -414,6 +427,7 @@ public final class VideoMosaicExporter: @unchecked Sendable {
     public init(renderer: MosaicRenderer, landmarker: FaceLandmarking) {
         self.renderer = renderer
         self.landmarker = landmarker
+        self.textOverlayCache = TextOverlayCache(device: renderer.device)
         self.ciContext = CIContext(mtlDevice: renderer.device)
         CVMetalTextureCacheCreate(
             kCFAllocatorDefault, nil, renderer.device, nil, &textureCache
@@ -470,6 +484,9 @@ public final class VideoMosaicExporter: @unchecked Sendable {
         /// `MosaicApplyGate.fullCoverRanges(for: clips, photoSourceIDs:)` を渡すこと。
         /// `MosaicEditorModel` は `timeline.applyRanges` を渡す。
         applyRanges: [MosaicApplyRange] = [],
+        /// 画面に置く文字（E3）。`MosaicEditorModel` は `timeline.textItems` を渡す。
+        /// 素材アンカーを持たないので `mapping` による写像は不要（合成時刻のまま使う）。
+        textItems: [TextItem] = [],
         videoComposition: AVVideoComposition? = nil,
         audioMix: AVAudioMix? = nil,
         /// BGM（E2）が 1 曲でも載っているか。真なら音声は必ず再エンコード経路になる。
@@ -519,6 +536,8 @@ public final class VideoMosaicExporter: @unchecked Sendable {
         self.applyRanges = MosaicApplyGate.effectiveRanges(applyRanges, mapping: mapping)
         self.renderLayout = renderLayout
         self.objectTracks = objectTracks
+        self.textItems = textItems
+        self.textTotalDuration = mapping.totalDuration
         let videoTracks = try await asset.loadTracks(withMediaType: .video)
         guard let videoTrack = videoTracks.first else {
             throw ExportError.noVideoTrack
@@ -1099,6 +1118,13 @@ public final class VideoMosaicExporter: @unchecked Sendable {
                     value: 0.4) }
             : []
 
+        // テキスト（E3-2）はモザイク適用区間ゲートとは独立。「どれが出ているか」は
+        // `visibleTextItems`（プレビューと共有する配列拡張）だけが決める。判定時刻は
+        // 検出・ゲートと同じ timeSec（写像・トリムシフト前の合成時刻）。
+        let visibleText = textItems.isEmpty
+            ? []
+            : textItems.visibleTextItems(atComposition: timeSec, totalDuration: textTotalDuration)
+
         let r0 = CFAbsoluteTimeGetCurrent()
         try? mosaicFrame(
             sourceBuffer: sourceBuffer,
@@ -1107,6 +1133,8 @@ public final class VideoMosaicExporter: @unchecked Sendable {
             additionalPaths: additionalPaths,
             backgroundMask: loop.cachedBackgroundMask,
             backgroundBlock: backgroundBlock,
+            textItems: visibleText,
+            textCompositionTime: timeSec,
             adaptor: adaptor,
             input: input,
             cache: cache
@@ -1221,6 +1249,8 @@ public final class VideoMosaicExporter: @unchecked Sendable {
         additionalPaths: [FaceMaskBuilder.RegionPath],
         backgroundMask: MaskBuffer?,
         backgroundBlock: Float,
+        textItems: [TextItem],
+        textCompositionTime: Double,
         adaptor: AVAssetWriterInputPixelBufferAdaptor,
         input: AVAssetWriterInput,
         cache: CVMetalTextureCache
@@ -1235,6 +1265,7 @@ public final class VideoMosaicExporter: @unchecked Sendable {
         }
 
         // 背景パスがある場合は、顔モザイクを中間テクスチャに描いてから背景を出力に重ねる。
+        // どちらの分岐も最終的に `outputTexture` へモザイク済みの絵を書く。
         if let backgroundMask,
            let intermediate = MetalTextureUtilities.makeOutputTexture(like: inputTexture, device: renderer.device) {
             renderer.render(
@@ -1253,6 +1284,20 @@ public final class VideoMosaicExporter: @unchecked Sendable {
                 landmarkSets: landmarkSets, additionalPaths: additionalPaths,
                 waitForCompletion: true
             )
+        }
+
+        // テキスト（E3-2）は「モザイク → テキスト」の順で常に最後に重ねる。
+        // プレビューと同じ `TextOverlayCompositor` を通すことで、位置・サイズの
+        // px 換算とアニメーションの数式が両経路で一致する。
+        let finalTexture = textItems.isEmpty
+            ? outputTexture
+            : TextOverlayCompositor.apply(items: textItems, at: textCompositionTime,
+                                          renderer: renderer, cache: textOverlayCache, input: outputTexture)
+
+        // テキスト合成が新規テクスチャを作った場合、`outputTexture`（pixelBuffer 由来の
+        // texture）へ書き戻してから append する。`outBuffer` の中身を最終結果にするため。
+        if finalTexture !== outputTexture {
+            renderer.copyTexture(from: finalTexture, into: outputTexture, waitForCompletion: true)
         }
 
         // 呼び出し側が isReadyForMoreMediaData を確認済みなのでビジーウェイト不要。

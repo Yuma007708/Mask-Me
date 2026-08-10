@@ -40,6 +40,14 @@ public struct TimelineState: Codable, Equatable, Sendable {
     /// **データとしては温存**し、表示と書き出しの側で `AudioItem.clipped(toTotalDuration:)`
     /// が切る。
     public var audioItems: [AudioItem]
+    /// 画面に置く文字（E3）。**BGM と同じ合成時刻アンカー**で、`compositionStart` 昇順。
+    ///
+    /// BGM と違い**重なってよい**（複数の文字を同時に出せる）。重なりを禁じる理由が
+    /// 無いためで、描画は `textItems` の順（＝ `compositionStart` 昇順）に重ねる。
+    ///
+    /// クリップを消して合成尺が縮んだときの扱いは BGM と同じ（データは温存し、
+    /// 表示と描画は `effectiveTextItems(totalDuration:)` だけを見る）。
+    public var textItems: [TextItem]
     /// 素材メタ情報（キーは素材ID = `TimelineClip.sourceID` または `AudioItem.sourceID`）。
     /// エントリが無い素材は動画（`TimelineSource.Kind.video`）として扱う
     /// （kind 導入前のデータとの互換）。
@@ -49,8 +57,10 @@ public struct TimelineState: Codable, Equatable, Sendable {
                 transitions: [UUID: TransitionSpec] = [:],
                 applyRanges: [MosaicApplyRange] = [],
                 audioItems: [AudioItem] = [],
+                textItems: [TextItem] = [],
                 sources: [UUID: TimelineSource] = [:]) {
         self.audioItems = audioItems
+        self.textItems = textItems
         self.clips = clips
         self.transitions = transitions
         self.applyRanges = applyRanges
@@ -68,7 +78,8 @@ public struct TimelineState: Codable, Equatable, Sendable {
     /// - v2: `MosaicApplyRange` が `clipID` を持ち、**空 = 適用なし（全区間 OFF）**。
     /// - v3: `audioItems`（BGM）を追加。**v2 以前の JSON は BGM 無しとして読める**
     ///   （追加しただけで既存キーの意味は変えていない）ので、移行処理は要らない。
-    public static let currentSchemaVersion = 3
+    /// - v4: `textItems`（テキスト）を追加。v3 と同じくキーを足しただけ。
+    public static let currentSchemaVersion = 4
 
     // MARK: - 素材種別（写真クリップの時刻規則）
 

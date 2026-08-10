@@ -16,6 +16,10 @@ struct TimelineEditSheetsModifier: ViewModifier {
     @Binding var showAudioPicker: Bool
     /// BGM を置く合成時刻（プレイヘッド）。
     let audioInsertTime: Double
+    /// テキスト入力シート（E3）。プレイヘッド位置に新規テキストを置く。
+    @Binding var showTextInputSheet: Bool
+    /// テキストを置く合成時刻（プレイヘッド）。
+    let textInsertTime: Double
 
     func body(content: Content) -> some View {
         content
@@ -36,6 +40,12 @@ struct TimelineEditSheetsModifier: ViewModifier {
                           allowedContentTypes: [.audio],
                           allowsMultipleSelection: false) { result in
                 handleAudioImport(result)
+            }
+            // テキスト入力シート（E3-3a）。文面だけを受ける（見た目の設定は E3-3b）。
+            .sheet(isPresented: $showTextInputSheet) {
+                TimelineTextInputSheet { text in
+                    model.addTextItem(text, atCompositionTime: textInsertTime)
+                }
             }
     }
 

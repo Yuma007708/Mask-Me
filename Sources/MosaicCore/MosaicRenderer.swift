@@ -39,6 +39,10 @@ public final class MosaicRenderer: NSObject {
     /// Mesh-mapped 3D mosaic renderer; used when a full face mesh is available,
     /// otherwise the contour-mask compute path is the fallback.
     private let meshRenderer: FaceMeshMosaicRenderer?
+    /// テキストのビットマップ合成カーネル（E3-2）。ライブラリにカーネルが無い
+    /// 環境（未更新の `.metallib` 等）では nil のままフェイルソフトし、
+    /// `renderText` は入力をそのままコピーして返す。
+    private let textRenderer: TextOverlayRenderer?
 
     /// Block size / edge softness. Mutate to retune the look at runtime.
     public var params: MosaicParams
@@ -101,6 +105,7 @@ public final class MosaicRenderer: NSObject {
         // silently fall back to the contour-mask compute mosaic.
         self.meshRenderer = try? FaceMeshMosaicRenderer(
             device: device, library: library, commandQueue: queue)
+        self.textRenderer = try? TextOverlayRenderer(device: device, library: library, commandQueue: queue)
         super.init()
     }
 
@@ -325,6 +330,39 @@ public final class MosaicRenderer: NSObject {
         encoder.endEncoding()
         commandBuffer.commit()
         if waitForCompletion { commandBuffer.waitUntilCompleted() }
+    }
+
+    /// テキストのビットマップを `layout` の位置・サイズ・不透明度で `input` に重ね、
+    /// `output` へ書く（E3-2）。モザイクの焼き込みと同じ Metal 経路を通す
+    /// （`AVVideoCompositionCoreAnimationTool` は使わない設計判断）。
+    ///
+    /// `layout.opacity` が実質 0、またはサイズが不正（クランプ前の入力が壊れていた場合）
+    /// なら描画をスキップし、`input` をそのまま `output` へコピーする。
+    @discardableResult
+    public func renderText(
+        input: MTLTexture,
+        into output: MTLTexture,
+        textTexture: MTLTexture,
+        layout: TextQuadLayout,
+        waitForCompletion: Bool = false
+    ) -> Bool {
+        guard let textRenderer, layout.opacity > 0.001, layout.width > 0, layout.height > 0 else {
+            copy(from: input, to: output, waitForCompletion: waitForCompletion)
+            return false
+        }
+        return textRenderer.render(
+            input: input, output: output, textTexture: textTexture,
+            layout: layout, waitForCompletion: waitForCompletion
+        )
+    }
+
+    /// `source` の内容をそのまま `destination` へコピーする（GPU blit）。
+    ///
+    /// `renderTextToNewTexture` のような「新規テクスチャへ書く」チェーンの最後に、
+    /// 結果を既存の（例えば `CVPixelBuffer` 由来の）テクスチャへ書き戻したいときに使う
+    /// （`VideoMosaicExporter` がテキスト合成の最終結果を出力バッファへ収めるのに使う）。
+    public func copyTexture(from source: MTLTexture, into destination: MTLTexture, waitForCompletion: Bool = false) {
+        copy(from: source, to: destination, waitForCompletion: waitForCompletion)
     }
 
     /// Resets tracking back to idle (e.g. when switching media).

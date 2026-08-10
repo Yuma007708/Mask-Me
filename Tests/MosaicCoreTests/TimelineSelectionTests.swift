@@ -23,24 +23,24 @@ final class TimelineSelectionTests: XCTestCase {
         let selection = TimelineSelection()
         XCTAssertTrue(selection.isEmpty)
         XCTAssertNil(selection.clipID)
-        XCTAssertNil(selection.rangeID)
+        XCTAssertNil(selection.layerID(of: .mosaic))
     }
 
     func test_selectClip_clearsRange() {
         var selection = TimelineSelection()
         let range = UUID(), clip = UUID()
-        selection.selectRange(range)
+        selection.selectMosaicForTest(range)
         selection.selectClip(clip)
         XCTAssertEqual(selection.clipID, clip)
-        XCTAssertNil(selection.rangeID, "クリップを選んだのにレイヤーの選択が残っている")
+        XCTAssertNil(selection.layerID(of: .mosaic), "クリップを選んだのにレイヤーの選択が残っている")
     }
 
     func test_selectRange_clearsClip() {
         var selection = TimelineSelection()
         let range = UUID(), clip = UUID()
         selection.selectClip(clip)
-        selection.selectRange(range)
-        XCTAssertEqual(selection.rangeID, range)
+        selection.selectMosaicForTest(range)
+        XCTAssertEqual(selection.layerID(of: .mosaic), range)
         XCTAssertNil(selection.clipID, "レイヤーを選んだのにクリップの選択が残っている")
     }
 
@@ -50,16 +50,16 @@ final class TimelineSelectionTests: XCTestCase {
     func test_selectClipNil_doesNotClearRange() {
         var selection = TimelineSelection()
         let range = UUID()
-        selection.selectRange(range)
+        selection.selectMosaicForTest(range)
         selection.selectClip(nil)
-        XCTAssertEqual(selection.rangeID, range)
+        XCTAssertEqual(selection.layerID(of: .mosaic), range)
     }
 
     func test_selectRangeNil_doesNotClearClip() {
         var selection = TimelineSelection()
         let clip = UUID()
         selection.selectClip(clip)
-        selection.selectRange(nil)
+        selection.selectMosaicForTest(nil)
         XCTAssertEqual(selection.clipID, clip)
     }
 
@@ -83,9 +83,9 @@ final class TimelineSelectionTests: XCTestCase {
     func test_prune_dropsMissingRange() {
         var selection = TimelineSelection()
         let clip = UUID(), alive = UUID(), dead = UUID()
-        selection.selectRange(dead)
+        selection.selectMosaicForTest(dead)
         selection.prune(against: state(clipIDs: [clip], rangeIDs: [alive]))
-        XCTAssertNil(selection.rangeID, "消えたレイヤーを指したまま残っている")
+        XCTAssertNil(selection.layerID(of: .mosaic), "消えたレイヤーを指したまま残っている")
     }
 
     /// 生きているものは刈らない（分割や並べ替えのたびに選択が飛ぶと使えない）。
@@ -106,7 +106,7 @@ final class TimelineSelectionTests: XCTestCase {
 
     // MARK: - Step 4: 種を持つ選択（`TimelineLayerSelection`）
 
-    /// `selectLayer` 経由でもクリップの選択が外れる（`selectRange` shim と同じ相互排他）。
+    /// `selectLayer` 経由でもクリップの選択が外れる（相互排他は型の契約）。
     func test_selectLayer_clearsClip() {
         var selection = TimelineSelection()
         let clip = UUID()
@@ -141,5 +141,55 @@ final class TimelineSelectionTests: XCTestCase {
             selection.prune(against: state(clipIDs: [clip]))
             XCTAssertNil(selection.layer, "kind=\(kind) で消えたレイヤーが刈られていない")
         }
+    }
+
+    /// **種の取り違えを型で防いでいることの回帰。**
+    ///
+    /// かつて `rangeID`（種を問わず id を返す）と `selectRange`（常に `.mosaic` として
+    /// 書く）という shim があり、BGM の段が同じ Binding を使っていた。結果として
+    /// **BGM の帯をタップして選ぶと内部では `.mosaic` になり、削除も音量調整も
+    /// 効かなくなっていた**（削除は存在しない適用区間の id を消しにいって no-op、
+    /// 音量は `.audio` を要求する判定が false になる）。
+    ///
+    /// いまは `layerID(of:)` が種を必ず伴うので、違う種で引けば nil になる。
+    func test_layerID_returnsNilForOtherKinds() {
+        var selection = TimelineSelection()
+        let audioID = UUID()
+        selection.selectLayer(TimelineLayerSelection(kind: .audio, id: audioID))
+
+        XCTAssertEqual(selection.layerID(of: .audio), audioID)
+        XCTAssertNil(selection.layerID(of: .mosaic),
+                     "BGM を選んでいるのにモザイクの id として引けてしまう")
+        XCTAssertNil(selection.layerID(of: .text),
+                     "BGM を選んでいるのにテキストの id として引けてしまう")
+    }
+
+    /// 全ての種について、自分の種でだけ引けること（`allCases` で網羅）。
+    func test_layerID_isExclusiveAcrossAllKinds() {
+        for kind in TimelineLayerKind.allCases {
+            var selection = TimelineSelection()
+            let id = UUID()
+            selection.selectLayer(TimelineLayerSelection(kind: kind, id: id))
+            for other in TimelineLayerKind.allCases {
+                if other == kind {
+                    XCTAssertEqual(selection.layerID(of: other), id,
+                                   "\(kind) を選んだのに自分の種で引けない")
+                } else {
+                    XCTAssertNil(selection.layerID(of: other),
+                                 "\(kind) を選んだのに \(other) の id として引けてしまう")
+                }
+            }
+        }
+    }
+}
+
+private extension TimelineSelection {
+    /// テスト用のモザイク選択ショートカット。
+    ///
+    /// **本体には「種を落とす入口」を置かない**（かつて `selectRange` という shim が
+    /// あり、BGM の帯を選んでも内部では `.mosaic` になる欠陥を生んだ）。
+    /// テストの読みやすさのためだけの糖衣なので、`private` でここに閉じる。
+    mutating func selectMosaicForTest(_ id: UUID?) {
+        selectLayer(id.map { TimelineLayerSelection(kind: .mosaic, id: $0) })
     }
 }

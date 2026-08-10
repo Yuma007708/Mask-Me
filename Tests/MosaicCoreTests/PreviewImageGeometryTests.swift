@@ -101,4 +101,57 @@ final class PreviewImageGeometryTests: XCTestCase {
         XCTAssertNil(pillarboxed.normalizedPoint(from: CGPoint(x: 10, y: 100)),
                      "左の黒帯を押したのに画像内として扱われた")
     }
+
+    // MARK: - 点（テキストのドラッグ配置。E3-3b）
+
+    /// `screenPoint(from:)` は `screenRect(from:)` の原点と一致すること
+    /// （同じ換算を経由していない別実装を作らない、という契約の確認）。
+    func test_screenPoint_matchesScreenRectOrigin() {
+        let normalized = CGPoint(x: 0.25, y: 0.5)
+        let point = pillarboxed.screenPoint(from: normalized)
+        let rect = pillarboxed.screenRect(from: CGRect(origin: normalized, size: .zero))
+        XCTAssertEqual(point.x, rect.origin.x, accuracy: 1e-9)
+        XCTAssertEqual(point.y, rect.origin.y, accuracy: 1e-9)
+    }
+
+    /// レターボックスの黒帯ぶんを無視して素通ししていないこと
+    /// （`test_screenRect_accountsForLetterbox` の点版）。
+    func test_screenPoint_accountsForLetterbox() {
+        let center = letterboxed.screenPoint(from: CGPoint(x: 0.5, y: 0.5))
+        XCTAssertEqual(center.x, 100, accuracy: 1e-9)
+        XCTAssertEqual(center.y, 200, accuracy: 1e-9)
+    }
+
+    /// `normalizedPoint(from:)` との往復。
+    func test_screenPoint_andNormalizedPoint_roundTrip() {
+        let normalized = CGPoint(x: 0.3, y: 0.7)
+        let screen = letterboxed.screenPoint(from: normalized)
+        let back = letterboxed.normalizedPoint(from: screen)
+        XCTAssertEqual(back?.x ?? .nan, normalized.x, accuracy: 1e-9)
+        XCTAssertEqual(back?.y ?? .nan, normalized.y, accuracy: 1e-9)
+    }
+
+    /// `rawNormalizedPoint(from:)` は `normalizedPoint(from:)` と違い、黒帯を押しても
+    /// nil にせず、丸めもしない生の値を返す（テキストのドラッグ確定用）。
+    func test_rawNormalizedPoint_onLetterbox_isNotNilAndNotClamped() {
+        // 上の黒帯（画像の上端よりさらに外）。
+        let onLetterbox = letterboxed.rawNormalizedPoint(from: CGPoint(x: 100, y: 10))
+        XCTAssertNotNil(onLetterbox, "黒帯上でも nil にしないこと（テキストを見失わせない）")
+        XCTAssertLessThan(onLetterbox?.y ?? .nan, 0, "画像の外なので 0...1 へ丸めていないこと")
+    }
+
+    /// 画像の内側では `normalizedPoint(from:)` と同じ値になること。
+    func test_rawNormalizedPoint_insideTheImage_matchesNormalizedPoint() {
+        let screen = CGPoint(x: 100, y: 200)
+        let raw = letterboxed.rawNormalizedPoint(from: screen)
+        let clamped = letterboxed.normalizedPoint(from: screen)
+        XCTAssertEqual(raw?.x ?? .nan, clamped?.x ?? .nan, accuracy: 1e-9)
+        XCTAssertEqual(raw?.y ?? .nan, clamped?.y ?? .nan, accuracy: 1e-9)
+    }
+
+    /// 潰れた画像（0 除算）では nil。
+    func test_rawNormalizedPoint_withDegenerateImage_isNil() {
+        let zero = PreviewImageGeometry(containerSize: .zero, imageSize: CGSize(width: 100, height: 100))
+        XCTAssertNil(zero.rawNormalizedPoint(from: CGPoint(x: 10, y: 10)))
+    }
 }

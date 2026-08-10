@@ -2,6 +2,9 @@ import MosaicCore
 import SwiftUI
 import UniformTypeIdentifiers
 
+// `TextFontFamily.displayName` / `TimelineTextStyleSheet` は
+// `TimelineTextStyleSheet.swift` へ（`file_length` の都合で分離）。
+
 extension TransitionKind {
     /// 日本語表示名（UI 専用。コア層は表示文言を持たない）。
     var displayName: String {
@@ -401,6 +404,58 @@ struct TimelineTransitionSheet: View {
             )
         }
         .buttonStyle(.plain)
+    }
+}
+
+/// テキスト入力シート（E3-3a）。文面だけを受ける。
+///
+/// **見た目（フォント・色・位置）の設定はここに置かない**（E3-3b の範囲）。
+/// このシートで確定した `TextItem` は既定のスタイル（`TextStyle()`）で
+/// プレイヘッド位置・既定の長さ（`MosaicEditorModel.defaultTextDuration`）に置かれる。
+///
+/// **空文字は追加ボタンを押せない形で塞ぐ。** コア層（`TimelineState.addingTextItem`）も
+/// 空文字を弾くが、ボタンを押せる見た目のまま何も起きないのは「壊れている」と読まれるため、
+/// UI 側でも同じ判定（前後の空白を落として空かどうか）で活性を決める。
+struct TimelineTextInputSheet: View {
+    let onAdd: (String) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var text: String = ""
+
+    /// 追加ボタンの活性判定。**`onAdd` に渡す実行と同じ判定**（前後の空白を落として空かどうか）。
+    /// 別々に書くと「押せるのに何も起きない」を作れる（コア層の
+    /// `TimelineState.addingTextItem` と同じ理由）。
+    private var trimmed: String { text.trimmingCharacters(in: .whitespacesAndNewlines) }
+    private var canAdd: Bool { !trimmed.isEmpty }
+
+    var body: some View {
+        VStack(spacing: 18) {
+            Text("テキストを追加")
+                .font(.headline)
+
+            TextField("表示する文字", text: $text, axis: .vertical)
+                .textFieldStyle(.roundedBorder)
+                .lineLimit(1...4)
+                .onChange(of: text) { newValue in
+                    if newValue.count > TextItem.maximumTextLength {
+                        text = String(newValue.prefix(TextItem.maximumTextLength))
+                    }
+                }
+
+            Text("プレイヘッドの位置に既定の長さで置かれます（見た目は後で調整できます）")
+                .font(.caption2)
+                .multilineTextAlignment(.center)
+                .foregroundStyle(.secondary)
+
+            Button("追加") {
+                onAdd(trimmed)
+                dismiss()
+            }
+            .buttonStyle(.borderedProminent)
+            .disabled(!canAdd)
+        }
+        .padding(24)
+        .presentationDetents([.height(260)])
     }
 }
 

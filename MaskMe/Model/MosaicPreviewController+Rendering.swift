@@ -126,8 +126,17 @@ extension MosaicPreviewController {
             additionalPaths: additionalPaths
         ) else { return false }
 
-        let finalTexture = backgroundMosaicApplied(to: result.texture, pixelBuffer: pixelBuffer,
-                                                   model: model, mosaicActive: mosaicActive)
+        let mosaicedTexture = backgroundMosaicApplied(to: result.texture, pixelBuffer: pixelBuffer,
+                                                       model: model, mosaicActive: mosaicActive)
+
+        // テキスト（E3-2）はモザイクの適用区間（S10）とは独立。「モザイク → テキスト」の
+        // 順で常に最後に重ねる（逆順だと顔に被った文字がモザイクで潰れる）。
+        // 「どれが出ているか」はコア層の `visibleTextItems` だけが決める。
+        let textItems = model.timeline.visibleTextItems(atComposition: timeSec, totalDuration: model.mapping.totalDuration)
+        let finalTexture = textItems.isEmpty
+            ? mosaicedTexture
+            : TextOverlayCompositor.apply(items: textItems, at: timeSec, renderer: renderer,
+                                          cache: textOverlayCache, input: mosaicedTexture)
 
         guard let cgImage = MetalTextureUtilities.cgImage(from: finalTexture) else { return false }
         let uiImage = UIImage(cgImage: cgImage)

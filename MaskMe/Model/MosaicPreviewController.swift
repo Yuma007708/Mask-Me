@@ -14,6 +14,8 @@ import Metal
 final class MosaicPreviewController {
     let renderer: MosaicRenderer
     weak var model: MosaicEditorModel?
+    /// テキストのラスタライズ結果キャッシュ（E3-2）。`renderer.device` に紐づく。
+    let textOverlayCache: TextOverlayCache
 
     var player: AVPlayer?
     var videoOutput: AVPlayerItemVideoOutput?
@@ -60,6 +62,7 @@ final class MosaicPreviewController {
         self.model = model
         self.videoComposition = videoComposition
         self.audioMix = audioMix
+        self.textOverlayCache = TextOverlayCache(device: renderer.device)
         self.ciContext = CIContext(mtlDevice: renderer.device, options: [.useSoftwareRenderer: false])
 
         var cache: CVMetalTextureCache?

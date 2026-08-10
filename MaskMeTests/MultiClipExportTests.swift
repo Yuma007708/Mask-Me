@@ -2985,6 +2985,127 @@ final class MultiClipExportTests: XCTestCase {
         XCTAssertLessThan(minMean, baseline * 0.35,
                           "fadeToBlack なのに重なり区間が暗くならない: min=\(minMean) base=\(baseline)")
     }
+
+
+    // MARK: - テキスト（E3-2）
+
+    /// 画像の中央帯の「明るいピクセルの割合」。白い文字が乗っていれば上がる。
+    private func brightPixelRatio(url: URL, at seconds: Double) throws -> Double {
+        let generator = AVAssetImageGenerator(asset: AVURLAsset(url: url))
+        generator.appliesPreferredTrackTransform = true
+        generator.requestedTimeToleranceBefore = CMTime(seconds: 0.02, preferredTimescale: 600)
+        generator.requestedTimeToleranceAfter = CMTime(seconds: 0.02, preferredTimescale: 600)
+        let cg = try generator.copyCGImage(
+            at: CMTime(seconds: seconds, preferredTimescale: 600), actualTime: nil)
+        let w = cg.width, h = cg.height
+        var pixels = [UInt8](repeating: 0, count: w * h * 4)
+        let context = CGContext(data: &pixels, width: w, height: h, bitsPerComponent: 8,
+                                bytesPerRow: w * 4, space: CGColorSpaceCreateDeviceRGB(),
+                                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+        context?.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
+        // 中央 1/2 の帯だけ見る（テキストは中央に置く）。
+        var bright = 0.0
+        var total = 0.0
+        for y in (h / 4)..<(3 * h / 4) {
+            for x in (w / 4)..<(3 * w / 4) {
+                let offset = (y * w + x) * 4
+                let luminance = 0.299 * Double(pixels[offset])
+                    + 0.587 * Double(pixels[offset + 1]) + 0.114 * Double(pixels[offset + 2])
+                if luminance > 200 { bright += 1 }
+                total += 1
+            }
+        }
+        return total > 0 ? bright / total : 0
+    }
+
+    /// **書き出した動画に文字が実際に焼き込まれている。**
+    ///
+    /// 素材は一様なグレー（輝度 0x40）なので、明るいピクセルは文字か縁取りしか無い。
+    /// テキストが出ている時刻と出ていない時刻で「明るいピクセルの割合」を比べる。
+    ///
+    /// **プレビューだけ確かめても意味が無い**（この案件で繰り返し起きてきた
+    /// 「プレビューでは正しく、書き出すと壊れる」を防ぐのがこのテストの役目）。
+    func test_textIsBurnedIntoExportedVideo() async throws {
+        guard MTLCreateSystemDefaultDevice() != nil else {
+            throw XCTSkip("Metal デバイスが無い環境ではスキップ")
+        }
+        let url = try await makeTestVideo(seconds: 4.0, withAudio: false)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let sourceID = UUID()
+        let clip = TimelineClip(sourceID: sourceID, sourceStart: 0, sourceEnd: 4)
+        // 合成 1...3 秒だけ大きな白文字を出す（前後 1 秒は文字なし）。
+        var style = TextStyle()
+        style.fontSize = 0.2
+        let item = TextItem(text: "MASK", compositionStart: 1, duration: 2,
+                            center: .center, style: style, animation: .none)
+        let built = try await TimelineCompositionBuilder().build(
+            clips: [clip], sources: [sourceID: AVURLAsset(url: url)])
+
+        let exporter = try makeExporter()
+        let outURL = try await exporter.export(
+            asset: built.composition,
+            mapping: TimelineMapping(clips: [clip]),
+            textItems: [item],
+            videoComposition: built.videoComposition,
+            audioMix: built.audioMix,
+            renderLayout: built.layout) { _ in }
+        defer { try? FileManager.default.removeItem(at: outURL) }
+
+        let before = try brightPixelRatio(url: outURL, at: 0.5)
+        let during = try brightPixelRatio(url: outURL, at: 2.0)
+        let after = try brightPixelRatio(url: outURL, at: 3.5)
+        print("[E3TEXT] before=\(before) during=\(during) after=\(after)")
+
+        XCTAssertGreaterThan(during, 0.01,
+                             "テキストの表示区間なのに文字が焼き込まれていない")
+        XCTAssertLessThan(before, during / 4,
+                          "表示区間の前に文字が出ている（時刻のゲートが効いていない）")
+        XCTAssertLessThan(after, during / 4,
+                          "表示区間の後に文字が残っている（時刻のゲートが効いていない）")
+    }
+
+    /// **アニメーションが書き出しにも効く。**
+    ///
+    /// `.fade` の出入りで、区間の端は薄く中央は濃くなる。プレビューと書き出しが
+    /// 同じ関数（`TextItem.renderParameters`）を通っていることの実測でもある。
+    func test_textAnimationAffectsExportedFrames() async throws {
+        guard MTLCreateSystemDefaultDevice() != nil else {
+            throw XCTSkip("Metal デバイスが無い環境ではスキップ")
+        }
+        let url = try await makeTestVideo(seconds: 4.0, withAudio: false)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let sourceID = UUID()
+        let clip = TimelineClip(sourceID: sourceID, sourceStart: 0, sourceEnd: 4)
+        var style = TextStyle()
+        style.fontSize = 0.2
+        // 0...4 秒の全域。フェードの出入りは 0.3 秒（表示時間の半分より短い）。
+        let item = TextItem(text: "MASK", compositionStart: 0, duration: 4,
+                            center: .center, style: style, animation: .fade)
+        let built = try await TimelineCompositionBuilder().build(
+            clips: [clip], sources: [sourceID: AVURLAsset(url: url)])
+
+        let exporter = try makeExporter()
+        let outURL = try await exporter.export(
+            asset: built.composition,
+            mapping: TimelineMapping(clips: [clip]),
+            textItems: [item],
+            videoComposition: built.videoComposition,
+            audioMix: built.audioMix,
+            renderLayout: built.layout) { _ in }
+        defer { try? FileManager.default.removeItem(at: outURL) }
+
+        let fadingIn = try brightPixelRatio(url: outURL, at: 0.05)
+        let full = try brightPixelRatio(url: outURL, at: 2.0)
+        print("[E3TEXT] fadeIn=\(fadingIn) full=\(full)")
+
+        XCTAssertGreaterThan(full, 0.01, "中央で文字が出ていない")
+        XCTAssertLessThan(fadingIn, full / 2,
+                          "フェードインが書き出しに効いていない（アニメーションの数式が"
+                          + "プレビューと書き出しで分かれている疑い）")
+    }
+
 }
 
 /// S10b: 出力解像度の可視化（`Built.outputSize` / `hasDownscaledClips`）の回帰ガード。
@@ -3160,7 +3281,6 @@ final class OutputResolutionTests: XCTestCase {
         XCTAssertTrue(model.hasDownscaledClips,
                       "2560x1440 の動画が 1920x1080 枠へ縮小されるのに注意フラグが立たない")
     }
-
 }
 
 #endif

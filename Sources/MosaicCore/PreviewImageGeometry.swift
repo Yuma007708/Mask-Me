@@ -68,4 +68,32 @@ public struct PreviewImageGeometry: Equatable, Sendable {
         return CGPoint(x: (screen.x - rect.origin.x) / rect.width,
                        y: (screen.y - rect.origin.y) / rect.height)
     }
+
+    /// 正規化座標（点） → 画面座標。`normalizedPoint(from:)` の逆写像。
+    ///
+    /// **テキスト（`TextItem.center`）のドラッグ配置が通る唯一の換算。** 表示枠と
+    /// 出力枠のアスペクト比が違う（レターボックス）場合でも `imageRect` を経由するため
+    /// `screenRect(from:)` と一致する換算になる。ここではクランプしない（呼び出し側が
+    /// ドラッグ中の下書きをそのまま見せたいことがあるため。確定時のクランプは
+    /// `NormalizedPoint.clamped` / `TimelineState.settingTextCenter` が担う）。
+    public func screenPoint(from normalized: CGPoint) -> CGPoint {
+        let rect = imageRect
+        return CGPoint(x: rect.origin.x + normalized.x * rect.width,
+                       y: rect.origin.y + normalized.y * rect.height)
+    }
+
+    /// 画面座標 → 正規化座標（点）。`normalizedPoint(from:)` と違い、**画像の外でも nil にせず
+    /// そのまま返す**（0...1 の外に出ることがある）。
+    ///
+    /// テキストのドラッグ確定はこちらを使うこと。指を離した位置が画像の外（レターボックスの
+    /// 黒帯や画面端）でも「見失って永久に掴めなくなる」ことがないよう、呼び出し側
+    /// （`TimelineState.settingTextCenter` → `NormalizedPoint.clamped`）が最終的に 0...1 へ
+    /// 収める前提で、ここでは丸めない生値を返す。`normalizedPoint(from:)` はタップの当たり判定
+    /// （＝画像の外を押したら無視したい）に使うので用途が異なる。
+    public func rawNormalizedPoint(from screen: CGPoint) -> CGPoint? {
+        let rect = imageRect
+        guard rect.width > 0, rect.height > 0 else { return nil }
+        return CGPoint(x: (screen.x - rect.origin.x) / rect.width,
+                       y: (screen.y - rect.origin.y) / rect.height)
+    }
 }

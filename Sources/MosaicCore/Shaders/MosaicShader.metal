@@ -170,3 +170,57 @@ kernel void meshPixelateKernel(texture2d<float, access::read>  inTexture  [[text
     float4 avg = n > 0.0 ? sum / n : inTexture.read(gid);
     outTexture.write(avg, gid);
 }
+
+// ===========================================================================
+// Text overlay (E3-2)
+//
+// Composites a pre-rasterized text bitmap (straight text image drawn by the
+// app layer's CoreText path) onto the mosaic output. Out-of-place like
+// `mosaicKernel`: reads `inTexture` (the mosaic result so far), writes
+// `outTexture`. The quad's placement/size in canvas pixels is computed once
+// per frame by `TextQuadLayout.compute` (pure Swift, shared by preview and
+// export) and passed in as `TextOverlayParams`; this kernel only samples and
+// alpha-blends, it does no layout math of its own — the "same formula" rule
+// for animation lives entirely on the Swift side.
+// ===========================================================================
+
+struct TextOverlayParams {
+    float originX;   // quad top-left, canvas px
+    float originY;
+    float width;      // quad size, canvas px
+    float height;
+    float opacity;    // 0...1, multiplies the bitmap's own alpha
+    uint  canvasWidth;
+    uint  canvasHeight;
+};
+
+kernel void textOverlayKernel(texture2d<float, access::read>   inTexture   [[texture(0)]],
+                              texture2d<float, access::write>  outTexture  [[texture(1)]],
+                              texture2d<float, access::sample> textTexture [[texture(2)]],
+                              constant TextOverlayParams        &params     [[buffer(0)]],
+                              uint2                              gid        [[thread_position_in_grid]]) {
+    if (gid.x >= params.canvasWidth || gid.y >= params.canvasHeight) {
+        return;
+    }
+
+    float4 base = inTexture.read(gid);
+
+    float2 p = float2(gid) + 0.5;
+    float2 local = p - float2(params.originX, params.originY);
+    if (local.x < 0.0 || local.y < 0.0 || local.x >= params.width || local.y >= params.height) {
+        outTexture.write(base, gid);
+        return;
+    }
+
+    constexpr sampler textSampler(coord::normalized, address::clamp_to_edge, filter::linear);
+    float2 uv = local / float2(params.width, params.height);
+    float4 glyph = textTexture.sample(textSampler, uv);
+
+    float alpha = clamp(glyph.a * params.opacity, 0.0, 1.0);
+    // `glyph` is premultiplied alpha (matches `MetalTextureUtilities.texture(from:device:)`),
+    // so scaling both color and alpha by `alpha` composites correctly with `mix`.
+    float4 straightGlyph = glyph.a > 0.0001 ? float4(glyph.rgb / glyph.a, glyph.a) : float4(0.0);
+    float4 result = mix(base, float4(straightGlyph.rgb, 1.0), alpha);
+    result.a = base.a;
+    outTexture.write(result, gid);
+}

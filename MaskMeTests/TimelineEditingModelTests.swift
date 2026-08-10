@@ -4330,6 +4330,29 @@ final class BackgroundAudioWiringTests: XCTestCase {
                      "消えた BGM を対象にしたまま音量 UI が開く")
     }
 
+
+    /// **BGM を選んだ状態で削除ボタンが効く**（種の取り違えの回帰）。
+    ///
+    /// かつては帯をタップして選ぶと内部で `.mosaic` としてタグ付けされ、削除が
+    /// 「存在しない適用区間の id」を消しにいって no-op になっていた。
+    /// ここではモデル層で「選択の種が正しければ正しい API へ届く」ことを固定する
+    /// （UI の Binding そのものは `TimelineSelection.layerID(of:)` の型が守る）。
+    func test_selectedAudioLayer_resolvesToAudioNotMosaic() throws {
+        let (model, _, audioURL) = try makeModelWithAudio()
+        defer { try? FileManager.default.removeItem(at: audioURL) }
+        let itemID = try XCTUnwrap(model.timeline.audioItems.first?.id)
+        model.timelineSelection.selectLayer(TimelineLayerSelection(kind: .audio, id: itemID))
+
+        XCTAssertEqual(model.timelineSelection.layerID(of: .audio), itemID)
+        XCTAssertNil(model.timelineSelection.layerID(of: .mosaic),
+                     "BGM を選んでいるのにモザイク区間として解決されている"
+                     + "（削除も音量も効かなくなる）")
+
+        // 削除が実際に BGM へ届く。
+        model.removeAudioItem(id: itemID)
+        XCTAssertTrue(model.timeline.audioItems.isEmpty, "選んだ BGM が削除されない")
+    }
+
     /// BGM の編集は undo で戻る（`applyTimelineEdit` を通していることの実測）。
     func test_audioEdits_areUndoable() throws {
         let (model, _, audioURL) = try makeModelWithAudio()

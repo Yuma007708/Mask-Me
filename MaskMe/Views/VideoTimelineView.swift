@@ -46,6 +46,8 @@ struct VideoTimelineView: View {
     @State var showMediaPicker = false
     /// 音楽ファイル選択（E2）。`.fileImporter` の提示条件。
     @State var showAudioPicker = false
+    /// テキスト入力シート（E3）の提示条件。プレイヘッド位置に新規テキストを置く。
+    @State var showTextInputSheet = false
     /// スクロールの見え方（トラック内 x 座標系）。`TimelineScrollContainer` が更新し、
     /// サムネイル要求の可視範囲を決めるのに使う。
     @State var viewport = TimelineViewport(scrollOffset: 0, visibleWidth: 0, contentWidth: 0)
@@ -74,7 +76,9 @@ struct VideoTimelineView: View {
     /// 食い切り、3 本目以降が永久に要求されない。
     static let thumbnailRequestLimit = 120
     /// 「モザイク区間」ボタンで足す区間の既定長（秒）。
-    private static let defaultApplyRangeLength = 2.0
+    /// `addApplyRangeAtPlayhead()`（`VideoTimelineLayerViewport.swift`）が参照するため
+    /// file-private にはできない。
+    static let defaultApplyRangeLength = 2.0
     /// サムネイル再要求のデバウンス（ナノ秒）。スクロール・ピンチ中は毎フレーム
     /// トリガが飛ぶので、指が止まってからまとめて 1 回だけ走査する。
     static let thumbnailRefreshDelay: UInt64 = 180_000_000
@@ -99,6 +103,8 @@ struct VideoTimelineView: View {
         TimelineBandLayout.audioSpans(items: model.timeline.audioItems,
                                       totalDuration: totalDuration)
     }
+    // テキストの帯（`textSpans`）と種別選択の Binding（`layerSelection(for:)`）は
+    // `VideoTimelineLayerViewport.swift`（file_length の都合で分けた段の器）へ置いてある。
 
     /// 選択中クリップ（消えたクリップを指したままにしないよう毎回引き直す）。
     var selectedClip: TimelineClip? {
@@ -163,7 +169,8 @@ struct VideoTimelineView: View {
         .modifier(TimelineEditSheetsModifier(
             model: model, speedClipID: $speedSheetClipID, volumeTarget: $volumeSheetTarget,
             transitionClipID: $transitionSheetClipID, showMediaPicker: $showMediaPicker,
-            showAudioPicker: $showAudioPicker, audioInsertTime: playheadTime))
+            showAudioPicker: $showAudioPicker, audioInsertTime: playheadTime,
+            showTextInputSheet: $showTextInputSheet, textInsertTime: playheadTime))
     }
 
     /// サムネイル生成の抑止を 1 箇所で決める。
@@ -181,6 +188,7 @@ struct VideoTimelineView: View {
     private var isSheetPresented: Bool {
         speedSheetClipID != nil || volumeSheetTarget != nil
             || transitionSheetClipID != nil || showMediaPicker || showAudioPicker
+            || showTextInputSheet
     }
 
     /// プレビューのデコード占有をサムネイル生成の抑止条件へ繋ぐ。
@@ -237,7 +245,8 @@ struct VideoTimelineView: View {
                     // 中身が未実装の段は押しても何もしない（`isImplemented`）。
                     guard kind.isImplemented else { return }
                     model.enterDock(.face)
-                })
+                },
+                onAddText: { showTextInputSheet = true })
         }
         // プレイヘッドは**スクロールしない層**に置き、可視領域の中央へ固定する
         // （`TimelinePlayheadView` の doc）。中身の側に置くと、シークとスクロールの
@@ -335,10 +344,8 @@ struct VideoTimelineView: View {
     /// 相互排他は `TimelineSelection` 側の契約なので、ここは橋渡しだけ。
     /// 子（クリップ帯・レイヤー段）は `Binding<UUID?>` のままで無改造。
     var selectedClipID: UUID? { model.timelineSelection.clipID }
-    /// **一時的な互換 shim**（`TimelineSelection.rangeID` の doc 参照）。
-    /// `TimelineLayerTrackView` / `TimelineClipBandView` がまだ `Binding<UUID?>` で
-    /// モザイク区間の選択を読み書きするため、橋渡し用にこれだけ残してある。
-    var selectedRangeID: UUID? { model.timelineSelection.rangeID }
+    /// モザイク区間を選んでいるならその id（**種が `.mosaic` のときだけ**）。
+    var selectedRangeID: UUID? { model.timelineSelection.layerID(of: .mosaic) }
     /// 種を持つ選択（`TimelineLayerSelection`）。ツールバーはこちらを見る
     /// （`rangeID` shim を経由すると、E2 で音声アイテムを選んだときに
     /// 削除ボタンが黙って「追加」に化ける）。
@@ -349,10 +356,8 @@ struct VideoTimelineView: View {
                 set: { model.timelineSelection.selectClip($0) })
     }
 
-    var rangeSelection: Binding<UUID?> {
-        Binding(get: { model.timelineSelection.rangeID },
-                set: { model.timelineSelection.selectRange($0) })
-    }
+    /// モザイク区間の選択。**種を落とさない**（`layerSelection(for:)` の別名）。
+    var rangeSelection: Binding<UUID?> { layerSelection(for: .mosaic) }
 
     // MARK: - 操作の確定
 
@@ -387,70 +392,9 @@ struct VideoTimelineView: View {
         model.trimClip(id: clipID, sourceStart: bounds.sourceStart, sourceEnd: bounds.sourceEnd)
     }
 
-    /// 掴んだセグメント（`rangeID` × `clipID`）の新区間だけを渡す。
-    /// 差し替えは素材時刻で行われ、他セグメントぶん・クリップ使用範囲外の素材区間は
-    /// コア層が温存する（`TimelineState.replacingApplyRange(id:clipID:compositionInterval:)`）。
-    /// **種ごとの `switch` で全 case を網羅し、`default` は書かない**
-    /// （`TimelineSelection.prune` と同じ理由。種が増えたときに書き忘れると、
-    /// つまみは動くのに指を離すと必ず元へ戻る＝無言の no-op になる）。
-    private func commitApplyEdge(rangeID: UUID, clipID: UUID?, kind: TimelineLayerKind,
-                                 interval: CompositionInterval) {
-        let (start, end) = (interval.start, interval.end)
-        switch kind {
-        case .mosaic:
-            // `.mosaic` の clipID は必ず非 nil（`TimelineApplySpan.anchorClipID` の約束）。
-            // nil で来たら型の不変条件が壊れているので、黙って別のものを編集せず何もしない。
-            guard let clipID else { return }
-            model.setMosaicApplyRange(id: rangeID, clipID: clipID,
-                                      interval: CompositionInterval(start: start, end: end))
-        case .audio:
-            // BGM の端ドラッグは「差し替え」ではなく**現在位置からの差分**で確定する
-            // （素材時刻の伸縮に写す必要があるため。`TimelineState.trimmingAudioItem`）。
-            guard let item = model.timeline.audioItems.first(where: { $0.id == rangeID })
-            else { return }
-            let startDelta = start - item.compositionStart
-            let endDelta = end - item.compositionEnd
-            // 動いた方の端だけを確定する（両端が同時に動くことはない）。
-            if abs(startDelta) > abs(endDelta) {
-                model.trimAudioItem(id: rangeID, edge: .start, byCompositionDelta: startDelta)
-            } else {
-                model.trimAudioItem(id: rangeID, edge: .end, byCompositionDelta: endDelta)
-            }
-        }
-        reselectApplyRange(near: (start + end) / 2)
-    }
-
-    /// 本体ドラッグ（移動）の確定。`start` / `end` はドラッグ表示と同じ最終位置で、
-    /// 確定後の選択引き直し（マージで id が変わり得る）に使うだけ。実際の編集は
-    /// `TimelineState.movingApplyRange` へそのまま渡す `delta`（合成時刻）が行う。
-    private func commitApplyMove(rangeID: UUID, clipID: UUID?, kind: TimelineLayerKind,
-                                 delta: Double, interval: CompositionInterval) {
-        let (start, end) = (interval.start, interval.end)
-        switch kind {
-        case .mosaic:
-            guard let clipID else { return }
-            model.moveMosaicApplyRange(id: rangeID, clipID: clipID, byCompositionDelta: delta)
-        case .audio:
-            model.moveAudioItem(id: rangeID, byCompositionDelta: delta)
-        }
-        reselectApplyRange(near: (start + end) / 2)
-    }
-
-    func addApplyRangeAtPlayhead() {
-        let end = min(playheadTime + Self.defaultApplyRangeLength, totalDuration)
-        guard playheadTime < end else { return }
-        model.addMosaicApplyRange(fromCompositionTime: playheadTime, to: end)
-        reselectApplyRange(near: (playheadTime + end) / 2)
-    }
-
-    /// 編集後に区間を引き直す（マージで id が変わり得るため id を保持し続けない）。
-    /// 相互排他を効かせるため `rangeSelection` 経由で書く（クリップ選択が残らない）。
-    private func reselectApplyRange(near time: Double) {
-        let spans = TimelineBandLayout.applySpans(ranges: model.timeline.applyRanges,
-                                                  mapping: model.mapping,
-                                                  photoSourceIDs: model.timeline.photoSourceIDs)
-        rangeSelection.wrappedValue = spans.first { time >= $0.start && time < $0.end }?.rangeID
-    }
+    // `commitApplyEdge` / `commitApplyMove` / `reselectApplyRange` / `addApplyRangeAtPlayhead` は
+    // file_length の都合で `VideoTimelineLayerViewport.swift` へ移してある
+    // （あちらもレイヤー段の確定を扱うので境界として自然）。
 
     private func scrub(toCompositionTime seconds: Double) {
         guard totalDuration > 0 else { return }

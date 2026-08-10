@@ -30,6 +30,13 @@ enum TimelinePalette {
         Color(red: 0.35, green: 0.72, blue: 0.55).opacity(isSelected ? 0.95 : 0.6)
     }
 
+    /// テキスト（E3）。モザイク（アクセント）・BGM（緑）・構造の目印（`structure`＝琥珀）
+    /// のどれとも違う色にする（`audioFill` と同じ理由。同じ段の仕組みに乗るので
+    /// 色だけが「どの帯か」の手がかりになる）。
+    static func textFill(isSelected: Bool) -> Color {
+        Color(red: 0.85, green: 0.4, blue: 0.78).opacity(isSelected ? 0.95 : 0.6)
+    }
+
     /// 編集の目印（継ぎ目ボタン・キーフレーム）。
     static let structure = Color(red: 1.0, green: 0.78, blue: 0.35)
 

@@ -13,6 +13,7 @@ enum TimelineLayerAppearance {
         switch kind {
         case .mosaic: return "モザイク"
         case .audio: return "音楽"
+        case .text: return "テキスト"
         }
     }
 
@@ -20,6 +21,7 @@ enum TimelineLayerAppearance {
         switch kind {
         case .mosaic: return "squareshape.split.3x3"
         case .audio: return "music.note"
+        case .text: return "textformat"
         }
     }
 
@@ -27,6 +29,7 @@ enum TimelineLayerAppearance {
         switch kind {
         case .mosaic: return TimelinePalette.mosaicFill(isSelected: isSelected)
         case .audio: return TimelinePalette.audioFill(isSelected: isSelected)
+        case .text: return TimelinePalette.textFill(isSelected: isSelected)
         }
     }
 }

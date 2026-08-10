@@ -2137,6 +2137,8 @@ public final class MosaicEditorModel: ObservableObject {
                 // フレームの合成時刻を写像してからゲート判定する（プレビューと同じ
                 // `MosaicApplyGate` の純関数を通すので境界フレームの結果が一致する）。
                 applyRanges: timeline.applyRanges,
+                // 画面に置く文字（E3）。プレビューと同じ `timeline.textItems` を渡す。
+                textItems: timeline.textItems,
                 // 合成（トランジション・レターボックス・フレームレート上限）と
                 // 音声ミックスはプレビューと同じものを渡す。composition と必ず組で
                 // 差し替わる（`apply(built:generation:)`）ので世代がずれない。
