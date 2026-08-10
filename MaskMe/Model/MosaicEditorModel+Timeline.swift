@@ -401,7 +401,7 @@ extension MosaicEditorModel {
         videoComposition = built.videoComposition
         audioMix = built.audioMix
         hasBackgroundAudio = built.hasBackgroundAudio
-        renderLayout = built.layout
+        builtLayout = built.layout
         // クリップが 1 本も無い build では `.zero` が来る（表示するサイズが無い ＝ nil）。
         let size = built.outputSize
         outputRenderSize = size.width > 0 && size.height > 0 ? size : nil

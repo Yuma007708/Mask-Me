@@ -91,6 +91,11 @@ final class PreviewZoomUITests: XCTestCase {
         dragOnPreview()
 
         let masks = app.otherElements.matching(identifier: "editor.objectMask")
+        // **`count` を即読みしない。** 矩形を置くと追跡の走査が走り、枠が画面に出るまで
+        // `dragOnPreview` の 1 秒スリープでは足りないことがある（`count` は待たずに
+        // その瞬間の数を返すので 0 のまま落ちる）。`EditorCropUITests.placeRectangleMask`
+        // と同じく、まず出現を待ってから数える。
+        XCTAssertTrue(masks.firstMatch.waitForExistence(timeout: 15), "前提: 矩形が置けていること")
         XCTAssertEqual(masks.count, 1, "前提: 矩形が 1 個置けていること")
         let before = masks.firstMatch.frame
 
@@ -160,6 +165,11 @@ final class PreviewZoomUITests: XCTestCase {
         let rect = app.buttons["矩形"]
         XCTAssertTrue(rect.waitForExistence(timeout: 10), "ドックに「矩形」が無い")
         rect.tap()
+        // **段が入れ替わり切るのを待ってから返す。** タップ直後に払うと、まだ前の段の
+        // 上を撫でているだけで矩形ができず、「前提: 矩形が 1 個置けていること」で落ちる
+        // （`EditorCropUITests.placeRectangleMask` は元からこの待ちを入れていて通る）。
+        XCTAssertTrue(app.buttons["editor.rectangleTool"].waitForExistence(timeout: 10),
+                      "矩形の段にツールのボタンが無い")
     }
 
     private func openMosaicMenu() {

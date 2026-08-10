@@ -262,13 +262,43 @@ struct EditorTextStyleSheetModifier: ViewModifier {
 
     /// 消えたテキスト（削除・undo）を指したままにしない。`first(where:)` が nil を
     /// 返すぶんには何も描かない（`TimelineEditSheetsModifier.volumeSheet` と同じ規則）。
+    ///
+    /// **対象の配列はモードで分かれる。** 動画は `model.timeline.textItems`、写真は
+    /// `model.photoEdit.texts`（写真モード底上げ 第2段。`TextOverlayEditView` の
+    /// 鉛筆ボタンが両モードで積まれるようになったため、ここも両対応させる）。
     @ViewBuilder
     private var sheetContent: some View {
-        if let id = itemID, let item = model.timeline.textItems.first(where: { $0.id == id }) {
+        if let id = itemID, let item = textItem(id: id) {
             TimelineTextStyleSheet(
                 initialStyle: item.style, initialAnimation: item.animation, role: item.role,
-                onApplyStyle: { model.setTextStyle(id: id, style: $0) },
-                onApplyAnimation: { model.setTextAnimation(id: id, animation: $0) })
+                onApplyStyle: { style in applyStyle(id: id, style: style) },
+                onApplyAnimation: { animation in applyAnimation(id: id, animation: animation) })
+        }
+    }
+
+    private func textItem(id: UUID) -> TextItem? {
+        switch model.mode {
+        case .video: return model.timeline.textItems.first(where: { $0.id == id })
+        case .photo: return model.photoEdit.texts.first(where: { $0.id == id })
+        }
+    }
+
+    private func applyStyle(id: UUID, style: TextStyle) {
+        switch model.mode {
+        case .video: model.setTextStyle(id: id, style: style)
+        case .photo: model.setPhotoTextStyle(id: id, style: style)
+        }
+    }
+
+    /// **写真ではアニメーションを持たない。** `PhotoEditState.renderableTextItems` が
+    /// 常に `animation = .none` へ正規化して描くため（`PhotoTextEditing.swift` の doc
+    /// 参照）、写真モードでは適用先が無く no-op にする（シート自体はアニメーション種の
+    /// 選択 UI を出すが、選んでも見た目には反映されない——将来アニメーションに意味を
+    /// 持たせる段まではこの制約を明示的に保つ）。
+    private func applyAnimation(id: UUID, animation: TextAnimation) {
+        switch model.mode {
+        case .video: model.setTextAnimation(id: id, animation: animation)
+        case .photo: break
         }
     }
 }

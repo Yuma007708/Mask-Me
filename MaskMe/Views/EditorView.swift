@@ -43,7 +43,12 @@ struct EditorView: View {
     /// 自動保存のデバウンス用タスク（最新 1 件のみ生かす）。
     @State private var autosaveTask: Task<Void, Never>?
     /// 写真の色調補正シート（`TimelineColorGradeSheet`、動画側と共通）の提示条件。
-    @State private var showPhotoColorGradeSheet = false
+    @State var showPhotoColorGradeSheet = false
+    /// 写真のテキスト/ステッカー入力シート（既存 `TimelineTextInputSheet`、動画側と共通。
+    /// 写真モード底上げ 第2段）の提示条件。
+    @State var showPhotoTextInputSheet = false
+    /// `PhotoRotateBar`（写真モード底上げ 第6段）の表示・非表示。
+    @State var showPhotoRotateBar = false
 
     struct ResumeContext {
         let draftID: UUID
@@ -94,6 +99,15 @@ struct EditorView: View {
                 initialGrade: model.photoEdit.colorGrade,
                 onApply: { model.setPhotoColorGrade($0) },
                 onApplyToAll: { model.setPhotoColorGrade($0) })
+        }
+        // テキスト/ステッカー入力（写真モード底上げ 第2段）。動画側と同じシートを共有し、
+        // 追加位置は既定の中心（`NormalizedPoint.center`）に置く
+        // （動画側はプレイヘッド位置に置くが、写真に時刻の概念は無いため中心が既定になる。
+        // 位置はドラッグ確定〈`TextOverlayEditView.commitDrag`〉で後から動かせる）。
+        .sheet(isPresented: $showPhotoTextInputSheet) {
+            TimelineTextInputSheet(
+                onAddText: { text in model.addPhotoText(text) },
+                onAddSticker: { emoji in model.addPhotoSticker(emoji) })
         }
         .onAppear {
             if model.mode == .photo { photoEditingActive = true }
@@ -188,103 +202,7 @@ struct EditorView: View {
     }
 
     // MARK: - Preview（本体は `EditorView+Preview.swift`）
-
-    // MARK: - Dock（下段：顔サムネ / 調整バー / タブバー）
-
-    /// 下段。**動画モードはここに何も置かない。**
-    ///
-    /// 動画モードのツールバーは `VideoControlsView` の中（タイムライン直下の
-    /// `EditorDockView`）に 1 本だけあり、それが画面の最下段になる。ここに別の段を
-    /// 置くと、道具と階層がまた 2 つの段に割れる（旧 UI の欠陥そのもの）。
-    ///
-    /// 写真モードは従来のまま（顔サムネ列・調整バー・タブバーを積む）。写真モードの
-    /// UI 契約が `adjustmentBar` の構成に依存しているため、そちらは 1 行も変えない。
-    @ViewBuilder
-    private var dock: some View {
-        if model.mode == .photo {
-            // クロップ段（`EditorDockRoute.crop`）に居る間は、通常の写真ドックの
-            // 代わりに `CropControlBar` を出す。動画側（`EditorDockView`）が
-            // `dockRoute` で中身を丸ごと入れ替えるのと同じ形——段の高さ・中身の
-            // 入れ替え方を、モードをまたいで 1 つの流儀に揃える。
-            if model.dockRoute == .crop {
-                CropControlBar(model: model)
-                    .frame(height: 52)
-                    .frame(maxWidth: .infinity)
-                    .background(Color.black)
-            } else {
-                photoDock
-            }
-        }
-    }
-
-    private var photoDock: some View {
-        VStack(spacing: 0) {
-            // 顔タブ選択時のみ、対象の顔サムネイル列を表示。
-            if model.activeTab == .face {
-                FaceSelectorView(model: model)
-                    .transition(.opacity)
-            }
-
-            // 調整バー：タブ選択中だけ下からスライドして表示。
-            if model.activeTab != nil {
-                adjustmentBar
-                    .transition(.move(edge: .bottom))
-            }
-
-            // 色調補正（写真モード底上げ 第1段）。`EffectTabBar`（顔／背景の ON/OFF 効果）
-            // とは別の道具列として横並びに置く（`PhotoTool` の doc 参照）。
-            PhotoToolBar(model: model, showColorGradeSheet: $showPhotoColorGradeSheet)
-            EffectTabBar(model: model)
-        }
-        .frame(maxWidth: .infinity)
-        .background(Color(uiColor: .systemBackground))
-        .clipped()
-        .animation(.easeOut(duration: 0.25), value: model.activeTab)
-    }
-
-    private var adjustmentBar: some View {
-        HStack(spacing: 10) {
-            Button { model.undo() } label: {
-                Image(systemName: "arrow.uturn.backward")
-                    .font(.system(size: 16, weight: .medium))
-                    .frame(width: 34, height: 34)
-                    .background(Circle().fill(Color(uiColor: .secondarySystemBackground)))
-            }
-            .buttonStyle(.plain)
-            .disabled(!model.canUndo)
-            .opacity(model.canUndo ? 1 : 0.35)
-
-            Button { model.redo() } label: {
-                Image(systemName: "arrow.uturn.forward")
-                    .font(.system(size: 16, weight: .medium))
-                    .frame(width: 34, height: 34)
-                    .background(Circle().fill(Color(uiColor: .secondarySystemBackground)))
-            }
-            .buttonStyle(.plain)
-            .disabled(!model.canRedo)
-            .opacity(model.canRedo ? 1 : 0.35)
-
-            Text("粗さ")
-                .font(.footnote)
-                .foregroundStyle(Color(uiColor: .secondaryLabel))
-
-            Slider(
-                value: Binding(get: { model.activeBlockSize }, set: { model.activeBlockSize = $0 }),
-                in: 4...80
-            )
-
-            Button { model.confirmAdjustment() } label: {
-                Image(systemName: "checkmark")
-                    .font(.system(size: 16, weight: .bold))
-                    .foregroundStyle(.white)
-                    .frame(width: 38, height: 38)
-                    .background(Circle().fill(Color.accentColor))
-            }
-            .buttonStyle(.plain)
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 12)
-    }
+    // MARK: - Dock（本体は `EditorView+Dock.swift`）
 
     // MARK: - Toolbar
 
@@ -297,6 +215,21 @@ struct EditorView: View {
                 Label("戻る", systemImage: "chevron.backward")
             }
             .disabled(model.exportProgress != nil)
+        }
+        // 写真モード限定の共有導線（写真モード底上げ 第3段）。**`previewImage` だけを
+        // 共有する。** モザイク・テキスト・（無料プランなら）透かしが焼き込み済みの
+        // 絵をそのまま渡す——`savePhoto()` と同じ WYSIWYG 規約（原本は一切渡らない。
+        // カメラ撮影の「モザイク焼き込み済みメディアだけを保存」と同じ理由）。
+        // `Image` は URL/String と違い `preview:` が必須（省略するとイニシャライザが解決しない）。
+        // プレビューにも同じ `previewImage` を渡す——共有シートのサムネイルにだけ
+        // 焼き込み前の絵が出る、という抜け道を作らないため。
+        if model.mode == .photo, let previewImage = model.previewImage {
+            ToolbarItem(placement: .topBarTrailing) {
+                ShareLink(item: Image(uiImage: previewImage),
+                          preview: SharePreview("共有", image: Image(uiImage: previewImage))) {
+                    Label("共有", systemImage: "square.and.arrow.up")
+                }
+            }
         }
         ToolbarItem(placement: .topBarTrailing) {
             Button(model.mode == .photo ? "保存" : "エクスポート") {

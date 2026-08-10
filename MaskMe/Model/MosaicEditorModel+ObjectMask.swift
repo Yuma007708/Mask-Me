@@ -56,9 +56,15 @@ extension MosaicEditorModel {
     /// （時間軸が無いので写像もゲートも掛からない）。
     func objectMaskPlacements(atComposition time: Double) -> [ObjectMaskPlacement] {
         guard !clips.isEmpty else {
-            return objectMasks.filter(\.anchor.isStill).map {
-                ObjectMaskPlacement(rect: $0.rect(atSourceTime: 0), angle: $0.angle(atSourceTime: 0))
-            }
+            // **`renderLayout.remapStill` を経由すること。** ここでインラインに
+            // `rect(atSourceTime:)` をそのまま返す実装（旧実装）は写真の向き
+            // （`renderLayout.stillOrientation`）を一切見ておらず、回転しても
+            // 矩形が回転前の位置のまま——つまり回した写真で顔・矩形モザイクが素通しになる。
+            // `ObjectMaskResolver.placements(..., clipID: nil, ...)` へ委譲することで、
+            // 動画側（`clipID` 引き）と同じ関数を通し、写像を 1 箇所に保つ
+            // （`ObjectMaskResolver.placements` の `clipID == nil` 分岐参照）。
+            return ObjectMaskResolver.placements(objectMasks, tracks: objectTracks,
+                                                 clipID: nil, sourceTime: 0, layout: renderLayout)
         }
         let locations = mapping.sourceLocations(at: time)
         guard locations.count >= 2, let overlap = mapping.overlap(at: time) else {
@@ -106,9 +112,16 @@ extension MosaicEditorModel {
     public var visibleObjectMasks: [VisibleObjectMask] {
         let time = compositionTimeForOverlay
         guard !clips.isEmpty else {
-            return objectMasks.filter(\.anchor.isStill).map {
-                VisibleObjectMask(id: $0.id, rect: $0.rect(atSourceTime: 0),
-                                  angle: $0.angle(atSourceTime: 0), state: .fixed)
+            // **`objectMaskPlacements(atComposition:)` と同じ写像を通す。** 枠（UI）と
+            // 焼き込み（描画）が別々に写像を書くと、無変換のときは偶然一致するだけで、
+            // 回転を入れた瞬間に食い違う（掴んだ枠と実際にモザイクが乗る場所がずれる）。
+            // 両者は `objectMasks.filter(\.anchor.isStill)` を同じ順序で辿るので id と
+            // 添字を突き合わせられる（`ObjectMaskResolver.placements` の `clipID == nil`
+            // 分岐が `masks.filter(\.anchor.isStill).map { ... }` である doc 参照）。
+            let stillMasks = objectMasks.filter(\.anchor.isStill)
+            let placements = objectMaskPlacements(atComposition: time)
+            return zip(stillMasks, placements).map { mask, placement in
+                VisibleObjectMask(id: mask.id, rect: placement.rect, angle: placement.angle, state: .fixed)
             }
         }
         let resolved = resolveSourceLocation(atComposition: time)
@@ -179,7 +192,12 @@ extension MosaicEditorModel {
         // 常に第 1 段の暫定マスク。`isRegionPlaceholder: true` を立てておくことで
         // 第 2 段（顔追跡に差し替えて矩形を外す）が対象を取り違えずに特定できる。
         guard !clips.isEmpty else {
-            return ObjectMask.single(anchor: .still, rect: rect, isRegionPlaceholder: true)
+            // `rect` はプレビュー（＝写真の向きを掛けた後の合成フレーム）基準なので、
+            // 保存前に `renderLayout.inverseRemapStill` で素材フレーム基準へ戻す
+            // （`objectMaskPlacements` の前進写像と対）。写像不能（潰れた配置）なら
+            // 保存できる場所が無いので nil（呼び出し側 `appendObjectMask` が何もしない）。
+            guard let sourceRect = renderLayout.inverseRemapStill(rect) else { return nil }
+            return ObjectMask.single(anchor: .still, rect: sourceRect, isRegionPlaceholder: true)
         }
         let resolved = resolveSourceLocation(atComposition: compositionTimeForOverlay)
         guard let clipID = resolved.clipID,
@@ -221,7 +239,12 @@ extension MosaicEditorModel {
             sourceAngle = renderLayout.inverseRemapAngle(angle, clipID: clipID)
             sourceTime = resolveSourceLocation(atComposition: compositionTimeForOverlay).time
         } else {
-            sourceRect = rect
+            // 写真編集: `renderLayout.inverseRemapStill` で素材基準へ戻す（`makeObjectMask` と
+            // 同じ写像）。**矩形と角度は必ず両方戻す**——片方だけだと、回した写真で矩形を
+            // 掴んだ瞬間に傾きが飛ぶ（`renderLayout.inverseRemapStillAngle` の doc 参照）。
+            guard let mapped = renderLayout.inverseRemapStill(rect) else { return }
+            sourceRect = mapped
+            sourceAngle = renderLayout.inverseRemapStillAngle(angle)
             sourceTime = 0
         }
         let updated = mask.settingKeyframe(atSourceTime: sourceTime, rect: sourceRect,

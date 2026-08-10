@@ -51,7 +51,7 @@ final class LiveDetectionCoordinateSpaceTests: XCTestCase {
         model.setTimelineForTesting(TimelineState(
             clips: [clip],
             applyRanges: MosaicApplyGate.fullCoverRanges(for: [clip], photoSourceIDs: [])))
-        model.renderLayout = TimelineRenderLayout(placements: [clip.id: placement])
+        model.builtLayout = TimelineRenderLayout(placements: [clip.id: placement])
         return (model, sourceID)
     }
 

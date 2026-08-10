@@ -26,12 +26,15 @@ final class PreviewInteractionPolicyTests: XCTestCase {
     /// 正しく振る舞うことを確認する）。
     private static let cases: [Case] = [
         // 写真モード
+        // 写真モードにもテキスト／ステッカーが入ったので、テキスト編集は動画と同じ
+        // `!isRectangleToolActive`。**ここが false に戻っていたら、写真で置いた
+        // 文字を選べない**（`TextOverlayEditView` の doc 参照）。
         Case(editorMode: .photo, activeTab: .face, isRectangleToolActive: false,
-            expectedFacePick: true, expectedRectangleDrawing: false, expectedTextEditing: false),
+            expectedFacePick: true, expectedRectangleDrawing: false, expectedTextEditing: true),
         Case(editorMode: .photo, activeTab: .face, isRectangleToolActive: true,
             expectedFacePick: false, expectedRectangleDrawing: true, expectedTextEditing: false),
         Case(editorMode: .photo, activeTab: .background, isRectangleToolActive: false,
-            expectedFacePick: false, expectedRectangleDrawing: false, expectedTextEditing: false),
+            expectedFacePick: false, expectedRectangleDrawing: false, expectedTextEditing: true),
         Case(editorMode: .photo, activeTab: .background, isRectangleToolActive: true,
             expectedFacePick: false, expectedRectangleDrawing: true, expectedTextEditing: false),
         // 動画モード

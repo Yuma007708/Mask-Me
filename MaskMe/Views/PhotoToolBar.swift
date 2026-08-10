@@ -15,6 +15,17 @@ enum PhotoTool: String, CaseIterable, Identifiable {
     /// ではなくこちらへ足す。押すと `model.enterDock(.crop)` を呼ぶだけで、
     /// 段の中身の入れ替えは `EditorView.dock` が持つ（`activate(_:)` 参照）。
     case crop
+    /// テキスト・ステッカーの追加（写真モード底上げ 第2段）。**入口は 1 個に相乗りさせる。**
+    /// 動画側は文字とステッカーで同じシート（`TimelineTextInputSheet`）を共有しており
+    /// （`Mode` の Picker で切り替える）、写真も同じ流儀に揃える。ここに `.sticker` を
+    /// 別 case として持つのは、道具列のボタンとしては見た目を分けたいため
+    /// （タップした瞬間にどちらの意図か伝わるほうが良い）だが、開くシートは同じ。
+    case text
+    case sticker
+    /// 回転（写真モード底上げ 第6段）。タップで `PhotoRotateBar` を出し入れする
+    /// （シートは開かない——`colorGrade`/`text`/`sticker` と違い、回転は
+    /// ワンタップの即時操作 3 個の並びなので、写真.app に合わせてインラインの帯にする）。
+    case rotate
 
     var id: String { rawValue }
 
@@ -22,6 +33,9 @@ enum PhotoTool: String, CaseIterable, Identifiable {
         switch self {
         case .colorGrade: return "フィルター"
         case .crop: return "切り抜き"
+        case .text: return "テキスト"
+        case .sticker: return "ステッカー"
+        case .rotate: return "回転"
         }
     }
 
@@ -29,6 +43,9 @@ enum PhotoTool: String, CaseIterable, Identifiable {
         switch self {
         case .colorGrade: return "slider.horizontal.3"
         case .crop: return "crop"
+        case .text: return "textformat"
+        case .sticker: return "face.smiling"
+        case .rotate: return "rotate.left"
         }
     }
 }
@@ -41,6 +58,12 @@ enum PhotoTool: String, CaseIterable, Identifiable {
 struct PhotoToolBar: View {
     @ObservedObject var model: MosaicEditorModel
     @Binding var showColorGradeSheet: Bool
+    /// テキスト・ステッカー入力シート（既存 `TimelineTextInputSheet`）の提示条件。
+    /// 文字・ステッカーどちらのボタンから開いても同じシートを共有する
+    /// （`PhotoTool.text` / `.sticker` の doc 参照）。
+    @Binding var showTextInputSheet: Bool
+    /// `PhotoRotateBar`（左90°／右90°／左右反転の3ボタン）の表示・非表示（写真モード底上げ 第6段）。
+    @Binding var showRotateBar: Bool
 
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
@@ -72,10 +95,15 @@ struct PhotoToolBar: View {
     }
 
     /// チップの点灯 = 無編集ではない（現在値がプリセット「なし」から動いている）。
+    /// **テキスト・ステッカーは「1件でも置いてあるか」で点灯を決める**
+    /// （個別の役割では判定しない。ボタンを分けたのは入口の見た目だけで、
+    /// 状態としては 1 本の `photoEdit.texts` を共有するため）。
     private func isOn(_ tool: PhotoTool) -> Bool {
         switch tool {
         case .colorGrade: return !model.photoEdit.colorGrade.isIdentity
         case .crop: return !model.timeline.crop.isFull
+        case .text, .sticker: return !model.photoEdit.texts.isEmpty
+        case .rotate: return !model.photoEdit.orientation.isIdentity
         }
     }
 
@@ -83,6 +111,8 @@ struct PhotoToolBar: View {
         switch tool {
         case .colorGrade: showColorGradeSheet = true
         case .crop: model.enterDock(.crop)
+        case .text, .sticker: showTextInputSheet = true
+        case .rotate: showRotateBar.toggle()
         }
     }
 }

@@ -294,3 +294,66 @@ kernel void colorGradeKernel(texture2d<float, access::read>  inTexture  [[textur
     float4 result = float4(clamp(r, 0.0, 1.0), clamp(g, 0.0, 1.0), clamp(b, 0.0, 1.0), c.a);
     outTexture.write(result, gid);
 }
+
+// ===========================================================================
+// Orientation (90° rotation + horizontal mirror) — photo mode Step 5.
+//
+// Field order/types below must match the Swift-side parameter struct
+// exactly (same convention as `ColorGradeParams` / `ColorGradeRenderer`).
+//
+// 90 度単位の回転のみを扱うので補間は行わない（各出力画素は入力画素 1 個の厳密なコピー）。
+// `mirror` は回転の**内側**に適用する（`ClipOrientation` の正準形「回転 ∘ 左右反転」に
+// 一致させる——`ClipOrientation.map(_:CGPoint)` の doc 参照）。
+// ===========================================================================
+
+struct OrientationParams {
+    uint rotation;   // 時計回りの度数: 0 / 90 / 180 / 270
+    uint isMirrored; // 0/1
+    uint outWidth;
+    uint outHeight;
+};
+
+kernel void orientationKernel(texture2d<float, access::read>  inTexture  [[texture(0)]],
+                              texture2d<float, access::write> outTexture [[texture(1)]],
+                              constant OrientationParams       &params     [[buffer(0)]],
+                              uint2                             gid        [[thread_position_in_grid]]) {
+    if (gid.x >= params.outWidth || gid.y >= params.outHeight) {
+        return;
+    }
+
+    int inWidth = int(inTexture.get_width());
+    int inHeight = int(inTexture.get_height());
+    int gx = int(gid.x);
+    int gy = int(gid.y);
+
+    // 出力座標 → 回転前・反転後の座標への逆写像（`ClipOrientation.map` の逆）。
+    int mx;
+    int my;
+    switch (params.rotation) {
+        case 90u:
+            mx = gy;
+            my = int(params.outWidth) - 1 - gx;
+            break;
+        case 180u:
+            mx = int(params.outWidth) - 1 - gx;
+            my = int(params.outHeight) - 1 - gy;
+            break;
+        case 270u:
+            mx = int(params.outHeight) - 1 - gy;
+            my = gx;
+            break;
+        default:
+            mx = gx;
+            my = gy;
+            break;
+    }
+
+    // 反転は回転の内側（素材に先に掛かる）。
+    int px = params.isMirrored != 0 ? (inWidth - 1 - mx) : mx;
+    int py = my;
+    px = clamp(px, 0, inWidth - 1);
+    py = clamp(py, 0, inHeight - 1);
+
+    float4 c = inTexture.read(uint2(uint(px), uint(py)));
+    outTexture.write(c, gid);
+}

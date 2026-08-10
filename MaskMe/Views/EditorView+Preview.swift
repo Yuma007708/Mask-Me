@@ -56,11 +56,10 @@ extension EditorView {
 
                 // テキストの当たり判定は物体マスクと同じ理由でさらに**上**に置く
                 // （`TextOverlayEditView` の doc 参照。矩形の新規作成ドラッグより
-                // テキストの選択・移動を優先する）。動画モード限定はビュー内部で判定する。
-                if model.mode == .video {
-                    TextOverlayEditView(model: model, styleSheetItemID: $textStyleItemID,
-                                        geometry: geometry)
-                }
+                // テキストの選択・移動を優先する）。動画・写真どちらのモードでも積む
+                // （写真モード底上げ 第2段。モード分岐はビュー内部で行う）。
+                TextOverlayEditView(model: model, styleSheetItemID: $textStyleItemID,
+                                    geometry: geometry)
 
                 if model.mode == .video {
                     VStack {

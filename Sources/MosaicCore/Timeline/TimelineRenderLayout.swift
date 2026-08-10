@@ -287,4 +287,29 @@ public struct TimelineRenderLayout: Equatable, Sendable {
         guard !stillOrientation.isIdentity else { return angle }
         return stillOrientation.inverseMapAngle(angle)
     }
+
+    /// 素材フレーム基準の正規化ランドマークを、合成フレーム基準へ写す（静止画編集専用）。
+    /// `remap(_ sets:clipID:)` の静止画版で、`stillPlacement` / `stillOrientation` を使う。
+    public func remapStill(_ sets: [FaceLandmarkSet]) -> [FaceLandmarkSet] {
+        guard stillPlacement != Self.unitRect || !stillOrientation.isIdentity else { return sets }
+        return sets.map { $0.oriented(stillOrientation).remapped(into: stillPlacement) }
+    }
+
+    /// `remapStill(_ sets:)` の逆写像（`inverseRemap(_ sets:clipID:)` の静止画版）。
+    public func inverseRemapStill(_ sets: [FaceLandmarkSet]) -> [FaceLandmarkSet] {
+        guard stillPlacement != Self.unitRect || !stillOrientation.isIdentity else { return sets }
+        guard stillPlacement.width > 0, stillPlacement.height > 0 else { return sets }
+        return sets.map { $0.unmapped(from: stillPlacement).oriented(stillOrientation.inverted) }
+    }
+
+    /// 素材フレーム基準の `MaskBuffer`（背景モザイクの人物/背景マスク）を、
+    /// 合成フレーム基準（＝写真の向きを掛けた後）へ写す（静止画編集専用）。
+    ///
+    /// **画素は完全保存**（90 度単位の回転のみ。`MaskBuffer.oriented(_:)` 参照）。
+    /// `stillPlacement` は現状のところ写真にレターボックスが無い（クロップ未実装）ため
+    /// 常に単位矩形であり、`remapStill(_ rect:)` と違って再サンプリングを伴う
+    /// スケーリングは行わない——スケーリングを持ち込むと画素の完全保存が崩れる。
+    public func remapStill(_ mask: MaskBuffer) -> MaskBuffer {
+        mask.oriented(stillOrientation)
+    }
 }

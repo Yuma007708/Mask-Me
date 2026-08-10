@@ -47,6 +47,10 @@ public final class MosaicRenderer: NSObject {
     /// （ライブラリにカーネルが無い環境では nil のままとし、`renderColorGrade` は
     /// 補正を掛けずに入力をそのままコピーする。書き出し自体は止めない）。
     private let colorGradeRenderer: ColorGradeRenderer?
+    /// 向き（90 度単位の回転 + 左右反転）の焼き込みカーネルのラッパー。`colorGradeRenderer`
+    /// と同じ理由でフェイルソフトする（ライブラリにカーネルが無い環境では nil のままとし、
+    /// `renderOriented` は向きを掛けずに入力をそのままコピーする）。
+    private let orientationRenderer: OrientationRenderer?
 
     /// Block size / edge softness. Mutate to retune the look at runtime.
     public var params: MosaicParams
@@ -111,6 +115,7 @@ public final class MosaicRenderer: NSObject {
             device: device, library: library, commandQueue: queue)
         self.textRenderer = try? TextOverlayRenderer(device: device, library: library, commandQueue: queue)
         self.colorGradeRenderer = try? ColorGradeRenderer(device: device, library: library, commandQueue: queue)
+        self.orientationRenderer = try? OrientationRenderer(device: device, library: library, commandQueue: queue)
         super.init()
     }
 
@@ -381,6 +386,32 @@ public final class MosaicRenderer: NSObject {
         }
         return colorGradeRenderer.render(
             input: input, output: output, grade: grade, waitForCompletion: waitForCompletion
+        )
+    }
+
+    /// `input` へ向き `orientation` を掛け、`output` へ書く（S8 の `ClipOrientation` の
+    /// 写真向け実体・写真モード底上げ 第5段）。
+    ///
+    /// **呼び出し側が `orientation.isIdentity` を見て呼ぶかどうかを決めること**
+    /// （`ColorGradeCompositor` と同じ「呼ばれたら必ず 1 パス発行する」契約）。
+    /// `output` のサイズは呼び出し側が `orientation.displaySize(inputSize)` で確保しておくこと
+    /// （90/270 度で縦横が入れ替わる。`MetalTextureUtilities.makeOrientedOutputTexture`）。
+    /// ライブラリにカーネルが無い環境（未更新の `.metallib` 等）では `orientationRenderer` が
+    /// nil のままフェイルソフトし、`input` をそのまま `output` へコピーする
+    /// （向きが効かないだけで書き出し自体は止めない）。
+    @discardableResult
+    public func renderOriented(
+        input: MTLTexture,
+        into output: MTLTexture,
+        orientation: ClipOrientation,
+        waitForCompletion: Bool = false
+    ) -> Bool {
+        guard let orientationRenderer else {
+            copy(from: input, to: output, waitForCompletion: waitForCompletion)
+            return false
+        }
+        return orientationRenderer.render(
+            input: input, output: output, orientation: orientation, waitForCompletion: waitForCompletion
         )
     }
 

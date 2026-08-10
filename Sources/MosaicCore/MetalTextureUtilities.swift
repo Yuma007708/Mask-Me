@@ -112,6 +112,27 @@ public enum MetalTextureUtilities {
         return device.makeTexture(descriptor: descriptor)
     }
 
+    /// Creates an empty texture sized for `orientation` applied to `like`
+    /// (90/270 度で `width`/`height` が入れ替わる). `renderOriented` / `renderOrientedToNewTexture`
+    /// の出力先として使う（`makeOutputTexture(like:)` の向き対応版）。
+    public static func makeOrientedOutputTexture(
+        like source: MTLTexture,
+        orientation: ClipOrientation,
+        device: MTLDevice
+    ) -> MTLTexture? {
+        let size = orientation.displaySize(CGSize(width: source.width, height: source.height))
+        let width = max(Int(size.width), 1)
+        let height = max(Int(size.height), 1)
+        let descriptor = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: source.pixelFormat == .invalid ? pixelFormat : source.pixelFormat,
+            width: width,
+            height: height,
+            mipmapped: false
+        )
+        descriptor.usage = [.shaderRead, .shaderWrite]
+        return device.makeTexture(descriptor: descriptor)
+    }
+
     /// Reads a texture back into a `CGImage` (for still-image export / thumbnails).
     public static func cgImage(from texture: MTLTexture) -> CGImage? {
         let width = texture.width
@@ -232,6 +253,24 @@ extension MosaicRenderer {
             return nil
         }
         renderColorGrade(input: input, into: output, grade: grade, waitForCompletion: true)
+        return output
+    }
+
+    /// `orientation` を適用し、新規テクスチャを返す（写真モード底上げ 第5段）。
+    ///
+    /// **呼び出し側が `orientation.isIdentity` を見て呼ぶかどうかを決めること**
+    /// （`renderOriented` doc 参照）。出力サイズは `MetalTextureUtilities
+    /// .makeOrientedOutputTexture` が 90/270 度で縦横を入れ替えて確保する
+    /// （出力テクスチャの確保に失敗したら nil）。
+    @discardableResult
+    public func renderOrientedToNewTexture(
+        input: MTLTexture,
+        orientation: ClipOrientation
+    ) -> MTLTexture? {
+        guard let output = MetalTextureUtilities.makeOrientedOutputTexture(
+            like: input, orientation: orientation, device: device
+        ) else { return nil }
+        renderOriented(input: input, into: output, orientation: orientation, waitForCompletion: true)
         return output
     }
 }

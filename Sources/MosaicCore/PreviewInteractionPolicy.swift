@@ -65,7 +65,10 @@ public struct PreviewInteractionPolicy: Equatable, Sendable {
     /// - 顔ピック: `activeTab == .face && !isRectangleToolActive`
     /// - 矩形の新規作成: `isRectangleToolActive`（既存マスクの編集面はこれとは独立に常時開く）
     /// - 既存マスクの編集: 常に true（ツールの ON/OFF・段・モードに関係なく操作できる）
-    /// - テキスト編集: `editorMode == .video && !isRectangleToolActive`
+    /// - テキスト編集: `!isRectangleToolActive`（**モードを問わない**。写真モードにも
+    ///   テキスト／ステッカーが入ったため、動画限定の条件は外した。`editorMode` は
+    ///   引数として残してあるが現在どの真理値にも効いていない——写真だけ挙動を
+    ///   変えたくなったときに、View 側へ条件式を書き戻さず済むようにするため）
     /// - ピンチズーム: 常に true（`EditorView+Preview.swift` がタブに関係なく結線している）
     public static func make(mode: EditorInteractionMode, editorMode: PreviewEditorMediaKind,
                             activeTab: PreviewEditorEffectTab, isRectangleToolActive: Bool) -> PreviewInteractionPolicy {
@@ -78,7 +81,7 @@ public struct PreviewInteractionPolicy: Equatable, Sendable {
             allowsFacePick: activeTab == .face && !isRectangleToolActive,
             allowsRectangleDrawing: isRectangleToolActive,
             allowsExistingMaskEditing: true,
-            allowsTextEditing: editorMode == .video && !isRectangleToolActive,
+            allowsTextEditing: !isRectangleToolActive,
             allowsPinchZoom: true,
             allowsCropHandles: false)
     }

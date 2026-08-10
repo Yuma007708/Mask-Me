@@ -60,6 +60,15 @@ final class TimelineClipSelectionUITests: XCTestCase {
     func test_afterSplit_tapNextToBoundary_selectsTheOtherClip() {
         // プレイヘッドを進めてから分割する（0 秒では分割できない）。
         swipeLeftOnClipBand()
+        // **「分割」は段に常駐していない。** `VideoTimelineView+Toolbar.selectionToolItems` は
+        // `selectedClip != nil` のときだけ `splitItem` を返し、何も選んでいないときの段は
+        // ［モザイク・テキスト・音声・比率・切り抜き・追加］になる。実ユーザーと同じく
+        // 先にクリップを選ぶ（このテストが見たいのは分割**後**のつまみの当たり判定で、
+        // 「分割ボタンがどこにあるか」ではない）。
+        let bandBeforeSplit = app.otherElements["timeline.clipBand"].frame
+        tap(x: app.windows.firstMatch.frame.midX, y: bandBeforeSplit.midY)
+        XCTAssertTrue(clipElements().first?.isSelected ?? false,
+                      "分割の前提: クリップを選択できていること selected=\(selectionFlags())")
         let split = app.buttons["分割"]
         XCTAssertTrue(split.waitForExistence(timeout: 10), "ツールバーに「分割」が無い")
         XCTAssertTrue(split.isEnabled, "プレイヘッドを進めても分割できない")

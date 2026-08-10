@@ -294,6 +294,13 @@ public final class MosaicEditorModel: ObservableObject {
     /// 動かしても絵が変わらない・undo に積まれない事故になる。
     /// 動画モードでは写真タブの UI が無いため常に `.identity` のまま（触られない）。
     @Published public var photoEdit: PhotoEditState = .identity
+    /// プレビュー上で選択中の写真テキスト/ステッカーの ID（写真モード底上げ 第2段）。
+    ///
+    /// 動画モードの選択は `timelineSelection`（`TimelineLayerSelection`）が持つが、
+    /// 写真は合成タイムラインを持たないためレイヤー選択の概念自体が無い。専用の
+    /// 1 個の `UUID?` で足りる（写真は同時に 1 本しか選択できない設計。
+    /// `TextOverlayEditView` の写真分岐参照）。
+    @Published public var photoSelectedTextID: UUID?
     /// 選択中タブ（nil＝未選択：調整バーは非表示）。
     @Published public var activeTab: EffectTab? {
         didSet {
@@ -431,6 +438,19 @@ public final class MosaicEditorModel: ObservableObject {
     private let landmarker: FaceLandmarking
     private let recents: RecentItemsStore
 
+    /// 写真のテキスト・透かしラスタライズキャッシュ（写真モード底上げ 第2/3段）。
+    ///
+    /// **プレビュー用と分けない。** 動画側（`MosaicPreviewController.textOverlayCache`）は
+    /// プレビューとエクスポートが別スレッド・別 `MosaicRenderer` で動くために分離が要るが、
+    /// 写真は `renderer` を 1 個しか使わないので、この 1 個で足りる。
+    ///
+    /// `renderer` が nil（Metal デバイス無し）の環境では常に nil のまま
+    /// （`TextOverlayCache.init` 自体は失敗しないが、紐づける `device` が無い）。
+    private lazy var photoTextOverlayCache: TextOverlayCache? = {
+        guard let renderer else { return nil }
+        return TextOverlayCache(device: renderer.device)
+    }()
+
     private var sourceImage: UIImage?
     /// テスト用フック（`internal`）: `detectInRegion` が検出入力として使うつもりの
     /// 素材内時刻（`resolveSourceLocation(atComposition:)` の結果）を最後に記録する。
@@ -438,6 +458,14 @@ public final class MosaicEditorModel: ObservableObject {
     /// 検証できないため、「参照フレームが先頭フレーム固定になっていないか」を
     /// 確認する代理指標として `DetectionCacheSyncTests` から読む。
     private(set) var lastDetectInRegionReferenceSourceTime: Double?
+    /// テスト用フック（`internal`）: `detectInRegion` が実際にクロップへ使った
+    /// `materialRect`（素材フレーム基準・写真の向きを掛けた後の逆写像込み）を最後に記録する。
+    /// 写真モードで検出が 0 件（実素材・MediaPipe なし）でも、`resolveRegion` 経由の
+    /// `appendObjectMask` は**元の合成矩形**を渡すため（`materialRect` は検出専用でクロップ
+    /// 後に捨てられる）、`objectMasks` の中身からは `materialRect` の計算結果を観測できない。
+    /// 「回した写真でクロップ範囲が正しく逆写像されているか」を確認する代理指標として
+    /// `PhotoOrientationWiringTests` から読む（`lastDetectInRegionReferenceSourceTime` と同じ流儀）。
+    private(set) var lastDetectInRegionMaterialRectForTesting: CGRect?
     private var sourceTexture: MTLTexture?
     private var videoAsset: AVAsset?
     /// Source video URL (for saving a resumable draft).
@@ -617,9 +645,30 @@ public final class MosaicEditorModel: ObservableObject {
     /// BGM がある構成を圧縮パススルーで書き出すと、音量も反映されず結果が
     /// 素材のフォーマット任せになる（`AudioExportPipeline` の doc 参照）。
     var hasBackgroundAudio = false
+    /// Composition 再構築（`MosaicEditorModel+Timeline.swift` の `apply(built:generation:)`）
+    /// が差し替える生のレイアウト。**この格納プロパティを直接読んではならない**
+    /// （動画モードでは従来どおりだが、写真モードでは向きが載っていない）。
+    /// 読み口は必ず計算プロパティ `renderLayout` を使うこと。
+    var builtLayout: TimelineRenderLayout = .identity
+
     /// 素材フレーム基準の顔座標を合成フレーム基準へ写すレイアウト（S8）。
     /// 解像度混在（レターボックス）で効く。無変換構成では恒等。
-    var renderLayout: TimelineRenderLayout = .identity
+    ///
+    /// **写真モード底上げ 第4段で計算プロパティ化した。** 写真モードのときだけ
+    /// `photoEdit.orientation` を `stillOrientation` へ注入する。格納 var のままだと
+    /// `applyPhotoEdit` / `apply(snapshot:)`（undo）/ `load(image:)` の 3 箇所で
+    /// 同期を取り忘れる余地があり、忘れると「向きだけ古いままモザイクが素通しになる」
+    /// （写真の向きは合成タイムラインの再構築を経由しないため、格納にすると
+    /// 更新イベントが無い）。計算にすれば発生し得ない。
+    ///
+    /// **`stillPlacement` には触らない。** 将来クロップが `builtLayout.stillPlacement` を
+    /// 埋めたとき、ここで上書きすると写真のクロップが黙って消える。
+    var renderLayout: TimelineRenderLayout {
+        guard mode == .photo else { return builtLayout }
+        var layout = builtLayout
+        layout.stillOrientation = photoEdit.orientation   // 向きだけを注入する
+        return layout
+    }
     private(set) var previewController: MosaicPreviewController?
     private var cancellables: Set<AnyCancellable> = []
 
@@ -732,6 +781,16 @@ public final class MosaicEditorModel: ObservableObject {
                 self?.renderPreview()
                 self?.previewController?.invalidate()
             }
+            .store(in: &cancellables)
+
+        // 課金権限の変化（購入直後の Pro 解放など）を写真プレビューへ反映する
+        // （課金 P2/P3b。動画側は `MosaicPreviewController+Rendering.swift` が
+        // `Entitlements.shared.isPro` を毎フレーム直接読むため専用の購読が要らないが、
+        // 写真は `renderPreview()` が明示的に再描画されない限り絵が更新されないため、
+        // ここで変化を拾って再描画する）。
+        entitlements.isProPublisher
+            .removeDuplicates()
+            .sink { [weak self] _ in self?.renderPreview() }
             .store(in: &cancellables)
     }
 
@@ -1208,9 +1267,19 @@ public final class MosaicEditorModel: ObservableObject {
         if let clipID = resolvedLocation?.clipID,
            let inversed = renderLayout.inverseRemap(normalizedRect, clipID: clipID) {
             materialRect = inversed
+        } else if mode == .photo {
+            // 写真は素材の概念が無いので `resolvedLocation` は常に nil（この関数冒頭の
+            // 分岐参照）——だが写真にも向き（`renderLayout.stillOrientation`）はあるので、
+            // ここを無写像のまま `normalizedRect` を使うと、回した写真でクロップ位置が
+            // ずれる（`scanSegments(searchRect:)` / `resolveRegion` 側が同じ逆写像を
+            // 掛けているかを必ず突き合わせること。ここだけ無変換だと 2 つの座標規約が
+            // 混在する＝バグの本体）。写像不能（潰れた配置）なら `normalizedRect` を
+            // そのまま使う（恒等下では同値）。
+            materialRect = renderLayout.inverseRemapStill(normalizedRect) ?? normalizedRect
         } else {
             materialRect = normalizedRect
         }
+        lastDetectInRegionMaterialRectForTesting = materialRect
 
         let pixW = CGFloat(cgImage.width)
         let pixH = CGFloat(cgImage.height)
@@ -1591,30 +1660,48 @@ public final class MosaicEditorModel: ObservableObject {
     /// `MosaicPreviewController.renderInitialFrame(at:)` が現在位置のフレームを
     /// 1 枚描き直して、この暫定表示を必ず上書きする（`installInitialTimeline` の doc 参照）。
     func renderPreview() {
-        guard let renderer, let tex = sourceTexture else { return }
+        guard let renderer, let tex = sourceTexture, let cache = photoTextOverlayCache else { return }
         applyControls(to: renderer)
 
         // 顔モザイク（立体メッシュ）＋手動矩形。
         // **両者は独立して ON/OFF する。** 顔を切っても矩形は残る（逆も同じ）。
+        //
+        // `landmarks` は**素材フレーム基準のまま**渡す（`PhotoRenderPipeline.render` が
+        // 内部で `layout.remapStill` を 1 回だけ掛ける。`MosaicInput` の doc 参照）。
         let landmarks = faceMosaicOn ? detectedFaces.filter(\.isSelected).map(\.landmarks) : []
+        // `extra`（物体マスク）は `objectMaskPaths` の内部で `renderLayout.remapStill` 済み
+        // （`ObjectMaskResolver.placements` 経由）なので、焼き込み先のピクセルサイズは
+        // **写真の向きを掛けた後**の出力サイズでなければならない
+        // （`PhotoRenderPipeline` の回転段が先頭に来るため、モザイクはすでに
+        // 回転後のフレームへ描かれる）。
+        let renderedSize = renderLayout.stillOrientation.displaySize(
+            CGSize(width: tex.width, height: tex.height))
         let extra = objectMosaicOn
-            ? objectMaskPaths(for: CGSize(width: tex.width, height: tex.height),
-                              atComposition: compositionTimeForOverlay)
+            ? objectMaskPaths(for: renderedSize, atComposition: compositionTimeForOverlay)
             : []
 
-        // 色調補正・モザイクの合成は `PhotoRenderPipeline` の 1 呼び出しに閉じる
-        // （写真専用の合成器を新設しない。動画モードでは `photoEdit` が常に
-        // `.identity` なので色調補正パスはゼロコストで素通りし、従来と同じ絵になる）。
+        // 色調補正・モザイク・テキスト・透かしの合成は `PhotoRenderPipeline` の
+        // 1 呼び出しに閉じる（写真専用の合成器を新設しない。動画モードでは `photoEdit` が
+        // 常に `.identity` なので色調補正・テキストのパスはゼロコストで素通りし、
+        // 従来と同じ絵になる）。
+        //
+        // **`needsWatermark` の判定源はここだけ。** `entitlements.isPro` を直接見る
+        // （`Entitlements.shared` を `MosaicEditorModel` の中から直接読まない、という
+        // `entitlements` プロパティの doc に従う）。動画プレビュー
+        // （`MosaicPreviewController+Rendering.swift`）と判定の根拠（Pro かどうか）は
+        // 同じだが、読み口はこのクラスの規約どおり注入されたプロパティを使う。
         let current = PhotoRenderPipeline.render(
             source: tex,
             photoEdit: photoEdit,
             renderer: renderer,
+            layout: renderLayout,
             mosaic: PhotoRenderPipeline.MosaicInput(
                 landmarkSets: landmarks,
                 additionalPaths: extra,
                 backgroundMask: backgroundMosaicOn ? backgroundMask : nil,
                 backgroundBlockSize: backgroundBlockSize
-            )
+            ),
+            overlay: PhotoRenderPipeline.OverlayInput(cache: cache, needsWatermark: !entitlements.isPro)
         )
 
         if let cg = MetalTextureUtilities.cgImage(from: current) {

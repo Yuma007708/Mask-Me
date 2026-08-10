@@ -3804,7 +3804,7 @@ final class TransitionOverlapModelTests: XCTestCase {
         // 240x320 を 320x240 のフレームへフィットした配置（x=0.21875 / 幅 0.5625）。
         let placement = AspectFit.placement(of: CGSize(width: 240, height: 320),
                                             in: CGSize(width: 320, height: 240))
-        model.renderLayout = TimelineRenderLayout(placements: [clip.id: placement])
+        model.builtLayout = TimelineRenderLayout(placements: [clip.id: placement])
         for time in stride(from: 0.0, through: 1.0, by: 0.1) {
             model.cacheStore.store([fakeFace(cx: 0.10, cy: 0.5), fakeFace(cx: 0.90, cy: 0.5)],
                                    sourceID: sourceA, time: time)
@@ -3840,7 +3840,7 @@ final class TransitionOverlapModelTests: XCTestCase {
         // 先頭クリップは全面、後続クリップはレターボックス（x=0.21875 / 幅 0.5625）。
         let placement = AspectFit.placement(of: CGSize(width: 240, height: 320),
                                             in: CGSize(width: 320, height: 240))
-        model.renderLayout = TimelineRenderLayout(placements: [
+        model.builtLayout = TimelineRenderLayout(placements: [
             clipA.id: CGRect(x: 0, y: 0, width: 1, height: 1),
             clipB.id: placement
         ])

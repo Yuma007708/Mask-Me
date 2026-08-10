@@ -815,7 +815,7 @@ final class DetectionCacheSyncTests: XCTestCase {
         let source = model.currentSourceID
         let clip = TimelineClip(sourceID: source, sourceStart: 0, sourceEnd: 10)
         model.setClipsForTesting([clip])
-        model.renderLayout = transformedLayout(clipID: clip.id, scale: 2)
+        model.builtLayout = transformedLayout(clipID: clip.id, scale: 2)
 
         XCTAssertTrue(model.shouldDetectPreviewFrame(at: 3.0), "前提が崩れている: まだ未検出のはず")
         // 2 倍に拡大した状態でライブ検出が走り、そのバケットが埋まる
@@ -827,7 +827,7 @@ final class DetectionCacheSyncTests: XCTestCase {
                        "同じ拡大率のままなのに再検出が走っている（毎フレーム再走査の退行）")
 
         // 等倍へ戻す＝素材の端が新しく見えるようになった。
-        model.renderLayout = transformedLayout(clipID: clip.id, scale: 1)
+        model.builtLayout = transformedLayout(clipID: clip.id, scale: 1)
         XCTAssertTrue(model.shouldDetectPreviewFrame(at: 3.0),
                       "縮小して新しく見えた領域が再検出されない（端の顔が素通しのまま固定される）")
     }
@@ -843,12 +843,12 @@ final class DetectionCacheSyncTests: XCTestCase {
         let source = model.currentSourceID
         let clip = TimelineClip(sourceID: source, sourceStart: 0, sourceEnd: 10)
         model.setClipsForTesting([clip])
-        model.renderLayout = transformedLayout(clipID: clip.id, scale: 3)
+        model.builtLayout = transformedLayout(clipID: clip.id, scale: 3)
 
         model.recordScannedEmptyForTesting(at: 3.0)
         XCTAssertFalse(model.shouldDetectPreviewFrame(at: 3.0), "前提が崩れている: 空エントリが入っていない")
 
-        model.renderLayout = transformedLayout(clipID: clip.id, scale: 1)
+        model.builtLayout = transformedLayout(clipID: clip.id, scale: 1)
         XCTAssertTrue(model.shouldDetectPreviewFrame(at: 3.0),
                       "拡大中の空エントリが縮小後も検出済み扱いされている（永久スキップ）")
     }
@@ -865,23 +865,23 @@ final class DetectionCacheSyncTests: XCTestCase {
         model.setClipsForTesting([clip])
 
         // 等倍（素材全体が見えている）で検出済みにする。
-        model.renderLayout = transformedLayout(clipID: clip.id, scale: 1)
+        model.builtLayout = transformedLayout(clipID: clip.id, scale: 1)
         model.storeLiveDetection(
             LiveDetectionResult(faces: [fakeFace(cx: 0.5, cy: 0.5)], bridgedByFlow: false),
             at: 4.0, source: UIImage(), generation: model.timelineGeneration)
 
         for scale in [1.5, 2.0, 4.0] {
-            model.renderLayout = transformedLayout(clipID: clip.id, scale: scale)
+            model.builtLayout = transformedLayout(clipID: clip.id, scale: scale)
             XCTAssertFalse(model.shouldDetectPreviewFrame(at: 4.0),
                            "scale=\(scale)（可視領域が縮む方向）で再検出が走っている")
         }
 
         // 拡大中に書いたエントリも、さらに拡大する方向では再検出を要求しない。
-        model.renderLayout = transformedLayout(clipID: clip.id, scale: 2)
+        model.builtLayout = transformedLayout(clipID: clip.id, scale: 2)
         model.storeLiveDetection(
             LiveDetectionResult(faces: [fakeFace(cx: 0.5, cy: 0.5)], bridgedByFlow: false),
             at: 5.0, source: UIImage(), generation: model.timelineGeneration)
-        model.renderLayout = transformedLayout(clipID: clip.id, scale: 4)
+        model.builtLayout = transformedLayout(clipID: clip.id, scale: 4)
         XCTAssertFalse(model.shouldDetectPreviewFrame(at: 5.0),
                        "拡大 → さらに拡大で再検出が走っている（ピンチのたびに全再走査になる）")
     }
@@ -907,7 +907,7 @@ final class DetectionCacheSyncTests: XCTestCase {
                            "無変形なのに再検出が走っている（毎フレーム全再走査の退行）")
         }
         // 明示的に無変形の配置（単位矩形）を入れても同じ。
-        model.renderLayout = transformedLayout(clipID: clip.id, scale: 1)
+        model.builtLayout = transformedLayout(clipID: clip.id, scale: 1)
         XCTAssertFalse(model.shouldDetectPreviewFrame(at: 6.0),
                        "無変形の配置矩形を入れただけで再検出が走っている")
     }

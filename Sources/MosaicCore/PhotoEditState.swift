@@ -18,13 +18,55 @@ import Foundation
 ///    「読める値＝意味のある値」だと信じて参照するのが事故の起点になる
 ///    （実際には合成タイムラインが無いのでゴミ値でしかない）。
 ///
-/// 今回（写真モード底上げ 第1段）は `colorGrade` だけを持つ。テキスト・回転はこの後の段で足す。
+/// 写真モード底上げ 第1段で `colorGrade` を、第2段で `texts` を、第4段（今回）で
+/// `orientation` を持たせた。
 public struct PhotoEditState: Equatable, Sendable, Codable {
     /// 色調補正（明るさ・コントラスト・彩度・暖かみ）。
     public var colorGrade: ColorGrade
 
-    public init(colorGrade: ColorGrade = .identity) {
+    /// テキスト・ステッカー（写真モード底上げ 第2段）。
+    ///
+    /// **保存値をそのまま描画へ渡さないこと。** `compositionStart` / `duration` /
+    /// `animation` は写真には意味を持たない形式上の値（`PhotoTextEditing.swift` の
+    /// 型 doc 参照）。描画は必ず `renderableTextItems` を経由する。
+    ///
+    /// **既定は `[]`。** 旧下書き（`texts` キーを持たない JSON）は
+    /// `decodeIfPresent` で吸収し、空配列へ倒す（`init(from:)` 参照）。
+    public var texts: [TextItem]
+
+    /// 写真の向き（90 度単位の回転 + 左右反転。写真モード底上げ 第4段）。
+    ///
+    /// クリップの `ClipOrientation`（`TimelineStateOrientationEditing`）とは別スロット。
+    /// `MosaicEditorModel.renderLayout` が写真モードのときだけこれを
+    /// `stillOrientation` へ注入する（`renderLayout` の doc 参照）。
+    ///
+    /// **既定は `.identity`。** 旧下書き（`orientation` キーを持たない JSON）は
+    /// `decodeIfPresent` で吸収し、無変換へ倒す（`init(from:)` 参照）。
+    public var orientation: ClipOrientation
+
+    public init(colorGrade: ColorGrade = .identity, texts: [TextItem] = [],
+                orientation: ClipOrientation = .identity) {
         self.colorGrade = colorGrade
+        self.texts = texts
+        self.orientation = orientation
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case colorGrade, texts, orientation
+    }
+
+    /// `texts` / `orientation`（この後追加された項目）を持たない旧下書きを既定値へ倒す。
+    ///
+    /// **`decodeIfPresent` を使う。** キー自体が無い旧 JSON でも
+    /// `container.decode(forKey:)` で throw させない——`TextItem.init(from:)` の
+    /// `role` 欠如吸収と同じ流儀（`TextItem.swift` の doc 参照）。`orientation` 自体は
+    /// `ClipOrientation.init(from:)` が壊れた値を無変換へ倒すので、ここでは
+    /// キー欠如だけを吸収すればよい。
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        colorGrade = try container.decode(ColorGrade.self, forKey: .colorGrade)
+        texts = try container.decodeIfPresent([TextItem].self, forKey: .texts) ?? []
+        orientation = try container.decodeIfPresent(ClipOrientation.self, forKey: .orientation) ?? .identity
     }
 
     /// 無編集（既定値）。
@@ -32,6 +74,6 @@ public struct PhotoEditState: Equatable, Sendable, Codable {
 
     /// 全項目が既定値と一致するか（＝無編集）。
     public var isIdentity: Bool {
-        colorGrade.isIdentity
+        colorGrade.isIdentity && texts.isEmpty && orientation.isIdentity
     }
 }

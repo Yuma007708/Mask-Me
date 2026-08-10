@@ -1,3 +1,4 @@
+import Foundation
 import MosaicCore
 
 /// 写真モードの編集（`MosaicEditorModel.photoEdit`）の入口。
@@ -30,6 +31,72 @@ extension MosaicEditorModel {
         applyPhotoEdit { state in
             var next = state
             next.colorGrade = colorGrade
+            return next
+        }
+    }
+
+    // MARK: - テキスト・ステッカー（写真モード底上げ 第2段）
+
+    /// テキストを 1 本追加する（UI からの入口）。既定の位置・見た目で置く。
+    public func addPhotoText(_ text: String,
+                             center: NormalizedPoint = .center,
+                             style: TextStyle = TextStyle()) {
+        applyPhotoEdit { $0.addingText(text, center: center, style: style) }
+    }
+
+    /// ステッカー（絵文字 1 個）を 1 本追加する（UI からの入口）。
+    public func addPhotoSticker(_ emoji: String, center: NormalizedPoint = .center) {
+        applyPhotoEdit { $0.addingSticker(emoji, center: center) }
+    }
+
+    /// 指定したテキスト/ステッカーを取り除く。
+    public func removePhotoText(id: UUID) {
+        applyPhotoEdit { $0.removingText(id: id) }
+    }
+
+    /// 文面を書き換える（空文字にはできない。役割違い〈ステッカー〉は no-op）。
+    public func setPhotoText(id: UUID, text: String) {
+        applyPhotoEdit { $0.settingText(id: id, text: text) }
+    }
+
+    /// 画面上の位置（正規化座標）を差し替える（プレビュー上のドラッグの確定）。
+    public func setPhotoTextCenter(id: UUID, center: NormalizedPoint) {
+        applyPhotoEdit { $0.settingTextCenter(id: id, center: center) }
+    }
+
+    /// 見た目（フォント・色・縁取り・背景帯）を差し替える。
+    public func setPhotoTextStyle(id: UUID, style: TextStyle) {
+        applyPhotoEdit { $0.settingTextStyle(id: id, style: style) }
+    }
+
+    // MARK: - 回転（写真モード底上げ 第4段）
+    //
+    // 角度の式はここには書かない。`ClipOrientation.rotatedLeft()` / `rotatedRight()` /
+    // `flippedHorizontally()` を呼ぶだけ（クリップ側の `rotateClipLeft` 等と同じ流儀）。
+
+    /// **画面で見て**反時計回りに 90 度回す。
+    public func rotatePhotoLeft() {
+        applyPhotoEdit { state in
+            var next = state
+            next.orientation = state.orientation.rotatedLeft()
+            return next
+        }
+    }
+
+    /// **画面で見て**時計回りに 90 度回す。
+    public func rotatePhotoRight() {
+        applyPhotoEdit { state in
+            var next = state
+            next.orientation = state.orientation.rotatedRight()
+            return next
+        }
+    }
+
+    /// 左右反転する。
+    public func flipPhotoHorizontally() {
+        applyPhotoEdit { state in
+            var next = state
+            next.orientation = state.orientation.flippedHorizontally()
             return next
         }
     }

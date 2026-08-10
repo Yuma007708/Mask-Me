@@ -80,22 +80,42 @@ struct TextOverlayEditView: View {
         // 物体マスクの枠は矩形ツール ON 中も触れるが、あちらは「既に置いたものを
         // 直す」操作で、テキストの選択・移動と役割が違う。優先順位を揃える理由にはならない。
         //
+        // **`isRectangleToolActive` は動画・写真どちらのモードでも矩形の新規作成を
+        // 優先させる。** 矩形ツールは両モード共通の機能（`RectangleDrawingOverlay`）
+        // なので、ここだけ動画限定にすると写真で矩形を描こうとした指をテキストが
+        // 奪ってしまう（`TextOverlayEditView` 冒頭の doc と同じ理由）。
+        //
         // **排他の根拠は `PreviewInteractionPolicy` であって、`CropOverlay` の
-        // 全面キャッチレイヤーではない。** `allowsTextEditing` は
-        // `editorMode == .video && !isRectangleToolActive` を移設したもので、
-        // クロップ編集中（`interactionMode == .crop`）は常に false になる。
+        // 全面キャッチレイヤーではない。** `allowsTextEditing` はこの
+        // `!isRectangleToolActive` を移設したもので、クロップ編集中
+        // （`interactionMode == .crop`）は常に false になる。
         .allowsHitTesting(model.previewInteraction.allowsTextEditing)
     }
 
-    /// いま画面に出ているテキストだけを対象にする（コア層の `visibleTextItems` 1 本を通す。
-    /// `EditorView` は写真モードでも積まれるため、動画モードだけに絞る）。
+    /// いま画面に出ているテキストだけを対象にする。
+    ///
+    /// 動画はコア層の `visibleTextItems`（合成時刻依存）1 本を通す。写真は時刻の概念が
+    /// 無いため、`PhotoEditState.renderableTextItems`（保存されている全件を時刻0の
+    /// パラメータへ正規化したもの。`PhotoTextEditing.swift` の doc 参照）をそのまま使う
+    /// ——これは `PhotoRenderPipeline.render` が実際に焼き込む配列と同じものなので、
+    /// 選択枠の対象と実際に描かれているテキストが食い違わない。
     private var visibleItems: [TextItem] {
-        guard model.mode == .video, model.videoDuration > 0 else { return [] }
-        let time = model.compositionTime(forPosition: model.playbackPosition)
-        return model.timeline.visibleTextItems(atComposition: time, totalDuration: model.videoDuration)
+        switch model.mode {
+        case .video:
+            guard model.videoDuration > 0 else { return [] }
+            let time = model.compositionTime(forPosition: model.playbackPosition)
+            return model.timeline.visibleTextItems(atComposition: time, totalDuration: model.videoDuration)
+        case .photo:
+            return model.photoEdit.renderableTextItems
+        }
     }
 
-    private var selectedID: UUID? { model.timelineSelection.layerID(of: .text) }
+    private var selectedID: UUID? {
+        switch model.mode {
+        case .video: return model.timelineSelection.layerID(of: .text)
+        case .photo: return model.photoSelectedTextID
+        }
+    }
 
     @ViewBuilder
     private func hitRegion(for item: TextItem) -> some View {
@@ -156,7 +176,10 @@ struct TextOverlayEditView: View {
     }
 
     private func select(_ id: UUID) {
-        model.timelineSelection.selectLayer(TimelineLayerSelection(kind: .text, id: id))
+        switch model.mode {
+        case .video: model.timelineSelection.selectLayer(TimelineLayerSelection(kind: .text, id: id))
+        case .photo: model.photoSelectedTextID = id
+        }
     }
 
     /// 指を離した最終位置だけをモデルへ確定する（ドラッグ中は `@GestureState` の
@@ -169,7 +192,11 @@ struct TextOverlayEditView: View {
         // （タップの当たり判定向け）ため、画面端までドラッグしたテキストを見失う。
         // 0...1 の外に出た分は `TimelineState.settingTextCenter` 側でクランプされる。
         guard let normalized = geometry.rawNormalizedPoint(from: moved) else { return }
-        model.setTextCenter(id: item.id, center: NormalizedPoint(x: normalized.x, y: normalized.y))
+        let center = NormalizedPoint(x: normalized.x, y: normalized.y)
+        switch model.mode {
+        case .video: model.setTextCenter(id: item.id, center: center)
+        case .photo: model.setPhotoTextCenter(id: item.id, center: center)
+        }
     }
 
     private func styleButton(for item: TextItem) -> some View {
