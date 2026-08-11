@@ -93,12 +93,12 @@ struct HomeView: View {
 
     /// 初回だけ案内を出す。
     ///
-    /// **UI テストでは出さない。** 種の動画で編集画面へ直行する経路
-    /// （`UITestBootstrap.isSeedingVideo`）に案内が重なると、全 UI テストが
-    /// 最初のシートで止まる。`@AppStorage` は Simulator に残るので
+    /// **UI テストでは出さない。** 種の素材で編集画面へ直行する経路
+    /// （`UITestBootstrap.isSeeding`。動画・写真の両方）に案内が重なると、
+    /// UI テストが最初のシートで止まる。`@AppStorage` は Simulator に残るので
     /// 「1 回目だけ落ちる」という再現性の低い失敗になり、原因も分かりにくい。
     private func showOnboardingIfNeeded() {
-        guard !didSeeOnboarding, !UITestBootstrap.isSeedingVideo else { return }
+        guard !didSeeOnboarding, !UITestBootstrap.isSeeding else { return }
         didSeeOnboarding = true
         showOnboarding = true
     }
@@ -122,10 +122,20 @@ struct HomeView: View {
         .accessibilityIdentifier("home.create")
     }
 
-    /// UI テスト起動時だけ、合成した動画で編集画面へ直行する（`UITestBootstrap` の doc）。
-    /// 通常起動では `isSeedingVideo` が false なので何もしない。
+    /// UI テスト起動時だけ、合成した素材で編集画面へ直行する（`UITestBootstrap` の doc）。
+    /// 通常起動では `isSeeding` が false なので何もしない。
+    ///
+    /// 写真は生成が軽く同期で済むので `Task` に入れない（動画は書き出しがあるので
+    /// 主スレッドの外へ出す）。
     private func seedForUITestsIfNeeded() {
-        guard UITestBootstrap.isSeedingVideo, pickedMedia == nil else { return }
+        guard pickedMedia == nil else { return }
+        if UITestBootstrap.isSeedingPhoto {
+            pickedMedia = .image(UITestBootstrap.seedPhotoImage())
+            resumeContext = nil
+            showEditor = true
+            return
+        }
+        guard UITestBootstrap.isSeedingVideo else { return }
         Task {
             guard let url = await UITestBootstrap.seedVideoURL() else { return }
             pickedMedia = .video(url)

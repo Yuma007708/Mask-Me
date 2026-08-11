@@ -39,12 +39,26 @@ enum PhotoTool: String, CaseIterable, Identifiable {
         }
     }
 
+    /// 道具の役割（色分けの表は `AppTheme.ToolAccent`）。**動画側の同じ道具と同じ色に
+    /// する**——「フィルター」「テキスト」は動画のツールバーでも `decorate`、
+    /// 「切り抜き」「回転」は `shape`。写真と動画で同じ道具の色が違うと、色分けが
+    /// 意味を失う（`AppTheme` の doc: 道具の表とタイムラインの帯の表は 1 つに保つ）。
+    var accent: Color {
+        switch self {
+        case .colorGrade, .text, .sticker: return AppTheme.ToolAccent.decorate
+        case .crop, .rotate: return AppTheme.ToolAccent.shape
+        }
+    }
+
     var symbolName: String {
         switch self {
         case .colorGrade: return "slider.horizontal.3"
         case .crop: return "crop"
         case .text: return "textformat"
-        case .sticker: return "face.smiling"
+        // **`face.smiling` は使わない。** 同じ段の下にある「顔」（モザイクを掛ける
+        // 対象）が同じ絵で、色だけ違う状態になっていた。意味の違う 2 つが同じ絵だと
+        // 色分けの効果が消える。
+        case .sticker: return "sparkles"
         case .rotate: return "rotate.left"
         }
     }
@@ -81,14 +95,22 @@ struct PhotoToolBar: View {
         return Button {
             activate(tool)
         } label: {
+            // **色は絵だけに載せ、文字は白のまま**（動画側 `TimelineToolbarView.button`
+            // と同じ流儀。両方を色にすると読みにくくなる）。編集済みの道具は
+            // 絵の背景を濃くして「触ってある」ことを示す。
             VStack(spacing: 6) {
                 Image(systemName: tool.symbolName)
-                    .font(.system(size: 20, weight: .regular))
+                    .font(.system(size: 19, weight: .regular))
+                    .foregroundStyle(tool.accent)
+                    .frame(width: 38, height: 32)
+                    .background(tool.accent.opacity(isActive ? 0.34 : 0.16),
+                                in: RoundedRectangle(cornerRadius: AppTheme.chipRadius,
+                                                     style: .continuous))
                 Text(tool.title)
-                    .font(.system(size: 11.5, weight: .medium))
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(AppTheme.ink)
             }
-            .frame(width: 74, height: 60)
-            .foregroundStyle(isActive ? AppTheme.accent : AppTheme.inkDim)
+            .frame(width: 74, height: 62)
         }
         .buttonStyle(.plain)
         .accessibilityIdentifier("editor.photoTool.\(tool.rawValue)")
