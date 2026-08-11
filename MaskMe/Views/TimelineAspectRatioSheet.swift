@@ -50,10 +50,10 @@ struct TimelineAspectRatioSheet: View {
                 shape(for: ratio)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(Self.title(ratio))
-                        .foregroundStyle(Color(uiColor: .label))
+                        .foregroundStyle(AppTheme.ink)
                     Text(Self.usage(ratio))
                         .font(.caption)
-                        .foregroundStyle(Color(uiColor: .secondaryLabel))
+                        .foregroundStyle(AppTheme.inkDim)
                 }
                 Spacer()
                 if isSelected {
@@ -77,7 +77,7 @@ struct TimelineAspectRatioSheet: View {
             }
         }()
         return RoundedRectangle(cornerRadius: 3)
-            .strokeBorder(Color(uiColor: .secondaryLabel), lineWidth: ratio == .source ? 1 : 1.5)
+            .strokeBorder(AppTheme.inkDim, lineWidth: ratio == .source ? 1 : 1.5)
             .frame(width: size.width, height: size.height)
             .frame(width: 32, height: 28)
             .opacity(ratio == .source ? 0.5 : 1)

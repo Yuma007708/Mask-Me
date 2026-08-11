@@ -274,7 +274,7 @@ struct EditorView: View {
                         if model.isExportCancelling {
                             Text("中止しています…")
                                 .font(.footnote)
-                                .foregroundStyle(Color(uiColor: .secondaryLabel))
+                                .foregroundStyle(AppTheme.inkDim)
                         } else {
                             Button("キャンセル", role: .cancel) { model.cancelExport() }
                                 .font(.callout)

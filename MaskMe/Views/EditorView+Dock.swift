@@ -61,7 +61,7 @@ extension EditorView {
             EffectTabBar(model: model)
         }
         .frame(maxWidth: .infinity)
-        .background(Color(uiColor: .systemBackground))
+        .background(AppTheme.surfaceDim)
         .clipped()
         .animation(.easeOut(duration: 0.25), value: model.activeTab)
     }
@@ -72,7 +72,7 @@ extension EditorView {
                 Image(systemName: "arrow.uturn.backward")
                     .font(.system(size: 16, weight: .medium))
                     .frame(width: 34, height: 34)
-                    .background(Circle().fill(Color(uiColor: .secondarySystemBackground)))
+                    .background(Circle().fill(AppTheme.surface))
             }
             .buttonStyle(.plain)
             .disabled(!model.canUndo)
@@ -82,7 +82,7 @@ extension EditorView {
                 Image(systemName: "arrow.uturn.forward")
                     .font(.system(size: 16, weight: .medium))
                     .frame(width: 34, height: 34)
-                    .background(Circle().fill(Color(uiColor: .secondarySystemBackground)))
+                    .background(Circle().fill(AppTheme.surface))
             }
             .buttonStyle(.plain)
             .disabled(!model.canRedo)
@@ -90,7 +90,7 @@ extension EditorView {
 
             Text("粗さ")
                 .font(.footnote)
-                .foregroundStyle(Color(uiColor: .secondaryLabel))
+                .foregroundStyle(AppTheme.inkDim)
 
             Slider(
                 value: Binding(get: { model.activeBlockSize }, set: { model.activeBlockSize = $0 }),
@@ -102,7 +102,7 @@ extension EditorView {
                     .font(.system(size: 16, weight: .bold))
                     .foregroundStyle(.white)
                     .frame(width: 38, height: 38)
-                    .background(Circle().fill(Color.accentColor))
+                    .background(Circle().fill(AppTheme.accent))
             }
             .buttonStyle(.plain)
         }

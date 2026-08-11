@@ -52,7 +52,7 @@ struct FaceSelectorView: View {
                 if showsFaces && model.detectedFaces.isEmpty && model.objectMasks.isEmpty {
                     Text("顔を検出できませんでした")
                         .font(.footnote)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(AppTheme.inkDim)
                         .fixedSize()
                 }
             }
@@ -75,11 +75,11 @@ struct FaceSelectorView: View {
                 Text("矩形")
                     .font(.system(size: 10, weight: .semibold))
             }
-            .foregroundStyle(isOn ? Color.white : Color.accentColor)
+            .foregroundStyle(isOn ? AppTheme.onAccent : AppTheme.ToolAccent.mask)
             .frame(width: chipSize, height: chipSize)
             .background(
                 RoundedRectangle(cornerRadius: 10)
-                    .fill(isOn ? Color.accentColor : Color.accentColor.opacity(0.12))
+                    .fill(isOn ? AppTheme.ToolAccent.mask : AppTheme.ToolAccent.mask.opacity(0.16))
             )
         }
         .buttonStyle(.plain)

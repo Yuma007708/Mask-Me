@@ -88,7 +88,7 @@ struct PhotoToolBar: View {
                     .font(.system(size: 11.5, weight: .medium))
             }
             .frame(width: 74, height: 60)
-            .foregroundStyle(isActive ? Color.accentColor : Color(uiColor: .secondaryLabel))
+            .foregroundStyle(isActive ? AppTheme.accent : AppTheme.inkDim)
         }
         .buttonStyle(.plain)
         .accessibilityIdentifier("editor.photoTool.\(tool.rawValue)")

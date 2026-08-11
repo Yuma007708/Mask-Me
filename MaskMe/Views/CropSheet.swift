@@ -41,10 +41,10 @@ struct CropSheet: View {
             HStack(spacing: 12) {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(Self.title(lock))
-                        .foregroundStyle(Color(uiColor: .label))
+                        .foregroundStyle(AppTheme.ink)
                     Text(Self.usage(lock))
                         .font(.caption)
-                        .foregroundStyle(Color(uiColor: .secondaryLabel))
+                        .foregroundStyle(AppTheme.inkDim)
                 }
                 Spacer()
                 if isSelected {

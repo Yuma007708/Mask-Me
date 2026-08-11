@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// 横スクロール可能なカスタムタブバー（顔／背景、今後拡張）。
+/// 横スクロール可能なカスタムタブバー（顔／背景）。
 /// タブ自体がトグル：タップで選択＋効果ON、選択中タブの再タップで効果OFF。
 /// はっきりした境目は設けず、下部ドックにシームレスに収める。
 struct EffectTabBar: View {
@@ -12,7 +12,6 @@ struct EffectTabBar: View {
                 ForEach(MosaicEditorModel.EffectTab.allCases) { tab in
                     tabButton(tab)
                 }
-                futurePlaceholder
             }
             .padding(.horizontal, 14)
         }
@@ -32,24 +31,13 @@ struct EffectTabBar: View {
                     .font(.system(size: 11.5, weight: .medium))
             }
             .frame(width: 74, height: 60)
-            .foregroundStyle(isActive ? Color.white : Color(uiColor: .secondaryLabel))
+            .foregroundStyle(isActive ? AppTheme.ink : AppTheme.inkDim)
             .background(
                 RoundedRectangle(cornerRadius: 16)
-                    .fill(isActive ? Color.accentColor.opacity(0.18) : .clear)
+                    .fill(isActive ? AppTheme.ToolAccent.mask.opacity(0.20) : .clear)
             )
         }
         .buttonStyle(.plain)
-    }
-
-    private var futurePlaceholder: some View {
-        VStack(spacing: 6) {
-            Image(systemName: "plus")
-                .font(.system(size: 20, weight: .light))
-            Text("追加予定")
-                .font(.system(size: 11.5, weight: .medium))
-        }
-        .frame(width: 62, height: 60)
-        .foregroundStyle(Color(uiColor: .tertiaryLabel))
     }
 
     private func symbol(for tab: MosaicEditorModel.EffectTab) -> String {

@@ -24,7 +24,7 @@ struct PhotoRotateBar: View {
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 10)
-        .background(Color(uiColor: .systemBackground))
+        .background(AppTheme.surfaceDim)
         .accessibilityIdentifier("editor.photoRotateBar")
     }
 
@@ -33,7 +33,7 @@ struct PhotoRotateBar: View {
             Image(systemName: systemName)
                 .font(.system(size: 20, weight: .medium))
                 .frame(width: 44, height: 44)
-                .background(Circle().fill(Color(uiColor: .secondarySystemBackground)))
+                .background(Circle().fill(AppTheme.surface))
         }
         .buttonStyle(.plain)
         .accessibilityIdentifier("editor.photoRotateBar.\(accessibilityID)")
