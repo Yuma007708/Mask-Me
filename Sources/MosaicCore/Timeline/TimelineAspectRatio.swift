@@ -74,10 +74,19 @@ public enum TimelineAspectRatio: String, Codable, Equatable, Sendable, CaseItera
         let shortRatio = min(ratio.width, ratio.height)
         let longRatio = max(ratio.width, ratio.height)
         let longSide = shortSide * longRatio / shortRatio
+        let evenShort = Self.even(shortSide)
+        // **丸めで「選んだ比率の形」が消えないようにする。** 極端に細い素材
+        // （例: 3000x1）だと短辺・長辺の両方が下限の 2 へ丸まり、9:16 を選んでも
+        // 16:9 を選んでも 2x2 の正方形になっていた（縦長・横長の区別が失われる）。
+        // 正方形比率（longRatio == shortRatio）はこの分岐に入らないので、
+        // 1:1 が 2x4 に化けることはない。
+        let evenLong = longRatio > shortRatio
+            ? max(Self.even(longSide), evenShort + 2)
+            : Self.even(longSide)
         // 正方形（幅 == 高さ）は縦扱いに倒す（どちらでも同じ値になる）。
         let isPortrait = ratio.height >= ratio.width
-        return CGSize(width: Self.even(isPortrait ? shortSide : longSide),
-                      height: Self.even(isPortrait ? longSide : shortSide))
+        return CGSize(width: isPortrait ? evenShort : evenLong,
+                      height: isPortrait ? evenLong : evenShort)
     }
 
     /// 偶数（かつ 2 以上）へ丸める。

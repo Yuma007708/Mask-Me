@@ -11,13 +11,15 @@ import XCTest
 /// 2. 映像のピクセル変換とモザイクの正規化写像が**同じ写像**か
 /// 3. 顔ランドマーク・矩形・角度が素材と一緒に回るか（レターボックス併用も含む）
 final class ClipOrientationTests: XCTestCase {
-    /// 全 8 状態（回転 4 × 反転 2）。
-    private let allOrientations: [ClipOrientation] = ClipRotation.allCases.flatMap { rotation in
+    // 全 8 状態（回転 4 × 反転 2）。
+    // 別ファイルの extension（`ClipOrientationAdversarialTests.swift`）から使うため internal。
+    let allOrientations: [ClipOrientation] = ClipRotation.allCases.flatMap { rotation in
         [ClipOrientation(rotation: rotation, isMirrored: false),
          ClipOrientation(rotation: rotation, isMirrored: true)]
     }
 
-    private let samplePoints: [CGPoint] = [
+    // 別ファイルの extension（`ClipOrientationAdversarialTests.swift`）から使うため internal。
+    let samplePoints: [CGPoint] = [
         CGPoint(x: 0, y: 0), CGPoint(x: 1, y: 0), CGPoint(x: 0, y: 1), CGPoint(x: 1, y: 1),
         CGPoint(x: 0.25, y: 0.1), CGPoint(x: 0.8, y: 0.55), CGPoint(x: 0.5, y: 0.5)
     ]
@@ -316,49 +318,6 @@ final class ClipOrientationTests: XCTestCase {
         // `ClipOrientation.mapAngle` の doc 参照）。反転していないので符号もそのまま。
         XCTAssertEqual(placements[0].angle, 0.3, accuracy: 1e-9)
     }
-
-    // MARK: - 編集操作
-
-    func test_分割しても向きが引き継がれる() {
-        let clip = TimelineClip(sourceID: UUID(), sourceStart: 0, sourceEnd: 10,
-                                orientation: ClipOrientation(rotation: .left90, isMirrored: true))
-        let split = TimelineEditOperations.split(clips: [clip], at: 5)
-        XCTAssertEqual(split.count, 2)
-        XCTAssertEqual(split[0].orientation, clip.orientation)
-        XCTAssertEqual(split[1].orientation, clip.orientation)
-    }
-
-    /// **複製しても向きが引き継がれること。**
-    ///
-    /// 複製と向きは別々の機能として実装されたため、マージした時点では
-    /// `TimelineEditOperations.duplicate` が `orientation` を渡しておらず、
-    /// 回したクリップを複製すると**複製先だけ向きが戻っていた**
-    /// （分割は引き継いでいたので、複製だけが漏れていた）。
-    /// git は競合を出さないので、ここが唯一の番人になる。
-    func test_複製しても向きが引き継がれる() {
-        let clip = TimelineClip(sourceID: UUID(), sourceStart: 0, sourceEnd: 10,
-                                orientation: ClipOrientation(rotation: .left90, isMirrored: true))
-        let duplicated = TimelineEditOperations.duplicate(clips: [clip], clipID: clip.id)
-        XCTAssertEqual(duplicated.count, 2)
-        XCTAssertEqual(duplicated[0].orientation, clip.orientation)
-        XCTAssertEqual(duplicated[1].orientation, clip.orientation)
-        // 複製先は別のクリップ（id は新規発番）。
-        XCTAssertNotEqual(duplicated[1].id, clip.id)
-    }
-
-    func test_タイムラインの回転操作がクリップへ反映される() {
-        let clip = TimelineClip(sourceID: UUID(), sourceStart: 0, sourceEnd: 10)
-        let state = TimelineState(clips: [clip])
-        let rotated = state.rotatingClipRight(clipID: clip.id)
-        XCTAssertEqual(rotated.clips[0].orientation.rotation, .right90)
-        let flipped = rotated.flippingClipHorizontally(clipID: clip.id)
-        XCTAssertTrue(flipped.clips[0].orientation.isMirrored)
-        // 画面で見た左右反転なので、回転は逆向きになる（正準形の書き換え）。
-        XCTAssertEqual(flipped.clips[0].orientation.rotation, .left90)
-        // 未知のクリップ id では何も起きない（編集操作の「失敗時は self」契約）。
-        XCTAssertEqual(state.rotatingClipLeft(clipID: UUID()), state)
-    }
-
 }
 
 // MARK: - 補助
@@ -377,7 +336,8 @@ extension ClipOrientationTests {
         CGPoint(x: 1 - point.y, y: point.x)
     }
 
-    private func landmarkSet(at point: CGPoint) -> FaceLandmarkSet {
+    // 別ファイルの extension（`ClipOrientationAdversarialTests.swift`）から使うため internal。
+    func landmarkSet(at point: CGPoint) -> FaceLandmarkSet {
         FaceLandmarkSet(points: [FaceLandmark(x: Float(point.x), y: Float(point.y))],
                         confidence: 1)
     }
@@ -459,9 +419,10 @@ extension ClipOrientationTests {
         }
     }
 
-    private func assertEqual(_ lhs: CGPoint, _ rhs: CGPoint, _ message: String = "",
-                             accuracy: CGFloat = 1e-9,
-                             file: StaticString = #filePath, line: UInt = #line) {
+    // 別ファイルの extension（`ClipOrientationAdversarialTests.swift`）から使うため internal。
+    func assertEqual(_ lhs: CGPoint, _ rhs: CGPoint, _ message: String = "",
+                     accuracy: CGFloat = 1e-9,
+                     file: StaticString = #filePath, line: UInt = #line) {
         XCTAssertEqual(lhs.x, rhs.x, accuracy: accuracy, message, file: file, line: line)
         XCTAssertEqual(lhs.y, rhs.y, accuracy: accuracy, message, file: file, line: line)
     }
