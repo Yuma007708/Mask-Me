@@ -310,6 +310,38 @@ enum AudioMixFactory {
         return volume
     }
 
+    /// 速度変更（`scaleTimeRange` 済みの区間）で**音程を変えないための設定**。
+    ///
+    /// **プレビューと書き出しは必ずこの同じ値を使うこと。** この設定は composition にも
+    /// asset にも保存されない「再生／読み出し側のプロパティ」なので、経路ごとに個別に
+    /// 設定する必要がある。片方だけ変えると**プレビューでは自然なのに書き出すと声が
+    /// 高い**という、書き出すまで気づけない食い違いになる。定数を 1 つにしてあるのは
+    /// その事故を機械的に防ぐため（値を 2 か所へ書き写さない）。
+    ///
+    /// `.spectral` を選ぶ理由:
+    /// - 1/32〜32 倍に対応し、`TimelineClip.rateRange`（0.1〜10）を完全に含む
+    /// - 明示しないと既定がぶれる。**再生の既定は iOS 15 以降 `.timeDomain`、
+    ///   オフライン処理の既定は `.spectral`** なので、無指定だとプレビューと書き出しで
+    ///   アルゴリズムそのものが食い違う
+    /// - `.lowQualityZeroLatency` は倍率が離散値へスナップされるため使えない
+    ///   （`rateRange` は連続値）
+    static let timePitchAlgorithm: AVAudioTimePitchAlgorithm = .spectral
+
+    /// プレビュー（`AVPlayerItem`）へ音程の設定を適用する。
+    ///
+    /// **書き出し側と対で用意してあるのは、値を書き写させないため。** 直接
+    /// `item.audioTimePitchAlgorithm = .spectral` と書くと、片方だけ直したときに
+    /// 食い違いが生まれる（そして書き出すまで気づけない）。
+    static func applyTimePitch(to item: AVPlayerItem) {
+        item.audioTimePitchAlgorithm = timePitchAlgorithm
+    }
+
+    /// 書き出し（`AVAssetReaderAudioMixOutput`）へ音程の設定を適用する。
+    /// プレビュー側（`applyTimePitch(to item:)`）と必ず同じ値になる。
+    static func applyTimePitch(to output: AVAssetReaderAudioMixOutput) {
+        output.audioTimePitchAlgorithm = timePitchAlgorithm
+    }
+
     /// ダッキング曲線のノード列から、合成時刻 `t` の BGM ゲインを線形補間で読む。
     /// ノード列の外側（最初のノードより前・最後のノードより後）は `1`（下げない）。
     /// 別々の声区間に属するノードどうしの間も、両端のゲインが `1` なのでそのまま

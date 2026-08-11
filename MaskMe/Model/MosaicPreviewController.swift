@@ -90,11 +90,10 @@ final class MosaicPreviewController {
 
         let item = AVPlayerItem(asset: asset)
         // rate≠1 クリップ（scaleTimeRange 済みの scaled audio edit）を音程を変えずに
-        // 再生する。iOS 15 以降の既定は timeDomain（音声向けの中品質）なので明示する。
-        // `.spectral` は 1/32〜32 倍に対応し、`TimelineClip.rateRange`（0.1〜10）を
-        // 完全に含む。書き出し側（AVAssetReaderAudioMixOutput）と同じ設定に揃えることで、
-        // プレビューと書き出しで音程が食い違わない。
-        item.audioTimePitchAlgorithm = .spectral
+        // 再生する。値は書き出しと共有の定数から引く（`AudioMixFactory.timePitchAlgorithm`
+        // の doc に理由がある。ここへ直値を書き戻すと、片方だけ直したときに
+        // プレビューと書き出しで音程が食い違う）。
+        AudioMixFactory.applyTimePitch(to: item)
         // トランジション合成・レターボックス（S8）。無変換構成では nil のままで、
         // 従来どおり素の composition をそのまま再生する。
         item.videoComposition = videoComposition

@@ -652,11 +652,9 @@ public final class VideoMosaicExporter: @unchecked Sendable {
                     audioTracks: audioTracks,
                     audioSettings: Self.reencodeDecodeSettings(matching: audioFormat))
                 // rate≠1（scaleTimeRange 済み）のとき音程を保ったまま時間スケールを
-                // 適用する。`.spectral` は 1/32〜32 倍まで対応し、
-                // `TimelineClip.rateRange`（0.1〜10）を完全に含む。
-                // 未設定だとオフライン処理の既定（spectral）に依存することになるため
-                // 明示して固定する。
-                out.audioTimePitchAlgorithm = .spectral
+                // 適用する。値はプレビューと共有の定数から引く
+                // （`AudioMixFactory.timePitchAlgorithm` の doc 参照）。
+                AudioMixFactory.applyTimePitch(to: out)
                 // トランジションの音声クロスフェード・元音声音量（S8）。
                 // パススルー経路には audioMix を適用する手段が無いため、
                 // `decide` が audioMix ありを必ず再エンコードへ倒している。
