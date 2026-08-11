@@ -28,25 +28,64 @@ final class PhotoModeUITests: XCTestCase {
         app = nil
     }
 
-    /// 道具列の 5 つが全部あって、押せる状態にあること。
+    /// 道具列の 5 つが全部あって、**払えば手が届く**こと。
     ///
     /// **1 つずつ名前で確かめる。** 個数だけを数えると、別の道具が増えたときに
     /// 消えた道具を見逃す。
-    func test_写真の道具が5つとも押せる() {
+    ///
+    /// 段は 1 本にまとめてあり、道具は画面幅に収まらない（横スクロールが前提）。
+    /// なので「最初から見えているか」ではなく「払えば届くか」を条件にする
+    /// ——ここを `isHittable` の即判定にすると、右端の道具が必ず落ちる。
+    func test_写真の道具が5つとも払えば押せる() {
         for tool in ["colorGrade", "crop", "text", "sticker", "rotate"] {
-            let button = app.buttons["editor.photoTool.\(tool)"]
-            XCTAssertTrue(button.waitForExistence(timeout: 10), "道具が無い: \(tool)")
-            XCTAssertTrue(button.isHittable, "道具が押せない: \(tool)")
+            let button = reveal(app.buttons["editor.photoTool.\(tool)"], name: tool)
+            XCTAssertTrue(button.isHittable, "払っても道具に手が届かない: \(tool)")
         }
     }
 
     /// モザイクを掛ける対象（顔・背景）のトグルが両方あって押せること。
-    func test_モザイクの対象が2つとも押せる() {
+    ///
+    /// **こちらは段の先頭に置いてあるので、払わずに見えているはず。**
+    /// アプリの目的そのものの操作が、初手でスクロールを要求されてはいけない。
+    func test_モザイクの対象が2つとも最初から押せる() {
         for tab in ["face", "background"] {
             let button = app.buttons["editor.effectTab.\(tab)"]
             XCTAssertTrue(button.waitForExistence(timeout: 10), "対象が無い: \(tab)")
-            XCTAssertTrue(button.isHittable, "対象が押せない: \(tab)")
+            XCTAssertTrue(button.isHittable, "対象が最初から押せない（段の先頭に無い）: \(tab)")
         }
+    }
+
+    /// 段を左へ払って要素を画面内へ入れる。既に画面内なら何もしない。
+    ///
+    /// **判定に `isHittable` を使わない。** 完全に画面外の要素では
+    /// 「Activation point invalid」で*例外*になり、false が返ってこない
+    /// （＝払う前に落ちるので、スクロールで届くかどうかを永久に確かめられない）。
+    /// 枠が窓の中に入っているかを自分で見て、入ってから初めて `isHittable` を読む。
+    private func reveal(_ element: XCUIElement, name: String,
+                        file: StaticString = #filePath, line: UInt = #line) -> XCUIElement {
+        XCTAssertTrue(element.waitForExistence(timeout: 10), "道具が無い: \(name)",
+                      file: file, line: line)
+        let dock = app.scrollViews["editor.photoDock"]
+        XCTAssertTrue(dock.waitForExistence(timeout: 10), "道具の段が見つからない",
+                      file: file, line: line)
+        var swipes = 0
+        while !isOnScreen(element), swipes < 6 {
+            dock.swipeLeft()
+            swipes += 1
+        }
+        XCTAssertTrue(isOnScreen(element),
+                      "\(swipes) 回払っても道具が画面に入ってこない: \(name)",
+                      file: file, line: line)
+        return element
+    }
+
+    /// 要素の中心が窓の中にあるか。`isHittable` と違って例外を投げない。
+    private func isOnScreen(_ element: XCUIElement) -> Bool {
+        guard element.exists else { return false }
+        let frame = element.frame
+        guard frame.width > 0, frame.height > 0 else { return false }
+        return app.windows.firstMatch.frame
+            .contains(CGPoint(x: frame.midX, y: frame.midY))
     }
 
     /// 「顔」を押すと粗さの調整バーが降りてくること（＝タブが効果の ON/OFF を持つ

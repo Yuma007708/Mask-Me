@@ -55,7 +55,7 @@ enum PhotoTool: String, CaseIterable, Identifiable {
         case .colorGrade: return "slider.horizontal.3"
         case .crop: return "crop"
         case .text: return "textformat"
-        // **`face.smiling` は使わない。** 同じ段の下にある「顔」（モザイクを掛ける
+        // **`face.smiling` は使わない。** 同じ段に並ぶ「顔」（モザイクを掛ける
         // 対象）が同じ絵で、色だけ違う状態になっていた。意味の違う 2 つが同じ絵だと
         // 色分けの効果が消える。
         case .sticker: return "sparkles"
@@ -64,77 +64,53 @@ enum PhotoTool: String, CaseIterable, Identifiable {
     }
 }
 
-/// 写真ドックの色調補正入口。`EffectTabBar` と横並びに置く軽量な 1 行。
+/// 写真ドックのチップ 1 個ぶんの見た目。
 ///
-/// タップで詳細（4 スライダー + プリセット）を `TimelineColorGradeSheet`（既存・動画側と
-/// 共通）で開く。写真は「クリップ」を持たないので、シートの「すべてのクリップに適用」は
-/// 使わず、`onApply` と同じ 1 枚だけへの適用に揃える（呼び出し側の `EditorView` 参照）。
-struct PhotoToolBar: View {
-    @ObservedObject var model: MosaicEditorModel
-    @Binding var showColorGradeSheet: Bool
-    /// テキスト・ステッカー入力シート（既存 `TimelineTextInputSheet`）の提示条件。
-    /// 文字・ステッカーどちらのボタンから開いても同じシートを共有する
-    /// （`PhotoTool.text` / `.sticker` の doc 参照）。
-    @Binding var showTextInputSheet: Bool
-    /// `PhotoRotateBar`（左90°／右90°／左右反転の3ボタン）の表示・非表示（写真モード底上げ 第6段）。
-    @Binding var showRotateBar: Bool
+/// **モザイクの対象（`EffectTabBar.tabButton`）と加工の道具（`PhotoToolButton`）で
+/// 共有する。** 同じ段に並ぶ以上、大きさ・文字・色の載せ方が少しでも違うと
+/// 段が揃って見えない。見た目を変えるならここ 1 か所を変える。
+///
+/// **色は絵だけに載せ、文字は白のまま**（動画側 `TimelineToolbarView.button` と
+/// 同じ流儀。両方を色にすると読みにくくなる）。`isActive` のときは絵の背景を
+/// 濃くして「触ってある／ON である」ことを示す。
+struct PhotoDockChip: View {
+    let symbolName: String
+    let title: String
+    let accent: Color
+    let isActive: Bool
 
     var body: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 8) {
-                ForEach(PhotoTool.allCases) { tool in
-                    toolButton(tool)
-                }
-            }
-            .padding(.horizontal, 14)
+        VStack(spacing: 6) {
+            Image(systemName: symbolName)
+                .font(.system(size: 19, weight: .regular))
+                .foregroundStyle(accent)
+                .frame(width: 38, height: 32)
+                .background(accent.opacity(isActive ? 0.34 : 0.16),
+                            in: RoundedRectangle(cornerRadius: AppTheme.chipRadius,
+                                                 style: .continuous))
+            Text(title)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(AppTheme.ink)
         }
+        .frame(width: 74, height: 62)
     }
+}
 
-    private func toolButton(_ tool: PhotoTool) -> some View {
-        let isActive = isOn(tool)
-        return Button {
-            activate(tool)
-        } label: {
-            // **色は絵だけに載せ、文字は白のまま**（動画側 `TimelineToolbarView.button`
-            // と同じ流儀。両方を色にすると読みにくくなる）。編集済みの道具は
-            // 絵の背景を濃くして「触ってある」ことを示す。
-            VStack(spacing: 6) {
-                Image(systemName: tool.symbolName)
-                    .font(.system(size: 19, weight: .regular))
-                    .foregroundStyle(tool.accent)
-                    .frame(width: 38, height: 32)
-                    .background(tool.accent.opacity(isActive ? 0.34 : 0.16),
-                                in: RoundedRectangle(cornerRadius: AppTheme.chipRadius,
-                                                     style: .continuous))
-                Text(tool.title)
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(AppTheme.ink)
-            }
-            .frame(width: 74, height: 62)
+/// 加工の道具 1 個ぶんのボタン。並べるのは `EffectTabBar`（写真ドックの唯一の段）。
+///
+/// 押した結果（シートを開く・段を降りる・帯を出す）は呼び出し側が持つ。
+/// ここは見た目と識別子だけを受け持つ。
+struct PhotoToolButton: View {
+    let tool: PhotoTool
+    let isActive: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            PhotoDockChip(symbolName: tool.symbolName, title: tool.title,
+                          accent: tool.accent, isActive: isActive)
         }
         .buttonStyle(.plain)
         .accessibilityIdentifier("editor.photoTool.\(tool.rawValue)")
-    }
-
-    /// チップの点灯 = 無編集ではない（現在値がプリセット「なし」から動いている）。
-    /// **テキスト・ステッカーは「1件でも置いてあるか」で点灯を決める**
-    /// （個別の役割では判定しない。ボタンを分けたのは入口の見た目だけで、
-    /// 状態としては 1 本の `photoEdit.texts` を共有するため）。
-    private func isOn(_ tool: PhotoTool) -> Bool {
-        switch tool {
-        case .colorGrade: return !model.photoEdit.colorGrade.isIdentity
-        case .crop: return !model.timeline.crop.isFull
-        case .text, .sticker: return !model.photoEdit.texts.isEmpty
-        case .rotate: return !model.photoEdit.orientation.isIdentity
-        }
-    }
-
-    private func activate(_ tool: PhotoTool) {
-        switch tool {
-        case .colorGrade: showColorGradeSheet = true
-        case .crop: model.enterDock(.crop)
-        case .text, .sticker: showTextInputSheet = true
-        case .rotate: showRotateBar.toggle()
-        }
     }
 }

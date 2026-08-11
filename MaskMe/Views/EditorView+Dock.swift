@@ -56,9 +56,12 @@ extension EditorView {
 
             // 色調補正（写真モード底上げ 第1段）。`EffectTabBar`（顔／背景の ON/OFF 効果）
             // とは別の道具列として横並びに置く（`PhotoTool` の doc 参照）。
-            PhotoToolBar(model: model, showColorGradeSheet: $showPhotoColorGradeSheet,
-                        showTextInputSheet: $showPhotoTextInputSheet, showRotateBar: $showPhotoRotateBar)
-            EffectTabBar(model: model)
+            // 道具の段は 1 本だけ（`EffectTabBar` の doc: モザイクの対象と加工の道具を
+            // 1 段の横スクロールにまとめてある）。ここに 2 本目を積むと、
+            // プレビューの高さが削られ、道具を探すのに縦方向も見ることになる。
+            EffectTabBar(model: model, showColorGradeSheet: $showPhotoColorGradeSheet,
+                         showTextInputSheet: $showPhotoTextInputSheet,
+                         showRotateBar: $showPhotoRotateBar)
         }
         .frame(maxWidth: .infinity)
         .background(AppTheme.surfaceDim)
