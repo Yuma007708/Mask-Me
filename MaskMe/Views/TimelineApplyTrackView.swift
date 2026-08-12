@@ -26,12 +26,23 @@ enum TimelineMetrics {
     static let layerRowHeight: CGFloat = applyTrackHeight
     /// レイヤー段の左端に置く固定アイコン列の幅。
     static let layerRailWidth: CGFloat = 30
-    /// レイヤー段が見えている高さ。**2 段ぶん**。
+    /// 3 段目を覗かせる量。
+    ///
+    /// **「下にもう段がある」ことを見せるためだけの高さ。** これが 0 だと、
+    /// 器がちょうど 2 段ぶんで切れて下端が段の切れ目と一致し、**縦に払える
+    /// ことに気づく手がかりが画面に一切無い**（左のアイコン列も 2 個で切れる）。
+    /// 実際に文字・ステッカーの段が存在するのに、無いのと同じ状態になっていた。
+    ///
+    /// 段をもう 1 本ぶん見せる（+32pt）のではなく頭だけ覗かせるのは、
+    /// 広げたぶんだけ必ずプレビューが縮むため。10pt なら段の上端の丸みと
+    /// 地の色の差が見えるので「続きがある」ことは伝わる。
+    static let layerPeekHeight: CGFloat = 10
+    /// レイヤー段が見えている高さ。**2 段ぶん＋3 段目の頭**。
     ///
     /// ここを段数ぶんに広げてはいけない。段は今後も増える（音声・テキスト・
     /// キャプション…）ので、広げるとそのぶん必ずプレビューが縮む。
     /// 見えるのは 2 段までにして、残りは縦スクロールで辿る（VLLO と同じ）。
-    static let layerViewportHeight: CGFloat = layerRowHeight * 2 + trackSpacing
+    static let layerViewportHeight: CGFloat = layerRowHeight * 2 + trackSpacing + layerPeekHeight
     /// トリムハンドルの**見た目の幅**。適用区間の端ハンドルとも共通（操作感を揃えるため）。
     ///
     /// **当たり判定はこの幅ではなく `minimumTapTarget`（44pt）**。見た目を 44 まで太らせると

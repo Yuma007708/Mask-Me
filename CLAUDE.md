@@ -66,10 +66,11 @@ xcodebuild test \
   -skip-testing:MaskMeTests/FaceIdentityAccuracyTests \
   -skip-testing:MaskMeTests/ExportSpeedMeasurementTests \
   -skip-testing:MaskMeTests/DValidLiveModelTests \
-  -skip-testing:MaskMeTests/SampleFalsePositiveTests
+  -skip-testing:MaskMeTests/SampleFalsePositiveTests \
+  -skip-testing:MaskMeTests/DiagProfileMissTests
 ```
 
-外した 7 本が全体 972 秒中 788 秒（81%）を占める。内訳と外してよい根拠:
+外した 8 本が全体 1063 秒中 879 秒（83%）を占める。内訳と外してよい根拠:
 
 | スイート | 時間 | 性質 |
 |---|---|---|
@@ -80,11 +81,17 @@ xcodebuild test \
 | `ExportSpeedMeasurementTests` | 96s | **速度計測**（合否ではない） |
 | `DValidLiveModelTests` | 90s | 実動画の検出 |
 | `SampleFalsePositiveTests` | 81s | 誤検出率 |
+| `DiagProfileMissTests` | 91s | **診断**（合否の門番ではない） |
 
 - **コミット前は全部戻して 1 回回す。** とくに**検出・同定・描画・書き出しを触ったら、検出精度の 3 本
   （`RealFaceMosaicTests` / `FaceIdentityAccuracyTests` / `SampleFalsePositiveTests`）は必ず戻す**。
   検出の退行は誤モザイクより重い（プライバシーアプリ）ので、ここだけは速さと引き換えにしない。
 - テストを**削除しない**。`-skip-testing` で外すだけにする（いつでも戻せる状態を保つ）。
+- **重いスイートを足すと、通し実行の散発失敗が増える。** `DiagProfileMissTests`（91s・書き出しを含む）を
+  足した回で `ExportSpeedMeasurementTests` が 180 秒のタイムアウトに掛かり、`TimelineGestureUITests` の
+  1 本も落ちた。**どちらも単体では通る**（それぞれ 91s / 15s）。実行基盤の取り合いであって欠陥ではない。
+  通し実行で落ちたら、まず単体で再現するか確かめる（この判定手順は下の「`** TEST FAILED **` なのに
+  失敗 0 件なら」と同じ趣旨）。
 - `MaskMeTests/Fixtures/` に実画像・動画・`face_landmarker.task` を配置（未配置は `XCTSkip`）。
 - 実動画 5 本 × backend の網羅検証は `.github/workflows/dvalid.yml` を `workflow_dispatch` で手動起動。
 
