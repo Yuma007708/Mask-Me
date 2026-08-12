@@ -21,3 +21,21 @@ extension TimelineState {
         return result
     }
 }
+
+extension TimelineState {
+    // MARK: - レターボックスの埋め方
+
+    /// 余白（レターボックス）の埋め方を設定する。同じ値なら self を返す
+    /// （`settingAspectRatio` と同じ契約）。
+    ///
+    /// **配置にも座標の写像にも触らない。** これは余白の見た目だけを決める値で、
+    /// 素材の置き場所（`TimelineRenderLayout` / `RenderPlacement`）とは無関係である。
+    /// そのため比率やクロップと違い、他の値をリセットする必要が無い。
+    public func settingBackground(_ background: TimelineBackground) -> TimelineState {
+        let normalized = background.clamped
+        guard normalized != self.background else { return self }
+        var result = self
+        result.background = normalized
+        return result
+    }
+}

@@ -5,11 +5,48 @@ import Foundation
 /// 状態そのものの編集規則（`TimelineState.swift`）と保存形式の後方互換は
 /// 変更理由が別なので、ファイルを分けてある。
 extension TimelineState {
+    // MARK: - 永続化スキーマ版
+    //
+    // Codable 本体（`schemaVersion` 付きのエンコード・v1 → v2 移行）は
+    // `TimelineStateCodable.swift`。
+
+    /// 現在の永続化スキーマ版。
+    ///
+    /// - v1: `MosaicApplyRange` に `clipID` が無く、**空 = 全区間適用**だった。
+    /// - v2: `MosaicApplyRange` が `clipID` を持ち、**空 = 適用なし（全区間 OFF）**。
+    /// - v3: `audioItems`（BGM）を追加。**v2 以前の JSON は BGM 無しとして読める**
+    ///   （追加しただけで既存キーの意味は変えていない）ので、移行処理は要らない。
+    /// - v4: `textItems`（テキスト）を追加。v3 と同じくキーを足しただけ。
+    /// - v5: `aspectRatio`（出力の画面比率）を追加。**v4 以前の JSON はキーが無いので
+    ///   `.source`（素材に合わせる ＝ 従来挙動）として復元する**。既存キーの意味は
+    ///   変えていないので移行処理は要らない。
+    /// - v6: `TextItem.role`（`.text` / `.sticker`）と `clipAudioMuteRanges`
+    ///   （クリップ内消音区間）を追加。どちらもキーの有無だけで後方互換を取る
+    ///   （`role` は無い・未知の文字列なら `.text`、消音区間は無ければ空配列）ので
+    ///   移行処理は要らない。**この 2 つは別ブランチで実装され、マージで同じ版へ
+    ///   合流した**（片方だけを見て「v6 = ステッカー」と読まないこと）。
+    /// - v7: `TimelineClip.colorGrade`（色調補正）と、`clipDuckRanges` /
+    ///   `AudioItem.duckingGain`（BGM ダッキング）を追加。**v6 と同じく別ブランチで
+    ///   実装され、マージで同じ版へ合流した**（片方だけを見て「v7 = 色調補正」と読まないこと）。
+    ///   `colorGrade` は `TimelineState` のトップレベルキーではなく `TimelineClip` 自身の
+    ///   Codable にキーが増えただけなので `TimelineStateCodable` 側の移行処理は要らない
+    ///   （`orientation` と同じ規約。キーが無い v6 以前の下書きは `ColorGrade.identity` =
+    ///   無補正で復元される）。ダッキング側もキーの有無だけで後方互換を取る。
+    ///   その後 `TimelineClip.transform`（クリップ単位の拡大縮小・位置）も同じ v7 へ
+    ///   合流した（3 つ目。同じくキーの有無だけで後方互換を取るので移行処理は要らない。
+    ///   キーが無い下書きは `ClipTransform.identity` = 無変形で復元される）。
+    /// - `crop`（出力枠のクロップ）が 4 つ目として合流。`aspectRatio` と同じくトップ
+    ///   レベルのキーが増えただけで意味の反転が無いため、**スキーマ版は上げない**
+    ///   （キーが無ければ `.full`＝クロップなしで復元する）。
+    /// - `background`（レターボックスの埋め方）が 5 つ目。同じ理由でスキーマ版は上げない
+    ///   （キーが無ければ黒＝従来と 1 ピクセルも変わらない見た目で復元する）。
+    public static let currentSchemaVersion = 7
+
     // MARK: - Codable（後方互換）
 
     private enum CodingKeys: String, CodingKey {
         case clips, transitions, applyRanges, clipAudioMuteRanges, clipDuckRanges, audioItems, textItems,
-             sources, aspectRatio, crop, schemaVersion
+             sources, aspectRatio, crop, background, schemaVersion
     }
 
     /// `clipID` を持たない v1 の適用区間（デコード専用）。
@@ -58,6 +95,11 @@ extension TimelineState {
         // 型として読めない」（数値や文字列が来た等）非常時だけの二重の安全網。
         let decodedCrop: CropRect?? = try? container.decodeIfPresent(CropRect.self, forKey: .crop)
         self.crop = (decodedCrop ?? nil) ?? .full
+        // レターボックスの埋め方（`background` キー追加時に足した）。**キーが無い旧下書きも、
+        // 壊れた値も黒**（＝従来の見た目）で復元する。`crop` と同じ二重の安全網。
+        let decodedBackground: TimelineBackground?? = try? container.decodeIfPresent(
+            TimelineBackground.self, forKey: .background)
+        self.background = ((decodedBackground ?? nil) ?? .default).clamped
         let version = try container.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? 1
         if version >= 2 {
             self.applyRanges = try container.decode([MosaicApplyRange].self, forKey: .applyRanges)
@@ -93,6 +135,7 @@ extension TimelineState {
         try container.encode(sources, forKey: .sources)
         try container.encode(aspectRatio, forKey: .aspectRatio)
         try container.encode(crop, forKey: .crop)
+        try container.encode(background, forKey: .background)
         try container.encode(Self.currentSchemaVersion, forKey: .schemaVersion)
     }
 

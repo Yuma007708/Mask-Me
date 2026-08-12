@@ -142,6 +142,10 @@ struct TimelineCompositionBuilder {
                clipAudioMuteRanges: [ClipAudioMuteRange] = [],
                clipDuckRanges: [ClipDuckRange] = [],
                crop: CropRect = .full,
+               // **`background` という名前は使わない。** この関数の中では既に
+               // BGM トラック（`let background = ...`）がその名前を使っており、
+               // 同名にすると「音の背景」と「絵の余白」が同じ語で 2 つ存在する。
+               letterbox: TimelineBackground = .default,
                isPro: Bool) async throws -> Built {
         let mapping = TimelineMapping(clips: clips, transitions: transitions)
         // 重なりがあるときだけ 2 トラックへ交互配置する。重なりが無い構成では
@@ -225,7 +229,7 @@ struct TimelineCompositionBuilder {
 
         let (videoComposition, layout) = VideoCompositionFactory.make(
             placements: placements, overlaps: mapping.overlaps,
-            totalDuration: totalDuration, crop: crop,
+            totalDuration: totalDuration, crop: crop, background: letterbox,
             preCropFrameOverride: preCropFrameOverride, renderSizeOverride: renderSizeOverride)
         let audioMix = AudioMixFactory.make(
             placements: placements, overlaps: mapping.overlaps, tracks: survivingAudio,

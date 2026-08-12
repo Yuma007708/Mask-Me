@@ -921,6 +921,7 @@ public final class MosaicEditorModel: ObservableObject {
                            aspectRatio: timeline.aspectRatio,
                            clipAudioMuteRanges: timeline.clipAudioMuteRanges,
                            crop: timeline.crop,
+                           letterbox: timeline.background,
                            isPro: entitlements.isPro)
                 let isStale = loadGeneration != timelineGeneration
                 if !isStale {

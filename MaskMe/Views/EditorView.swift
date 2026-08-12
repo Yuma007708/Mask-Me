@@ -93,6 +93,18 @@ struct EditorView: View {
         // （`EditorView+Preview.swift` の `Color.black`）は黒のままでよい——あちらは
         // 映像の周りの余白で、映像の色を正しく見るための地。
         .background(AppTheme.background.ignoresSafeArea())
+        // **ズームのリセットは画面比率そのものを見る。**
+        //
+        // プレビュー側（`EditorView+Preview.swift`）にも
+        // `.onChange(of: model.croppedPreviewImage?.size)` があるが、あれは
+        // **プレビューが画面に生きていることが前提**である。比率を選ぶシートを
+        // 全画面（`presentationDetents([.large])`）にした途端、プレビューが覆われて
+        // その `onChange` が発火せず、**比率を変えたのにズームが拡大したまま残った**
+        // （UI テスト `test_afterAspectRatioChange_zoomResets` が捕まえた）。
+        //
+        // ここ（`EditorView` の根）はシートを出している主体なので、シートの高さに
+        // 関係なく生きている。**シートの見た目の都合でリセットが消える経路を塞ぐ。**
+        .onChange(of: model.timeline.aspectRatio) { _ in zoomSession.reset() }
         .navigationTitle(model.mode == .photo ? "写真編集" : "動画編集")
         .navigationBarTitleDisplayMode(.inline)
         .navigationBarBackButtonHidden(true)
