@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  アプリの Privacy Manifest（App Store 提出に必須）。
+
+  ## 収集するデータは無い
+
+  このアプリはネットワーク通信を一切しない（`URLSession` / `URLRequest` の
+  使用箇所がゼロ。課金は StoreKit 2 が Apple のサーバとやり取りするだけで、
+  アプリ自身がデータを送る経路は無い）。よって:
+
+  - `NSPrivacyTracking` は false、`NSPrivacyTrackingDomains` は空
+  - `NSPrivacyCollectedDataTypes` は空
+
+  写真・動画・顔の位置はすべて端末内で処理し、外へ出さない。
+  カメラ撮影は**モザイクを焼いた後のメディアだけ**を保存する（原本を残さない）。
+
+  ## 宣言している「使用理由の必要な API」
+
+  Apple の承認済み理由コードは
+  https://developer.apple.com/documentation/bundleresources/describing-use-of-required-reason-api
+  に列挙されている。**ここに書く理由は実際の呼び出し箇所と一致していること。**
+  一致しない宣言は、リジェクトされないとしても嘘になる。
+
+  | 分類 | 理由 | 実際の呼び出し箇所 |
+  |---|---|---|
+  | UserDefaults | CA92.1（このアプリ自身しか読み書きしない） | `Entitlements` / `DetectionSettings` / `CaptureSettings` / `StoreKitEntitlementProvider` / `HomeView`（案内の既読）|
+  | ファイル日時 | DDA9.1（アプリのコンテナ内のファイルの日時・サイズ）| `DraftStore.sweep`（tmp の古い一時ファイルを消すために更新日時を見る）/ `UITestBootstrap`（ファイルサイズ）|
+  | 空き容量 | E174.1（書き込みに足りるかを確認する）| `MosaicEditorModel.storageShortageMessage`（書き出し前に見積もりと空きを比べ、足りなければ**書き出しを止めて理由を出す**＝挙動がユーザーから見て変わる）|
+
+  ファイル日時に C617.1（日時をユーザーに表示する）は**宣言しない**。
+  下書き一覧に出している日時（`EditingDraft.updatedAt`）は JSON に保存した値で、
+  ファイルの更新日時ではないため。
+
+  **API の使い方を変えたらこの表も直すこと。** 特に:
+  - 通信を足したら `NSPrivacyCollectedDataTypes` の再検討が要る
+  - 空き容量を「表示」する UI を足したら 85F4.1 の追加が要る
+-->
+<plist version="1.0">
+<dict>
+	<key>NSPrivacyTracking</key>
+	<false/>
+	<key>NSPrivacyTrackingDomains</key>
+	<array/>
+	<key>NSPrivacyCollectedDataTypes</key>
+	<array/>
+	<key>NSPrivacyAccessedAPITypes</key>
+	<array>
+		<dict>
+			<key>NSPrivacyAccessedAPIType</key>
+			<string>NSPrivacyAccessedAPICategoryUserDefaults</string>
+			<key>NSPrivacyAccessedAPITypeReasons</key>
+			<array>
+				<string>CA92.1</string>
+			</array>
+		</dict>
+		<dict>
+			<key>NSPrivacyAccessedAPIType</key>
+			<string>NSPrivacyAccessedAPICategoryFileTimestamp</string>
+			<key>NSPrivacyAccessedAPITypeReasons</key>
+			<array>
+				<string>DDA9.1</string>
+			</array>
+		</dict>
+		<dict>
+			<key>NSPrivacyAccessedAPIType</key>
+			<string>NSPrivacyAccessedAPICategoryDiskSpace</string>
+			<key>NSPrivacyAccessedAPITypeReasons</key>
+			<array>
+				<string>E174.1</string>
+			</array>
+		</dict>
+	</array>
+</dict>
+</plist>
