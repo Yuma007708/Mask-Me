@@ -380,6 +380,22 @@ public final class VideoMosaicExporter: @unchecked Sendable {
     /// 対して走るので既に合成フレーム基準＝写像不要）。無変換構成では恒等。
     private var renderLayout: TimelineRenderLayout = .identity
 
+    /// レターボックス（余白）の埋め方。export 開始時に設定する。
+    ///
+    /// **プレビューと同じ値を渡すこと。** 片方だけ変わると、画面では色が付いているのに
+    /// 書き出すと黒帯、という書き出すまで気づけない食い違いになる。
+    private var letterbox: TimelineBackground = .default
+
+    /// 余白を塗るのに使う「素材が置かれている範囲」（合成フレーム基準・正規化）。
+    /// export 開始時に `TimelineRenderLayout.contentBounds`（全クリップの配置矩形の和）で求める。
+    ///
+    /// **時刻ごとではなく全体の和にしてある。** 時刻ごとに違う矩形を使うと、
+    /// クリップの切り替わりで余白の形が飛ぶ（黒帯が出たり消えたりする）。
+    /// 和を使えば「どのクリップも描かない場所」だけが塗られるので、
+    /// **素材の上に塗ってしまう事故が構造的に起きない**——これは
+    /// 「モザイクの上に余白を塗って顔を出す」形の事故を防ぐ意味でも重要。
+    private var letterboxContentRect: CGRect = CGRect(x: 0, y: 0, width: 1, height: 1)
+
     /// 物体マスクの自動追跡（O2）の軌跡。export 開始時に設定する。
     ///
     /// **プレビューと同じ軌跡を渡すこと。** 追跡はオプティカルフローの逐次処理なので、
@@ -526,6 +542,7 @@ public final class VideoMosaicExporter: @unchecked Sendable {
         /// 穴が開く形にしない）。
         hasBackgroundAudio: Bool = false,
         renderLayout: TimelineRenderLayout = .identity,
+        letterbox: TimelineBackground = .default,
         faceEnabled: Bool = true,
         objectEnabled: Bool = true,
         backgroundEnabled: Bool = false,
@@ -562,6 +579,8 @@ public final class VideoMosaicExporter: @unchecked Sendable {
         // ので、両経路のゲート結果が必ず一致する。
         self.applyRanges = MosaicApplyGate.effectiveRanges(applyRanges, mapping: mapping)
         self.renderLayout = renderLayout
+        self.letterbox = letterbox.clamped
+        self.letterboxContentRect = renderLayout.contentBounds
         self.objectTracks = objectTracks
         self.textItems = textItems
         self.textTotalDuration = mapping.totalDuration
@@ -1328,13 +1347,27 @@ public final class VideoMosaicExporter: @unchecked Sendable {
             )
         }
 
+        // レターボックス（余白）の塗り（S13）。**モザイクの後・テキストの前**に置く。
+        //
+        // - モザイクの**後**でなければならない: ぼかしはこのテクスチャを読んで作るので、
+        //   焼く前を渡すと素顔が余白へ拡大されて出る（`TimelineBackground` の型 doc）。
+        // - テキストの**前**でなければならない: 文字・ステッカーは出力枠基準で置かれ、
+        //   余白の上にも置ける。後に塗ると、余白に置いた文字が塗り潰される。
+        //
+        // 塗るのは `letterboxContentRect`（全クリップの配置矩形の和）の**外側だけ**。
+        // 中は 1 ピクセルも触らないので、モザイクを塗り潰して顔を出す形の事故は起きない。
+        let letterboxedTexture = LetterboxCompositor.apply(
+            background: letterbox, contentRect: letterboxContentRect,
+            renderer: renderer, input: outputTexture)
+
         // テキスト（E3-2）は「モザイク → テキスト」の順で常に最後に重ねる。
         // プレビューと同じ `TextOverlayCompositor` を通すことで、位置・サイズの
         // px 換算とアニメーションの数式が両経路で一致する。
         let texturedTexture = textItems.isEmpty
-            ? outputTexture
+            ? letterboxedTexture
             : TextOverlayCompositor.apply(items: textItems, at: textCompositionTime,
-                                          renderer: renderer, cache: textOverlayCache, input: outputTexture)
+                                          renderer: renderer, cache: textOverlayCache,
+                                          input: letterboxedTexture)
 
         // 無料プランの透かし（課金 P2）を「モザイク → テキスト → 透かし」の順で最後に重ねる。
         // プレビューと同じ `WatermarkCompositor` / `ExportWatermark` を通す

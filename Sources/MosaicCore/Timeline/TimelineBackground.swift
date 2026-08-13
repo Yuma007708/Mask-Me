@@ -66,12 +66,18 @@ public struct TimelineBackground: Equatable, Sendable, Codable {
     /// 値を安全な範囲へ収める。**非有限は既定へ落とす**（NaN が描画層まで流れると
     /// 実装依存で化ける。`RGBAColor.clamped` と同じ流儀）。
     ///
-    /// ぼかしの強さは 0.05 を下限にする。0 を許すと「ぼかしを選んだのに何も変わらない」
-    /// という、設定が壊れているのか仕様なのか区別できない状態が作れてしまう。
+    /// ぼかしの強さは **0.25 を下限**にする。
+    ///
+    /// 0 を許すと「ぼかしを選んだのに何も変わらない」という、設定が壊れているのか
+    /// 仕様なのか区別できない状態が作れる。加えて、**弱すぎるぼかしは背景ではなく
+    /// 不具合に見える**——実際に 0.2 で書き出した画を見ると、余白にほぼ鮮明な拡大コピーが
+    /// 出て「同じ絵が二重に出ている」ようにしか見えなかった（`DiagLetterboxLookTests`
+    /// が出す画で確認）。中央に写っているものなので新たな情報が出るわけではないが、
+    /// 意図した見た目ではない。
     public var clamped: TimelineBackground {
         var result = self
         result.color = color.clamped
-        result.blurStrength = blurStrength.isFinite ? min(max(blurStrength, 0.05), 1) : 0.6
+        result.blurStrength = blurStrength.isFinite ? min(max(blurStrength, 0.25), 1) : 0.6
         return result
     }
 

@@ -357,3 +357,98 @@ kernel void orientationKernel(texture2d<float, access::read>  inTexture  [[textu
     float4 c = inTexture.read(uint2(uint(px), uint(py)));
     outTexture.write(c, gid);
 }
+
+// ===========================================================================
+// Letterbox background (S13)
+//
+// Fills the margin that appears when the source does not fill the output
+// frame. Two modes: solid colour, or a blurred, enlarged copy of the content.
+//
+// **The input MUST already have the mosaic burned in.** The blur is built by
+// sampling this same texture, so feeding a pre-mosaic frame would put the
+// unmasked faces into the margin, enlarged. Blur is not a masking technique.
+// See `TimelineBackground` (Swift side) for the full reasoning.
+//
+// Field order/types below must match the Swift-side parameter struct exactly
+// (same convention as `ColorGradeParams` / `TextOverlayParams`).
+// ===========================================================================
+
+struct LetterboxParams {
+    // Content rect in normalised frame coordinates (origin top-left).
+    float contentMinX;
+    float contentMinY;
+    float contentMaxX;
+    float contentMaxY;
+    // Solid fill, also used where the blur has no content to sample.
+    float fillR;
+    float fillG;
+    float fillB;
+    // Box-blur radius in pixels. 0 means "solid fill only".
+    float blurRadius;
+    uint  width;
+    uint  height;
+};
+
+kernel void letterboxKernel(texture2d<float, access::read>  inTexture  [[texture(0)]],
+                            texture2d<float, access::write> outTexture [[texture(1)]],
+                            constant LetterboxParams        &params    [[buffer(0)]],
+                            uint2                            gid       [[thread_position_in_grid]]) {
+    if (gid.x >= params.width || gid.y >= params.height) {
+        return;
+    }
+
+    float w = float(params.width);
+    float h = float(params.height);
+    float2 uv = (float2(gid) + 0.5) / float2(w, h);
+
+    // Inside the content rect the frame is passed through untouched. The
+    // margin is the only thing this kernel is allowed to change.
+    if (uv.x >= params.contentMinX && uv.x <= params.contentMaxX &&
+        uv.y >= params.contentMinY && uv.y <= params.contentMaxY) {
+        outTexture.write(inTexture.read(gid), gid);
+        return;
+    }
+
+    float3 fill = float3(params.fillR, params.fillG, params.fillB);
+    if (params.blurRadius <= 0.0) {
+        outTexture.write(float4(fill, 1.0), gid);
+        return;
+    }
+
+    // Content rect in pixels.
+    float cx0 = params.contentMinX * w;
+    float cy0 = params.contentMinY * h;
+    float cx1 = params.contentMaxX * w;
+    float cy1 = params.contentMaxY * h;
+    float cw = max(cx1 - cx0, 1.0);
+    float ch = max(cy1 - cy0, 1.0);
+
+    // "Cover" mapping: blow the content up until it covers the whole frame,
+    // then read from it. This is what the margin shows — the same picture,
+    // enlarged and blurred, which is the familiar look from other editors.
+    float scale = max(w / cw, h / ch);
+    float2 frameCenter = float2(w, h) * 0.5;
+    float2 contentCenter = float2(cx0 + cw * 0.5, cy0 + ch * 0.5);
+    float2 src = contentCenter + (float2(gid) + 0.5 - frameCenter) / scale;
+
+    // Sparse box blur. Taps are spread over the radius rather than sampling
+    // every pixel: the content is already magnified by `scale`, so the high
+    // frequencies are gone and a dense kernel would only cost time.
+    const int kTaps = 4; // (2*4+1)^2 = 81 samples
+    float step = max(params.blurRadius / float(kTaps), 1.0);
+    float3 sum = float3(0.0);
+    float count = 0.0;
+    for (int dy = -kTaps; dy <= kTaps; ++dy) {
+        for (int dx = -kTaps; dx <= kTaps; ++dx) {
+            float2 p = src + float2(float(dx), float(dy)) * step;
+            // Clamp into the content rect: never sample the margin itself,
+            // otherwise the fill colour bleeds in and the edges go dark.
+            p.x = clamp(p.x, cx0, cx1 - 1.0);
+            p.y = clamp(p.y, cy0, cy1 - 1.0);
+            sum += inTexture.read(uint2(uint(p.x), uint(p.y))).rgb;
+            count += 1.0;
+        }
+    }
+    float3 blurred = count > 0.0 ? sum / count : fill;
+    outTexture.write(float4(blurred, 1.0), gid);
+}

@@ -47,6 +47,10 @@ public final class MosaicRenderer: NSObject {
     /// （ライブラリにカーネルが無い環境では nil のままとし、`renderColorGrade` は
     /// 補正を掛けずに入力をそのままコピーする。書き出し自体は止めない）。
     private let colorGradeRenderer: ColorGradeRenderer?
+    /// レターボックス（余白）を塗るカーネルのラッパー。`colorGradeRenderer` と同じく
+    /// 生成に失敗しても nil のままフェイルソフトする（余白が黒のままになるだけで、
+    /// 書き出し自体は止めない）。
+    private let letterboxRenderer: LetterboxRenderer?
     /// 向き（90 度単位の回転 + 左右反転）の焼き込みカーネルのラッパー。`colorGradeRenderer`
     /// と同じ理由でフェイルソフトする（ライブラリにカーネルが無い環境では nil のままとし、
     /// `renderOriented` は向きを掛けずに入力をそのままコピーする）。
@@ -115,6 +119,7 @@ public final class MosaicRenderer: NSObject {
             device: device, library: library, commandQueue: queue)
         self.textRenderer = try? TextOverlayRenderer(device: device, library: library, commandQueue: queue)
         self.colorGradeRenderer = try? ColorGradeRenderer(device: device, library: library, commandQueue: queue)
+        self.letterboxRenderer = try? LetterboxRenderer(device: device, library: library, commandQueue: queue)
         self.orientationRenderer = try? OrientationRenderer(device: device, library: library, commandQueue: queue)
         super.init()
     }
@@ -387,6 +392,42 @@ public final class MosaicRenderer: NSObject {
         return colorGradeRenderer.render(
             input: input, output: output, grade: grade, waitForCompletion: waitForCompletion
         )
+    }
+
+    /// レターボックス（余白）を塗って `output` へ書く。
+    ///
+    /// **`input` は必ずモザイクを焼いた後のフレームであること。** ぼかしは同じ
+    /// テクスチャを読んで作るので、焼く前を渡すと素顔が余白へ拡大されて出る
+    /// （`TimelineBackground` の型 doc）。
+    ///
+    /// **呼び出し側が「余白があるか」「黒以外か」を見て呼ぶかどうかを決めること**
+    /// （`renderColorGrade` / `renderOriented` と同じ契約。ゼロコスト経路の判断は
+    /// 呼び出し側の責務）。カーネルが無い環境では入力をそのままコピーする。
+    ///
+    /// - Parameter contentRect: 素材が置かれている範囲（正規化・左上原点）。
+    ///   ここの中は 1 ピクセルも変えない。
+    @discardableResult
+    public func renderLetterbox(
+        input: MTLTexture,
+        into output: MTLTexture,
+        contentRect: CGRect,
+        background: TimelineBackground,
+        waitForCompletion: Bool = false
+    ) -> Bool {
+        guard let letterboxRenderer else {
+            copy(from: input, to: output, waitForCompletion: waitForCompletion)
+            return false
+        }
+        let normalized = background.clamped
+        let radius = normalized.usesBlur
+            ? LetterboxRenderer.blurRadius(
+                strength: normalized.blurStrength,
+                frameSize: CGSize(width: input.width, height: input.height))
+            : 0
+        return letterboxRenderer.render(
+            input: input, output: output,
+            fill: .init(contentRect: contentRect, color: normalized.fillColor, blurRadius: radius),
+            waitForCompletion: waitForCompletion)
     }
 
     /// `input` へ向き `orientation` を掛け、`output` へ書く（S8 の `ClipOrientation` の

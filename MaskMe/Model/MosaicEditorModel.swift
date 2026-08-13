@@ -2372,6 +2372,9 @@ public final class MosaicEditorModel: ObservableObject {
                 audioMix: audioMix,
                 hasBackgroundAudio: hasBackgroundAudio,
                 renderLayout: renderLayout,
+                // 余白の埋め方はプレビューと同じ値を渡す（片方だけ変わると、
+                // 画面では色が付いているのに書き出すと黒帯、という食い違いになる）。
+                letterbox: timeline.background,
                 faceEnabled: faceMosaicOn,
                 objectEnabled: objectMosaicOn,
                 backgroundEnabled: backgroundMosaicOn,

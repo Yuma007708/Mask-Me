@@ -50,13 +50,16 @@ final class TimelineBackgroundTests: XCTestCase {
         XCTAssertEqual(broken.blurStrength, 0.6, accuracy: 1e-9)
     }
 
-    /// **ぼかしの強さに 0 を許さない。** 0 を許すと「ぼかしを選んだのに何も変わらない」
-    /// 状態が作れ、設定が壊れているのか仕様なのか区別できなくなる。
-    func test_ぼかしの強さは0にならない() {
+    /// **ぼかしの強さに弱すぎる値を許さない。** 0 だと「選んだのに何も変わらない」、
+    /// 0.2 程度だと余白にほぼ鮮明な拡大コピーが出て「同じ絵が二重に出ている」ようにしか
+    /// 見えない（実際に画で確認した。`TimelineBackground.clamped` の doc 参照）。
+    func test_ぼかしの強さは弱すぎる値にならない() {
         XCTAssertGreaterThanOrEqual(
-            TimelineBackground(kind: .blur, blurStrength: 0).clamped.blurStrength, 0.05)
+            TimelineBackground(kind: .blur, blurStrength: 0).clamped.blurStrength, 0.25)
         XCTAssertGreaterThanOrEqual(
-            TimelineBackground(kind: .blur, blurStrength: -5).clamped.blurStrength, 0.05)
+            TimelineBackground(kind: .blur, blurStrength: 0.1).clamped.blurStrength, 0.25)
+        XCTAssertGreaterThanOrEqual(
+            TimelineBackground(kind: .blur, blurStrength: -5).clamped.blurStrength, 0.25)
         XCTAssertEqual(TimelineBackground(kind: .blur, blurStrength: 99).clamped.blurStrength, 1,
                        accuracy: 1e-9)
     }

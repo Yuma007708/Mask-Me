@@ -313,3 +313,36 @@ public struct TimelineRenderLayout: Equatable, Sendable {
         mask.oriented(stillOrientation)
     }
 }
+
+extension TimelineRenderLayout {
+    /// 全クリップの配置矩形の**和**（合成フレーム基準・正規化）。
+    ///
+    /// レターボックス（余白）を塗る範囲を決めるために使う。**「どのクリップも
+    /// 描かない場所」だけが余白**であり、その外側だけを塗れば素材の上に塗ってしまう
+    /// 事故が構造的に起きない（＝モザイクを塗り潰して顔を出す形の事故を防げる）。
+    ///
+    /// 時刻ごとの矩形ではなく全体の和にしてあるのは、クリップの切り替わりで
+    /// 余白の形が飛ぶ（黒帯が出たり消えたりする）のを避けるため。
+    ///
+    /// 配置が 1 つも無い（無変換構成）ときは単位矩形＝**余白なし**を返す。
+    /// これにより呼び出し側は「和が単位矩形なら塗るものが無い」で早期に降りられる。
+    public var contentBounds: CGRect {
+        guard var union = placements.values.first else { return Self.unitRect }
+        for rect in placements.values.dropFirst() {
+            union = union.union(rect)
+        }
+        // 数値誤差で 1.0000001 のような値になっても「余白なし」と読めるようにする。
+        return union.intersection(Self.unitRect)
+    }
+
+    /// 余白があるか（＝塗るものがあるか）。
+    ///
+    /// 判定はピクセルではなく正規化座標で行い、**0.1% 未満のはみ出しは無視**する。
+    /// 丸め誤差で 1px の帯が出るたびに 1 パス増えるのを避けるため。
+    public var hasLetterbox: Bool {
+        let bounds = contentBounds
+        let epsilon: CGFloat = 0.001
+        return bounds.minX > epsilon || bounds.minY > epsilon
+            || bounds.maxX < 1 - epsilon || bounds.maxY < 1 - epsilon
+    }
+}

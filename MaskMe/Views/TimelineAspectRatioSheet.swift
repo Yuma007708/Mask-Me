@@ -76,7 +76,7 @@ struct TimelineAspectRatioSheet: View {
                             var next = model.timeline.background
                             next.blurStrength = newValue
                             model.setLetterboxBackground(next)
-                        }), in: 0.05...1)
+                        }), in: 0.25...1)
                         .accessibilityIdentifier("editor.background.blurStrength")
                 }
             }

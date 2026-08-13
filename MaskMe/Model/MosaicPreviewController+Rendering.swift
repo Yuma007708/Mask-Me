@@ -136,14 +136,23 @@ extension MosaicPreviewController {
         let mosaicedTexture = backgroundMosaicApplied(to: result.texture, pixelBuffer: pixelBuffer,
                                                        model: model, mosaicActive: mosaicActive)
 
+        // レターボックス（余白）の塗り（S13）。**モザイクの後・テキストの前**。
+        // 順序の理由と「塗らない条件」は `LetterboxCompositor` の型 doc にある。
+        // **書き出しと同じ合成手順・同じ判定を通す**ので、画面と書き出しで
+        // 片方だけ塗られることはない。
+        let letterboxedTexture = LetterboxCompositor.apply(
+            background: model.timeline.background,
+            contentRect: model.renderLayout.contentBounds,
+            renderer: renderer, input: mosaicedTexture)
+
         // テキスト（E3-2）はモザイクの適用区間（S10）とは独立。「モザイク → テキスト」の
         // 順で常に最後に重ねる（逆順だと顔に被った文字がモザイクで潰れる）。
         // 「どれが出ているか」はコア層の `visibleTextItems` だけが決める。
         let textItems = model.timeline.visibleTextItems(atComposition: timeSec, totalDuration: model.mapping.totalDuration)
         let texturedTexture = textItems.isEmpty
-            ? mosaicedTexture
+            ? letterboxedTexture
             : TextOverlayCompositor.apply(items: textItems, at: timeSec, renderer: renderer,
-                                          cache: textOverlayCache, input: mosaicedTexture)
+                                          cache: textOverlayCache, input: letterboxedTexture)
 
         // 無料プランの透かし（課金 P2）。「モザイク → テキスト → 透かし」の順で最後に重ねる。
         //
