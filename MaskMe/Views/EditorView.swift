@@ -22,6 +22,9 @@ struct EditorView: View {
     @State private var showDiscardConfirm = false
     /// エクスポート時の速度／品質選択ダイアログ表示フラグ。
     @State private var showSpeedDialog = false
+    /// 購入画面の提示。開いた理由（`paywallReason`）はアラートから受け取って渡す。
+    @State private var showPaywall = false
+    @State private var paywallReason: String?
     /// 動画下書きの更新先 ID（同一セッションは上書き保存）。
     @State private var videoDraftID: UUID?
     /// テキストの見た目設定シート（E3-3b）の提示対象。プレビュー上の選択から開く。
@@ -211,6 +214,28 @@ struct EditorView: View {
             Button("OK", role: .cancel) {}
         } message: {
             Text(model.errorMessage ?? "")
+        }
+        // Pro を買えば解ける制限に当たったとき。**行き止まりにしない**——
+        // 「Proにアップグレードすれば」と書いてあるのに買う手段が無いのが、
+        // 課金アプリでいちばん質の悪い行き止まりになる。
+        .alert(
+            "無料プランの制限",
+            isPresented: Binding(
+                get: { model.paywallPrompt != nil },
+                set: { if !$0 { model.paywallPrompt = nil } }
+            )
+        ) {
+            Button("Pro を見る") {
+                paywallReason = model.paywallPrompt
+                model.paywallPrompt = nil
+                showPaywall = true
+            }
+            Button("閉じる", role: .cancel) { model.paywallPrompt = nil }
+        } message: {
+            Text(model.paywallPrompt ?? "")
+        }
+        .sheet(isPresented: $showPaywall) {
+            PaywallView(reason: paywallReason)
         }
         // テキストの見た目設定シート（E3-3b）。プレビュー上でテキストを選び、
         // `TextOverlayEditView` の鉛筆ボタンから開く。提示条件・対象の解決は

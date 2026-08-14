@@ -360,6 +360,12 @@ public final class MosaicEditorModel: ObservableObject {
     @Published public var exportSpeed: ExportSpeed = .balanced
     @Published public var didSave = false
     @Published public var errorMessage: String?
+    /// **Pro を買えば解ける制限に当たった**ときの案内文（それ以外は nil）。
+    ///
+    /// `errorMessage` と分けているのは、出口が違うため。`errorMessage` は
+    /// 「OK」で閉じるだけの行き止まりだが、こちらは購入画面への導線を出す必要がある。
+    /// 同じ入れ物に混ぜると、通信エラーにまで「Pro を見る」が出てしまう。
+    @Published public var paywallPrompt: String?
     /// キャンセル要求を出してから書き出しが実際に畳まれるまでの状態。
     ///
     /// `requestMediaDataWhenReady` のブロックは writer 入力が ready になるまで
@@ -2285,10 +2291,7 @@ public final class MosaicEditorModel: ObservableObject {
         // ずれで食い違う）。解像度超過（`.exceedsResolution`）は止めない
         // （`TimelineCompositionBuilder.build` が既に縮小した `videoComposition` /
         // `outputSize` を組んでいるので、ここでは何もしなくてよい）。
-        if let restrictionMessage = durationRestrictionMessage {
-            errorMessage = restrictionMessage
-            return
-        }
+        if presentPaywallIfRestricted() { return }
         guard let renderer else { return }
         // 書き出しは原寸のまま tmp へ書く。書き終わってから容量不足で失敗するより、
         // 開始前に見積もりと空き容量を比べて弾く（判断は core の純関数）。
@@ -2423,7 +2426,23 @@ public final class MosaicEditorModel: ObservableObject {
     private var durationRestrictionMessage: String? {
         guard case .exceedsDuration(let limit) = exportRestriction else { return nil }
         return "無料プランで書き出せる長さは\(Int(limit))秒までです。"
-            + "Proにアップグレードすると制限なく書き出せます。"
+    }
+
+    /// 無料プランの制限で書き出しを止めるべきなら、案内文を `paywallPrompt` に載せて
+    /// `true` を返す（止めないときは何もせず `false`）。
+    ///
+    /// **`errorMessage` ではなく `paywallPrompt` に載せる。** これは Pro を買えば解ける
+    /// 制限なので、「OK」で閉じるだけの行き止まりにせず購入画面への導線を出す。
+    /// 逆に、通信エラーのような買っても解けないものをここへ載せてはいけない
+    /// （「Pro を見る」が的外れな場面で出る）。
+    ///
+    /// `exportVideo()` の途中から切り出してあるのは、書き出し経路全体を動かさずに
+    /// この分岐だけをテストできるようにするため（`PaywallWiringTests`）。
+    @discardableResult
+    func presentPaywallIfRestricted() -> Bool {
+        guard let restrictionMessage = durationRestrictionMessage else { return false }
+        paywallPrompt = restrictionMessage
+        return true
     }
 
     /// 空き容量が足りないときのユーザー向け文言（足りていれば nil）。

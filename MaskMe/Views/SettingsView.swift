@@ -6,9 +6,14 @@ struct SettingsView: View {
     /// 端末カメラの対応組み合わせ（非対応の解像度 × fps は選択肢に出さない）。
     private let supportedCaptureCombinations = CaptureCapabilities.supportedCombinations()
 
+    /// Pro の状態。`Entitlements.shared` は読み取り専用なので、変化は publisher で受ける。
+    @State private var isPro = Entitlements.shared.isPro
+    @State private var showPaywall = false
+
     var body: some View {
         NavigationStack {
             Form {
+                proSection
                 presetsSection
                 captureSection
                 parametersSection
@@ -17,6 +22,38 @@ struct SettingsView: View {
             .appSheetBackground()
             .navigationTitle("設定")
             .navigationBarTitleDisplayMode(.large)
+            .onReceive(Entitlements.shared.isProPublisher) { isPro = $0 }
+            .sheet(isPresented: $showPaywall) { PaywallView() }
+        }
+    }
+
+    // MARK: - Pro
+
+    /// **購入画面への常設の導線。** 制限に当たったときのアラートだけを入口にすると、
+    /// 「一度断ったらもう買えない」状態になる。加えて `PaywallView` には購入の復元が
+    /// あるので、機種変更したユーザーがここから辿れる必要がある（復元手段が
+    /// 見つからないのは App Store のリジェクト理由）。
+    private var proSection: some View {
+        Section {
+            Button {
+                showPaywall = true
+            } label: {
+                HStack {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(isPro ? "Mask Me Pro をご利用中" : "Mask Me Pro")
+                            .font(.headline)
+                        Text(isPro
+                             ? "透かしなし・制限なしで書き出せます。"
+                             : "透かしなし・長さと画質の制限なしで書き出せます。")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer(minLength: 8)
+                    Image(systemName: isPro ? "checkmark.seal.fill" : "chevron.right")
+                        .foregroundStyle(isPro ? AppTheme.accent : .secondary)
+                }
+            }
+            .accessibilityIdentifier("settings.pro")
         }
     }
 
